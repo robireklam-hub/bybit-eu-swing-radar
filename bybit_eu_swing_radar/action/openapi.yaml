@@ -1,0 +1,391 @@
+openapi: 3.1.0
+info:
+  title: Bybit EU Swing Radar API
+  version: 0.1.0
+  description: Read-only swing setup scanner using cached Bybit EU and Coinalyze data.
+servers:
+  - url: https://YOUR-RADAR-DOMAIN.example.com
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Check service health and data freshness
+      responses:
+        "200":
+          description: Health status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+  /v1/scan:
+    get:
+      operationId: getSwingScan
+      summary: Return ranked long and short swing candidates
+      parameters:
+        - in: query
+          name: direction
+          schema:
+            type: string
+            enum: [long, short, both]
+            default: both
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 10
+            default: 3
+        - in: query
+          name: min_score
+          schema:
+            type: number
+            minimum: 0
+            maximum: 100
+            default: 70
+      responses:
+        "200":
+          description: Ranked scan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScanResponse"
+  /v1/market-regime:
+    get:
+      operationId: getMarketRegime
+      summary: Return current BTC and altcoin market regime
+      responses:
+        "200":
+          description: Market regime
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MarketRegime"
+  /v1/setup/{symbol}:
+    get:
+      operationId: getSymbolSetup
+      summary: Return detailed bullish and bearish scenarios for one symbol
+      parameters:
+        - in: path
+          name: symbol
+          required: true
+          schema:
+            type: string
+          description: Bybit symbol, for example BTCUSDC
+      responses:
+        "200":
+          description: Symbol setup
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Setup"
+        "404":
+          description: Symbol not found
+  /v1/watchlist:
+    get:
+      operationId: getWatchlist
+      summary: Return setups close to activation
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 20
+            default: 10
+      responses:
+        "200":
+          description: Watchlist
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data_as_of:
+                    type: string
+                    format: date-time
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Setup"
+  /v1/alerts:
+    get:
+      operationId: getRadarAlerts
+      summary: Return recent setup state changes and anomalies
+      parameters:
+        - in: query
+          name: since
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
+      responses:
+        "200":
+          description: Alerts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data_as_of:
+                    type: string
+                    format: date-time
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Alert"
+  /v1/data-status:
+    get:
+      operationId: getDataStatus
+      summary: Return source-level freshness, latency and missing data
+      responses:
+        "200":
+          description: Data source status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  checked_at:
+                    type: string
+                    format: date-time
+                  sources:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/DataSourceStatus"
+components:
+  securitySchemes:
+    RadarApiKey:
+      type: apiKey
+      in: header
+      name: X-Radar-Key
+  schemas:
+    Health:
+      type: object
+      required: [status, checked_at, data_as_of]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded, down]
+        checked_at:
+          type: string
+          format: date-time
+        data_as_of:
+          type: string
+          format: date-time
+        message:
+          type: string
+    MarketRegime:
+      type: object
+      required: [data_as_of, btc_regime, alt_breadth, volatility_regime]
+      properties:
+        data_as_of:
+          type: string
+          format: date-time
+        data_quality:
+          type: string
+          enum: [GOOD, PARTIAL, DEGRADED]
+        btc_regime:
+          type: string
+        btc_structure_1d:
+          type: string
+        btc_structure_4h:
+          type: string
+        alt_breadth:
+          type: number
+        volatility_regime:
+          type: string
+        preferred_side:
+          type: string
+          enum: [long, short, neutral]
+        notes:
+          type: array
+          items:
+            type: string
+    ScanResponse:
+      type: object
+      required: [data_as_of, data_quality, market_regime, longs, shorts]
+      properties:
+        data_as_of:
+          type: string
+          format: date-time
+        data_as_of_budapest:
+          type: string
+        data_quality:
+          type: string
+          enum: [GOOD, PARTIAL, DEGRADED]
+        market_regime:
+          $ref: "#/components/schemas/MarketRegime"
+        longs:
+          type: array
+          items:
+            $ref: "#/components/schemas/Setup"
+        shorts:
+          type: array
+          items:
+            $ref: "#/components/schemas/Setup"
+        exclusions:
+          type: array
+          items:
+            type: object
+            properties:
+              symbol:
+                type: string
+              reason:
+                type: string
+    Setup:
+      type: object
+      required:
+        - symbol
+        - side
+        - state
+        - setup_score
+        - expansion_score
+        - direction_score
+        - quality_score
+        - data_as_of
+      properties:
+        symbol:
+          type: string
+        base_asset:
+          type: string
+        quote_asset:
+          type: string
+        side:
+          type: string
+          enum: [long, short, neutral]
+        state:
+          type: string
+          enum: [WATCH, ARMED, TRIGGERED, MANAGED, INVALIDATED, EXPIRED]
+        grade:
+          type: string
+          enum: [A, B, WATCH, NO_TRADE]
+        confidence:
+          type: string
+          enum: [LOW, MEDIUM, HIGH]
+        last_price:
+          type: number
+        shortable:
+          type: boolean
+        execution_modes:
+          type: array
+          items:
+            type: string
+        setup_type:
+          type: string
+        thesis:
+          type: array
+          items:
+            type: string
+        expansion_score:
+          type: number
+        direction_score:
+          type: number
+        quality_score:
+          type: number
+        setup_score:
+          type: number
+        trigger:
+          $ref: "#/components/schemas/PriceCondition"
+        entry_zone:
+          $ref: "#/components/schemas/PriceZone"
+        stop:
+          type: number
+        invalidation:
+          type: string
+        targets:
+          type: array
+          items:
+            type: number
+        expected_rr:
+          type: number
+        expected_holding_days:
+          type: string
+        metrics:
+          type: object
+          additionalProperties: true
+        bullish_scenario:
+          type: string
+        bearish_scenario:
+          type: string
+        weakest_point:
+          type: string
+        risks:
+          type: array
+          items:
+            type: string
+        data_quality:
+          type: string
+          enum: [GOOD, PARTIAL, DEGRADED]
+        missing_data:
+          type: array
+          items:
+            type: string
+        data_as_of:
+          type: string
+          format: date-time
+    PriceCondition:
+      type: object
+      properties:
+        timeframe:
+          type: string
+        condition:
+          type: string
+        price:
+          type: number
+        requires_close:
+          type: boolean
+        volume_confirmation:
+          type: string
+    PriceZone:
+      type: object
+      properties:
+        low:
+          type: number
+        high:
+          type: number
+    Alert:
+      type: object
+      properties:
+        id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        symbol:
+          type: string
+        previous_state:
+          type: string
+        new_state:
+          type: string
+        alert_type:
+          type: string
+        message:
+          type: string
+        severity:
+          type: string
+          enum: [info, warning, critical]
+    DataSourceStatus:
+      type: object
+      properties:
+        source:
+          type: string
+        status:
+          type: string
+          enum: [ok, delayed, partial, down]
+        data_as_of:
+          type: string
+          format: date-time
+        latency_seconds:
+          type: integer
+        missing_fields:
+          type: array
+          items:
+            type: string
+security:
+  - RadarApiKey: []
