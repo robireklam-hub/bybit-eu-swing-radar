@@ -20,7 +20,7 @@ def require_api_key(x_radar_key: str = Header(..., alias="X-Radar-Key")) -> None
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
-@app.get("/health", dependencies=[Depends(require_api_key)])
+@app.get("/health")
 async def health() -> dict:
     now = datetime.now(timezone.utc)
     try:
