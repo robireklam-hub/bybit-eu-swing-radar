@@ -5,7 +5,8 @@ Scope:
 - Quote asset must be USDC
 - Long execution: USDC spot
 - Short execution: USDC spot margin only, and only when the base asset is
-  currently borrowable according to the authenticated Bybit account endpoint
+  borrowable according to Bybit's public Spot Margin VIP data and the USDC
+  instrument currently exposes margin trading
 - Coinalyze is used as contextual derivatives data; it is not treated as
   Bybit-EU-specific unless the selected Coinalyze market is Bybit.
 
@@ -16,8 +17,6 @@ Railway cron start command:
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import hmac
 import json
 import math
 import os
@@ -28,7 +27,6 @@ import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable
-from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 import asyncpg
@@ -67,8 +65,6 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 BYBIT_BASE_URL = os.getenv("BYBIT_BASE_URL", "https://api.bybit.eu").rstrip("/")
 COINALYZE_BASE_URL = os.getenv("COINALYZE_BASE_URL", "https://api.coinalyze.net/v1").rstrip("/")
 COINALYZE_API_KEY = os.getenv("COINALYZE_API_KEY", "")
-BYBIT_API_KEY = os.getenv("BYBIT_API_KEY", "")
-BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 MIN_TURNOVER_USDC = env_float("MIN_TURNOVER_USDC", 1_000_000.0)
 MAX_SPREAD_BPS = env_float("MAX_SPREAD_BPS", 35.0)
 MAX_UNIVERSE = env_int("MAX_UNIVERSE", 30)
@@ -130,7 +126,7 @@ class Analysis:
     derivatives: dict[str, Any]
     missing_data: list[str]
     shortable: bool = False
-    borrow_available: float = 0.0
+    max_borrowing_amount: float = 0.0
 
 
 class BybitAPI:
@@ -145,31 +141,6 @@ class BybitAPI:
             raise RuntimeError(f"Bybit error {payload.get('retCode')}: {payload.get('retMsg')}")
         return payload
 
-    async def private_get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        if not BYBIT_API_KEY or not BYBIT_API_SECRET:
-            raise RuntimeError("BYBIT_API_KEY/BYBIT_API_SECRET are not configured")
-        params = params or {}
-        query = urlencode(sorted((key, str(value)) for key, value in params.items()))
-        timestamp = str(int(time.time() * 1000))
-        recv_window = "10000"
-        pre_sign = f"{timestamp}{BYBIT_API_KEY}{recv_window}{query}"
-        signature = hmac.new(
-            BYBIT_API_SECRET.encode("utf-8"),
-            pre_sign.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
-        headers = {
-            "X-BAPI-API-KEY": BYBIT_API_KEY,
-            "X-BAPI-TIMESTAMP": timestamp,
-            "X-BAPI-RECV-WINDOW": recv_window,
-            "X-BAPI-SIGN": signature,
-        }
-        response = await self.client.get(f"{BYBIT_BASE_URL}{path}", params=params, headers=headers)
-        response.raise_for_status()
-        payload = response.json()
-        if payload.get("retCode") != 0:
-            raise RuntimeError(f"Bybit private error {payload.get('retCode')}: {payload.get('retMsg')}")
-        return payload
 
     async def instruments(self) -> list[dict[str, Any]]:
         payload = await self.public_get("/v5/market/instruments-info", {"category": "spot"})
@@ -204,10 +175,34 @@ class BybitAPI:
             )
         return bars
 
-    async def collateral_info(self) -> dict[str, dict[str, Any]]:
-        payload = await self.private_get("/v5/account/collateral-info")
+    async def vip_margin_data(self) -> dict[str, dict[str, Any]]:
+        """Return public Spot Margin borrowability for the No-VIP tier.
+
+        This endpoint does not require an API key. It reports whether a coin is
+        borrowable and its maximum borrowing amount. Pair-level
+        ``marginTrading`` from instruments-info is checked separately because
+        Bybit can temporarily set it to ``none`` when lending inventory is
+        unavailable.
+        """
+        payload = await self.public_get(
+            "/v5/spot-margin-trade/data",
+            {"vipLevel": "No VIP"},
+        )
+        raw_result = payload.get("result", {})
+        groups = raw_result.get("vipCoinList") or raw_result.get("list") or []
+        rows: list[dict[str, Any]] = []
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            if "currency" in group:
+                rows.append(group)
+            else:
+                nested = group.get("list", [])
+                if isinstance(nested, list):
+                    rows.extend(item for item in nested if isinstance(item, dict))
+
         result: dict[str, dict[str, Any]] = {}
-        for item in payload.get("result", {}).get("list", []):
+        for item in rows:
             currency = str(item.get("currency", "")).upper()
             if currency:
                 result[currency] = item
@@ -685,25 +680,26 @@ async def enrich_coinalyze(analyses: list[Analysis], api: CoinalyzeAPI) -> tuple
 
 
 async def apply_shortability(analyses: list[Analysis], bybit: BybitAPI) -> tuple[bool, str | None]:
-    if not BYBIT_API_KEY or not BYBIT_API_SECRET:
-        for analysis in analyses:
-            analysis.missing_data.append("Bybit private borrowability not configured")
-        return False, "BYBIT_API_KEY/BYBIT_API_SECRET missing"
     try:
-        collateral = await bybit.collateral_info()
+        margin_data = await bybit.vip_margin_data()
+        if not margin_data:
+            raise RuntimeError("Bybit public Spot Margin data returned no currencies")
         for analysis in analyses:
-            info = collateral.get(analysis.instrument.base, {})
+            info = margin_data.get(analysis.instrument.base, {})
             borrowable = bool(info.get("borrowable", False))
-            available = safe_float(info.get("availableToBorrow"), 0.0)
-            margin_pair = analysis.instrument.margin_trading.lower() != "none"
-            analysis.shortable = bool(borrowable and available > 0 and margin_pair)
-            analysis.borrow_available = available
+            max_borrow = safe_float(info.get("maxBorrowingAmount"), 0.0)
+            margin_flag = analysis.instrument.margin_trading.strip().lower()
+            margin_pair = margin_flag not in {"", "none"}
+            analysis.shortable = bool(borrowable and max_borrow > 0 and margin_pair)
+            analysis.max_borrowing_amount = max_borrow
             if margin_pair and not analysis.shortable:
-                analysis.missing_data.append("USDC spot margin base coin not currently borrowable")
+                analysis.missing_data.append(
+                    "USDC spot-margin base coin is not borrowable in public Bybit margin data"
+                )
         return True, None
     except Exception as exc:
         for analysis in analyses:
-            analysis.missing_data.append("Bybit borrowability check failed")
+            analysis.missing_data.append("Bybit public Spot Margin borrowability check failed")
         return False, str(exc)
 
 
@@ -775,7 +771,7 @@ def build_setup(analysis: Analysis, side: str, now: datetime) -> dict[str, Any] 
             f"4H structure: {analysis.structure_4h}",
             f"1D structure: {analysis.structure_1d}",
             f"BTC-relative 20x4H strength: {analysis.relative_strength_4h:+.2f}%",
-            f"Borrowable base amount reported by Bybit: {analysis.borrow_available:g} {instrument.base}",
+            f"Public Bybit max borrowing amount: {analysis.max_borrowing_amount:g} {instrument.base}",
         ]
         bullish = "Reclaim of the range low and a 4H close back above the recent lower high invalidates short continuation."
         bearish = "4H acceptance below the prior 20-bar range low with expanding volume activates the spot-margin short."
@@ -791,7 +787,7 @@ def build_setup(analysis: Analysis, side: str, now: datetime) -> dict[str, Any] 
         "Coinalyze derivatives context may represent another venue or an aggregate market.",
     ]
     if side == "short":
-        risks.append("Spot-margin borrow inventory and borrow cost can change before execution.")
+        risks.append("Public borrowability is not an execution guarantee; inventory and borrow cost can change before entry.")
     if analysis.volume_ratio < 1.0:
         risks.append("Current 4H volume has not yet confirmed expansion.")
 
@@ -805,7 +801,7 @@ def build_setup(analysis: Analysis, side: str, now: datetime) -> dict[str, Any] 
         "volume_ratio_4h": round(analysis.volume_ratio, 3),
         "relative_strength_vs_btc_20x4h_pct": round(analysis.relative_strength_4h, 3),
         "margin_trading_flag": instrument.margin_trading,
-        "borrow_available_base": analysis.borrow_available,
+        "max_borrowing_amount_base": analysis.max_borrowing_amount,
         "derivatives": analysis.derivatives,
     }
 
@@ -891,11 +887,12 @@ def build_market_regime(analyses: list[Analysis], now: datetime, coinalyze_ok: b
     notes = [
         "Universe is strictly Bybit EU spot pairs quoted in USDC.",
         "Short candidates are strictly USDC spot-margin shorts; derivatives are contextual only.",
+        "Shortability uses public Bybit margin eligibility and maximum borrowing data; final inventory must be rechecked before entry.",
     ]
     if not coinalyze_ok:
         notes.append("Coinalyze enrichment is partial or unavailable.")
     if not borrow_ok:
-        notes.append("Private Bybit borrowability verification is unavailable; short list is suppressed.")
+        notes.append("Public Bybit Spot Margin borrowability data is unavailable; short list is suppressed.")
     return {
         "data_as_of": now.isoformat(),
         "data_quality": quality,
@@ -944,7 +941,7 @@ async def run() -> None:
     started = datetime.now(timezone.utc)
     timeout = httpx.Timeout(30.0, connect=15.0)
     limits = httpx.Limits(max_connections=10, max_keepalive_connections=10)
-    async with httpx.AsyncClient(timeout=timeout, limits=limits, headers={"User-Agent": "Bybit-EU-Swing-Radar/0.2"}) as client:
+    async with httpx.AsyncClient(timeout=timeout, limits=limits, headers={"User-Agent": "Bybit-EU-Swing-Radar/0.2.1"}) as client:
         bybit = BybitAPI(client)
         coinalyze = CoinalyzeAPI(client)
 
@@ -1028,7 +1025,7 @@ async def run() -> None:
                     "status": "ok" if borrow_ok else "partial",
                     "data_as_of": now.isoformat() if borrow_ok else None,
                     "latency_seconds": 0 if borrow_ok else None,
-                    "missing_fields": [] if borrow_ok else [borrow_error or "borrowability unavailable"],
+                    "missing_fields": [] if borrow_ok else [borrow_error or "public borrowability unavailable"],
                 },
             ],
         }
