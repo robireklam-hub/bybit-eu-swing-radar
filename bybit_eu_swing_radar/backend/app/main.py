@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 
 from app.config import settings
@@ -7,8 +8,8 @@ from app.repository import RadarRepository
 
 app = FastAPI(
     title="Bybit EU Swing Radar API",
-    version="0.1.0",
-    description="Read-only cached swing setup API.",
+    version="0.2.0",
+    description="Read-only cached USDC-only swing setup API.",
 )
 
 repo = RadarRepository()
@@ -29,13 +30,15 @@ async def health() -> dict:
     except Exception as exc:
         bybit_ok = False
         upstream = {"error": str(exc)}
-
+    worker_status = await repo.get_data_status()
+    worker_ok = bool(worker_status and worker_status.get("worker", {}).get("status") == "ok")
     return {
         "status": "ok" if bybit_ok else "degraded",
         "checked_at": now.isoformat(),
-        "data_as_of": now.isoformat(),
-        "message": "Scanner cache must be populated by the background worker.",
+        "data_as_of": worker_status.get("checked_at") if worker_status else now.isoformat(),
+        "message": "Scanner cache populated." if worker_ok else "Scanner cache must be populated by the background worker.",
         "bybit_public_api": bybit_ok,
+        "worker_ready": worker_ok,
         "upstream_detail": upstream if not bybit_ok else None,
     }
 
@@ -73,9 +76,13 @@ async def setup(symbol: str):
 
 @app.get("/v1/data-status", dependencies=[Depends(require_api_key)])
 async def data_status():
+    cached = await repo.get_data_status()
+    if cached is not None:
+        return cached
     now = datetime.now(timezone.utc)
     return {
         "checked_at": now.isoformat(),
+        "worker": {"status": "not_run"},
         "sources": [
             {
                 "source": "Bybit EU",
@@ -86,6 +93,13 @@ async def data_status():
             },
             {
                 "source": "Coinalyze",
+                "status": "partial",
+                "data_as_of": None,
+                "latency_seconds": None,
+                "missing_fields": ["Populated by background worker"],
+            },
+            {
+                "source": "Bybit EU Spot Margin",
                 "status": "partial",
                 "data_as_of": None,
                 "latency_seconds": None,
