@@ -65,12 +65,25 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 BYBIT_BASE_URL = os.getenv("BYBIT_BASE_URL", "https://api.bybit.eu").rstrip("/")
 COINALYZE_BASE_URL = os.getenv("COINALYZE_BASE_URL", "https://api.coinalyze.net/v1").rstrip("/")
 COINALYZE_API_KEY = os.getenv("COINALYZE_API_KEY", "")
-MIN_TURNOVER_USDC = env_float("MIN_TURNOVER_USDC", 1_000_000.0)
-MAX_SPREAD_BPS = env_float("MAX_SPREAD_BPS", 35.0)
-MAX_UNIVERSE = env_int("MAX_UNIVERSE", 30)
-COINALYZE_ENRICH_LIMIT = min(env_int("COINALYZE_ENRICH_LIMIT", 9), 9)
+MIN_TURNOVER_USDC = env_float("MIN_TURNOVER_USDC", 100_000.0)
+MAX_SPREAD_BPS = env_float("MAX_SPREAD_BPS", 50.0)
+DISCOVERY_MAX_SPREAD_BPS = env_float("DISCOVERY_MAX_SPREAD_BPS", 200.0)
+MAX_UNIVERSE = min(max(env_int("MAX_UNIVERSE", 30), 10), 50)
+TOP_LIQUID_DISCOVERY = min(max(env_int("TOP_LIQUID_DISCOVERY", 15), 5), MAX_UNIVERSE)
+COINALYZE_ENRICH_LIMIT = min(max(env_int("COINALYZE_ENRICH_LIMIT", 9), 1), 9)
 KLINE_LIMIT = min(max(env_int("KLINE_LIMIT", 220), 100), 1000)
 HTTP_CONCURRENCY = min(max(env_int("HTTP_CONCURRENCY", 5), 1), 10)
+DEFAULT_DISCOVERY_SYMBOLS = {
+    "BTCUSDC", "ETHUSDC", "SOLUSDC", "XRPUSDC",
+    "AVAXUSDC", "APTUSDC", "ADAUSDC", "LINKUSDC", "DOGEUSDC",
+    "SUIUSDC", "LTCUSDC", "DOTUSDC", "BNBUSDC", "BCHUSDC",
+    "AAVEUSDC", "UNIUSDC", "NEARUSDC", "INJUSDC", "ATOMUSDC",
+}
+DISCOVERY_SYMBOLS = {
+    item.strip().upper()
+    for item in os.getenv("DISCOVERY_SYMBOLS", ",".join(sorted(DEFAULT_DISCOVERY_SYMBOLS))).split(",")
+    if item.strip()
+}
 
 
 @dataclass(frozen=True)
@@ -97,6 +110,9 @@ class Instrument:
     bid: float
     ask: float
     spread_bps: float
+    tradeable: bool
+    liquidity_reasons: list[str]
+    discovery_source: str
 
 
 @dataclass
@@ -369,17 +385,26 @@ def round_to_tick(value: float, tick_size: float) -> float:
 
 def build_universe(
     instruments: list[dict[str, Any]], tickers: list[dict[str, Any]]
-) -> tuple[list[Instrument], list[dict[str, str]]]:
+) -> tuple[list[Instrument], list[dict[str, str]], dict[str, Any]]:
+    """Build a broad analysis universe and a strict execution subset.
+
+    All analyzed instruments are Bybit EU spot pairs quoted in USDC. The strict
+    ``tradeable`` flag requires the configured turnover and spread thresholds.
+    Lower-liquidity mandatory symbols remain in discovery as WATCH_ONLY, never
+    as executable signals.
+    """
     ticker_map = {str(item.get("symbol", "")): item for item in tickers}
-    universe: list[Instrument] = []
+    candidates: list[Instrument] = []
     exclusions: list[dict[str, str]] = []
+    active_usdc_count = 0
 
     for raw in instruments:
-        symbol = str(raw.get("symbol", ""))
+        symbol = str(raw.get("symbol", "")).upper()
         base = str(raw.get("baseCoin", "")).upper()
         quote = str(raw.get("quoteCoin", "")).upper()
         if quote != "USDC":
             continue
+        active_usdc_count += 1
         if raw.get("status") != "Trading":
             exclusions.append({"symbol": symbol, "reason": "Not Trading"})
             continue
@@ -403,15 +428,21 @@ def build_universe(
             exclusions.append({"symbol": symbol, "reason": "Invalid bid/ask/last price"})
             continue
         spread_bps = ((ask - bid) / ((ask + bid) / 2.0)) * 10_000.0
-        if turnover < MIN_TURNOVER_USDC:
-            exclusions.append({"symbol": symbol, "reason": f"24h turnover below {MIN_TURNOVER_USDC:.0f} USDC"})
-            continue
-        if spread_bps > MAX_SPREAD_BPS:
-            exclusions.append({"symbol": symbol, "reason": f"Spread {spread_bps:.1f} bps above limit"})
+        if spread_bps > DISCOVERY_MAX_SPREAD_BPS:
+            exclusions.append({
+                "symbol": symbol,
+                "reason": f"Spread {spread_bps:.1f} bps above discovery safety limit",
+            })
             continue
 
+        liquidity_reasons: list[str] = []
+        if turnover < MIN_TURNOVER_USDC:
+            liquidity_reasons.append(f"24h turnover below {MIN_TURNOVER_USDC:.0f} USDC")
+        if spread_bps > MAX_SPREAD_BPS:
+            liquidity_reasons.append(f"Spread {spread_bps:.1f} bps above executable limit")
+        tradeable = not liquidity_reasons
         tick_size = safe_float(raw.get("priceFilter", {}).get("tickSize"), 0.0)
-        universe.append(
+        candidates.append(
             Instrument(
                 symbol=symbol,
                 base=base,
@@ -424,11 +455,51 @@ def build_universe(
                 bid=bid,
                 ask=ask,
                 spread_bps=spread_bps,
+                tradeable=tradeable,
+                liquidity_reasons=liquidity_reasons,
+                discovery_source="mandatory" if symbol in DISCOVERY_SYMBOLS else "market",
             )
         )
 
-    universe.sort(key=lambda item: item.turnover_24h, reverse=True)
-    return universe[:MAX_UNIVERSE], exclusions
+    candidates.sort(key=lambda item: item.turnover_24h, reverse=True)
+    tradeable = [item for item in candidates if item.tradeable]
+    mandatory = [item for item in candidates if item.symbol in DISCOVERY_SYMBOLS]
+    top_liquid = candidates[:TOP_LIQUID_DISCOVERY]
+
+    selected: list[Instrument] = []
+    seen: set[str] = set()
+    for group in (tradeable, mandatory, top_liquid):
+        for item in group:
+            if item.symbol in seen:
+                continue
+            selected.append(item)
+            seen.add(item.symbol)
+            if len(selected) >= MAX_UNIVERSE:
+                break
+        if len(selected) >= MAX_UNIVERSE:
+            break
+
+    # BTC is required for relative-strength context whenever listed.
+    btc = next((item for item in candidates if item.symbol == "BTCUSDC"), None)
+    if btc and btc.symbol not in seen:
+        if len(selected) >= MAX_UNIVERSE:
+            selected[-1] = btc
+        else:
+            selected.append(btc)
+
+    stats = {
+        "active_usdc_pairs": active_usdc_count,
+        "eligible_discovery_pairs": len(candidates),
+        "analysis_universe_size": len(selected),
+        "tradeable_universe_size": sum(1 for item in selected if item.tradeable),
+        "liquidity_blocked_size": sum(1 for item in selected if not item.tradeable),
+        "mandatory_requested": len(DISCOVERY_SYMBOLS),
+        "mandatory_found": sum(1 for item in selected if item.symbol in DISCOVERY_SYMBOLS),
+        "minimum_turnover_usdc": MIN_TURNOVER_USDC,
+        "max_executable_spread_bps": MAX_SPREAD_BPS,
+        "max_discovery_spread_bps": DISCOVERY_MAX_SPREAD_BPS,
+    }
+    return selected, exclusions, stats
 
 
 async def fetch_analysis_bars(
@@ -592,7 +663,14 @@ async def enrich_coinalyze(analyses: list[Analysis], api: CoinalyzeAPI) -> tuple
             analysis.missing_data.append("Coinalyze derivatives data")
         return False, "COINALYZE_API_KEY missing"
 
-    selected_analyses = sorted(analyses, key=lambda item: item.instrument.turnover_24h, reverse=True)[:COINALYZE_ENRICH_LIMIT]
+    selected_analyses = sorted(
+        analyses,
+        key=lambda item: (
+            setup_score(item.expansion_score, abs(item.direction_score), item.quality_score)
+            + (5.0 if item.instrument.symbol in DISCOVERY_SYMBOLS else 0.0)
+        ),
+        reverse=True,
+    )[:COINALYZE_ENRICH_LIMIT]
     try:
         markets = await api.future_markets()
         market_map = select_coinalyze_markets(markets, [item.instrument.base for item in selected_analyses])
@@ -718,6 +796,8 @@ def setup_grade(score: float) -> str:
 
 
 def build_setup(analysis: Analysis, side: str, now: datetime) -> dict[str, Any] | None:
+    if not analysis.instrument.tradeable:
+        return None
     if side == "long" and analysis.direction_score < 20:
         return None
     if side == "short" and (analysis.direction_score > -20 or not analysis.shortable):
@@ -850,7 +930,138 @@ def build_setup(analysis: Analysis, side: str, now: datetime) -> dict[str, Any] 
     }
 
 
-def build_market_regime(analyses: list[Analysis], now: datetime, coinalyze_ok: bool, borrow_ok: bool) -> dict[str, Any]:
+
+def build_watch_setup(analysis: Analysis, now: datetime) -> dict[str, Any]:
+    """Return a Setup-compatible WATCH record, including low-liquidity coins."""
+    instrument = analysis.instrument
+    side = "long" if analysis.direction_score >= 10 else "short" if analysis.direction_score <= -10 else "neutral"
+    directional_strength = abs(analysis.direction_score)
+    score = setup_score(analysis.expansion_score, directional_strength, analysis.quality_score)
+    atr_value = analysis.atr_4h
+    last_price = instrument.last_price
+
+    if side == "short":
+        trigger_price = analysis.range_low
+        entry_low = trigger_price - 0.25 * atr_value
+        entry_high = trigger_price
+        stop = analysis.recent_high + 0.10 * atr_value
+        condition = "4H close below the previous 20-bar range low"
+        invalidation = f"4H close above {round_to_tick(stop, instrument.tick_size)} or reclaim of the recent lower-high structure."
+        targets = [trigger_price - multiple * max(stop - trigger_price, atr_value) for multiple in (1.5, 2.5, 3.5)]
+        bullish_scenario = "A reclaim above the recent lower high cancels the bearish watch thesis."
+        bearish_scenario = "Acceptance below the range low with volume would strengthen the bearish scenario."
+    else:
+        trigger_price = analysis.range_high
+        entry_low = trigger_price
+        entry_high = trigger_price + 0.25 * atr_value
+        stop = analysis.recent_low - 0.10 * atr_value
+        condition = "4H close above the previous 20-bar range high"
+        invalidation = f"4H close below {round_to_tick(stop, instrument.tick_size)} or loss of the recent higher-low structure."
+        targets = [trigger_price + multiple * max(trigger_price - stop, atr_value) for multiple in (1.5, 2.5, 3.5)]
+        bullish_scenario = "Acceptance above the range high with volume would strengthen the bullish scenario."
+        bearish_scenario = "Rejection at the range high and loss of the recent swing low cancels the bullish watch thesis."
+
+    liquidity_blocked = not instrument.tradeable
+    reasons = list(instrument.liquidity_reasons)
+    if side == "short" and not analysis.shortable:
+        reasons.append("USDC spot-margin shortability is not currently verified")
+    if directional_strength < 35:
+        reasons.append("Directional score below executable threshold")
+    if analysis.expansion_score < 55:
+        reasons.append("Expansion score below executable threshold")
+    if analysis.quality_score < 60:
+        reasons.append("Quality score below executable threshold")
+
+    data_quality = "GOOD" if analysis.derivatives and not analysis.missing_data else "PARTIAL"
+    execution_modes = ["spot_usdc_watch_only"]
+    if side == "short":
+        execution_modes = ["spot_margin_short_usdc_watch_only"]
+
+    return {
+        "symbol": instrument.symbol,
+        "base_asset": instrument.base,
+        "quote_asset": "USDC",
+        "side": side,
+        "state": "WATCH",
+        "grade": "WATCH" if score >= 60 and not liquidity_blocked else "NO_TRADE",
+        "confidence": "MEDIUM" if score >= 70 and data_quality == "GOOD" else "LOW",
+        "last_price": last_price,
+        "shortable": analysis.shortable,
+        "execution_modes": execution_modes,
+        "setup_type": "Extended discovery watch / 20-bar range expansion",
+        "thesis": [
+            f"4H structure: {analysis.structure_4h}",
+            f"1D structure: {analysis.structure_1d}",
+            f"BTC-relative 20x4H strength: {analysis.relative_strength_4h:+.2f}%",
+            "WATCH_ONLY: technical interest is separated from execution quality.",
+        ],
+        "expansion_score": round(analysis.expansion_score, 2),
+        "direction_score": round(analysis.direction_score, 2),
+        "quality_score": round(analysis.quality_score, 2),
+        "setup_score": round(score, 2),
+        "trigger": {
+            "timeframe": "4H",
+            "condition": condition,
+            "price": round_to_tick(trigger_price, instrument.tick_size),
+            "requires_close": True,
+            "volume_confirmation": "Prefer >=1.2x the prior 20-bar average 4H volume",
+        },
+        "entry_zone": {
+            "low": round_to_tick(entry_low, instrument.tick_size),
+            "high": round_to_tick(entry_high, instrument.tick_size),
+        },
+        "stop": round_to_tick(stop, instrument.tick_size),
+        "invalidation": invalidation,
+        "targets": [round_to_tick(value, instrument.tick_size) for value in targets],
+        "expected_rr": 2.5,
+        "expected_holding_days": "2-10",
+        "metrics": {
+            "execution_status": "LIQUIDITY_BLOCKED" if liquidity_blocked else "WATCH_ONLY",
+            "liquidity_reasons": reasons,
+            "turnover_24h_usdc": round(instrument.turnover_24h, 2),
+            "spread_bps": round(instrument.spread_bps, 3),
+            "tradeable": instrument.tradeable,
+            "discovery_source": instrument.discovery_source,
+            "coinalyze_enriched": bool(analysis.derivatives),
+            "margin_trading_flag": instrument.margin_trading,
+            "max_borrowing_amount_base": analysis.max_borrowing_amount,
+            "atr_4h": atr_value,
+            "volume_ratio_4h": round(analysis.volume_ratio, 3),
+            "relative_strength_vs_btc_20x4h_pct": round(analysis.relative_strength_4h, 3),
+            "derivatives": analysis.derivatives,
+        },
+        "bullish_scenario": bullish_scenario,
+        "bearish_scenario": bearish_scenario,
+        "weakest_point": "; ".join(reasons) if reasons else "Trigger is not yet confirmed.",
+        "risks": [
+            "WATCH_ONLY is not an execution signal.",
+            "Low USDC turnover or wide spread can cause material slippage.",
+            "Coinalyze derivatives context may be aggregated or from another venue.",
+        ],
+        "data_quality": data_quality,
+        "missing_data": sorted(set(analysis.missing_data)),
+        "data_as_of": now.isoformat(),
+    }
+
+
+def rank_watchlist(analyses: list[Analysis], now: datetime, excluded_symbols: set[str]) -> list[dict[str, Any]]:
+    items = [build_watch_setup(item, now) for item in analyses if item.instrument.symbol not in excluded_symbols]
+    items.sort(
+        key=lambda item: (
+            1 if item["symbol"] in DISCOVERY_SYMBOLS else 0,
+            item["setup_score"],
+        ),
+        reverse=True,
+    )
+    return items[:20]
+
+
+def build_market_regime(
+    analyses: list[Analysis],
+    now: datetime,
+    coinalyze_ok: bool,
+    borrow_ok: bool,
+) -> dict[str, Any]:
     btc = next((item for item in analyses if item.instrument.symbol == "BTCUSDC"), None)
     if btc:
         if btc.direction_score >= 35:
@@ -873,7 +1084,8 @@ def build_market_regime(analyses: list[Analysis], now: datetime, coinalyze_ok: b
         structure_1d = None
         structure_4h = None
 
-    directional = [item.direction_score for item in analyses]
+    alt_analyses = [item for item in analyses if item.instrument.symbol != "BTCUSDC"]
+    directional = [item.direction_score for item in alt_analyses]
     alt_breadth = 100.0 * sum(1 for value in directional if value > 20) / len(directional) if directional else 0.0
     bearish_breadth = 100.0 * sum(1 for value in directional if value < -20) / len(directional) if directional else 0.0
     if btc_regime == "bullish" and alt_breadth >= 55:
@@ -883,16 +1095,25 @@ def build_market_regime(analyses: list[Analysis], now: datetime, coinalyze_ok: b
     else:
         preferred = "neutral"
 
-    quality = "GOOD" if coinalyze_ok and borrow_ok else "PARTIAL"
+    enriched_count = sum(1 for item in analyses if item.derivatives)
+    full_enrichment_target = min(len(analyses), COINALYZE_ENRICH_LIMIT)
+    quality = "GOOD" if (
+        len(analyses) >= 10
+        and enriched_count >= full_enrichment_target
+        and borrow_ok
+    ) else "PARTIAL"
     notes = [
         "Universe is strictly Bybit EU spot pairs quoted in USDC.",
+        "Breadth is calculated from the broad discovery universe, excluding BTC.",
+        "Executable setups and low-liquidity WATCH_ONLY ideas are separated.",
         "Short candidates are strictly USDC spot-margin shorts; derivatives are contextual only.",
+        f"Coinalyze enrichment coverage: {enriched_count}/{len(analyses)} analyzed symbols.",
         "Shortability uses public Bybit margin eligibility and maximum borrowing data; final inventory must be rechecked before entry.",
     ]
     if not coinalyze_ok:
         notes.append("Coinalyze enrichment is partial or unavailable.")
     if not borrow_ok:
-        notes.append("Public Bybit Spot Margin borrowability data is unavailable; short list is suppressed.")
+        notes.append("Public Bybit Spot Margin borrowability data is unavailable; executable short list is suppressed.")
     return {
         "data_as_of": now.isoformat(),
         "data_quality": quality,
@@ -920,15 +1141,35 @@ async def upsert_cache(connection: asyncpg.Connection, key: str, payload: dict[s
 
 
 async def persist_results(
-    scan: dict[str, Any], regime: dict[str, Any], setups: list[dict[str, Any]], status: dict[str, Any]
+    scan: dict[str, Any],
+    regime: dict[str, Any],
+    setups: list[dict[str, Any]],
+    watchlist: list[dict[str, Any]],
+    status: dict[str, Any],
 ) -> None:
     connection = await asyncpg.connect(DATABASE_URL, timeout=30)
     try:
         async with connection.transaction():
             await upsert_cache(connection, "latest_scan", scan)
             await upsert_cache(connection, "market_regime", regime)
+            await upsert_cache(connection, "watchlist", {
+                "data_as_of": scan["data_as_of"],
+                "items": watchlist,
+            })
             await upsert_cache(connection, "data_status", status)
-            for setup in setups:
+            best_by_symbol: dict[str, dict[str, Any]] = {}
+            for setup in setups + watchlist:
+                symbol = setup["symbol"]
+                existing = best_by_symbol.get(symbol)
+                setup_is_executable = setup.get("metrics", {}).get("execution_status") not in {"WATCH_ONLY", "LIQUIDITY_BLOCKED"}
+                existing_is_executable = bool(existing) and existing.get("metrics", {}).get("execution_status") not in {"WATCH_ONLY", "LIQUIDITY_BLOCKED"}
+                if (
+                    existing is None
+                    or (setup_is_executable and not existing_is_executable)
+                    or (setup_is_executable == existing_is_executable and setup["setup_score"] > existing["setup_score"])
+                ):
+                    best_by_symbol[symbol] = setup
+            for setup in best_by_symbol.values():
                 await upsert_cache(connection, f"setup:{setup['symbol']}", setup)
     finally:
         await connection.close()
@@ -941,21 +1182,31 @@ async def run() -> None:
     started = datetime.now(timezone.utc)
     timeout = httpx.Timeout(30.0, connect=15.0)
     limits = httpx.Limits(max_connections=10, max_keepalive_connections=10)
-    async with httpx.AsyncClient(timeout=timeout, limits=limits, headers={"User-Agent": "Bybit-EU-Swing-Radar/0.2.1"}) as client:
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        limits=limits,
+        headers={"User-Agent": "Bybit-EU-Swing-Radar/0.3.0"},
+    ) as client:
         bybit = BybitAPI(client)
         coinalyze = CoinalyzeAPI(client)
 
         instruments_raw, tickers_raw = await asyncio.gather(bybit.instruments(), bybit.tickers())
-        universe, exclusions = build_universe(instruments_raw, tickers_raw)
+        universe, exclusions, universe_stats = build_universe(instruments_raw, tickers_raw)
         if not universe:
-            raise RuntimeError("No liquid Bybit EU USDC spot pairs passed the filters")
-        print(f"USDC universe after filters: {len(universe)} symbols")
+            raise RuntimeError("No Bybit EU USDC spot pairs passed the discovery safety filters")
+        print(
+            "USDC analysis universe: "
+            f"{len(universe)} symbols; tradeable={universe_stats['tradeable_universe_size']}; "
+            f"liquidity_blocked={universe_stats['liquidity_blocked_size']}; "
+            f"mandatory_found={universe_stats['mandatory_found']}"
+        )
 
         semaphore = asyncio.Semaphore(HTTP_CONCURRENCY)
         fetched = await asyncio.gather(
             *(fetch_analysis_bars(bybit, instrument, semaphore) for instrument in universe)
         )
         valid = [item for item in fetched if item is not None]
+        missing_history = len(universe) - len(valid)
         if not valid:
             raise RuntimeError("No symbols had sufficient 1H/4H/1D history")
 
@@ -976,9 +1227,23 @@ async def run() -> None:
         short_setups = [setup for analysis in analyses if (setup := build_setup(analysis, "short", now)) is not None]
         long_setups.sort(key=lambda item: item["setup_score"], reverse=True)
         short_setups.sort(key=lambda item: item["setup_score"], reverse=True)
+        executable_symbols = {item["symbol"] for item in long_setups + short_setups}
+        watchlist = rank_watchlist(analyses, now, executable_symbols)
+        liquidity_blocked = [
+            item for item in watchlist
+            if item.get("metrics", {}).get("execution_status") == "LIQUIDITY_BLOCKED"
+        ]
         regime = build_market_regime(analyses, now, coinalyze_ok, borrow_ok)
 
-        data_quality = "GOOD" if coinalyze_ok and borrow_ok else "PARTIAL"
+        enriched_count = sum(1 for item in analyses if item.derivatives)
+        data_quality = regime["data_quality"]
+        coverage = {
+            "analyzed_symbols": len(analyses),
+            "coinalyze_enriched_symbols": enriched_count,
+            "coinalyze_enrichment_limit": COINALYZE_ENRICH_LIMIT,
+            "borrowability_checked_symbols": len(analyses) if borrow_ok else 0,
+            "symbols_missing_history": missing_history,
+        }
         scan = {
             "data_as_of": now.isoformat(),
             "data_as_of_budapest": now.astimezone(BUDAPEST).isoformat(),
@@ -986,13 +1251,12 @@ async def run() -> None:
             "market_regime": regime,
             "longs": long_setups[:10],
             "shorts": short_setups[:10],
+            "extended_watchlist": watchlist,
+            "liquidity_blocked": liquidity_blocked,
+            "universe_stats": universe_stats,
+            "coverage": coverage,
             "exclusions": exclusions[:100],
         }
-        all_setups_by_symbol: dict[str, dict[str, Any]] = {}
-        for setup in long_setups + short_setups:
-            existing = all_setups_by_symbol.get(setup["symbol"])
-            if existing is None or setup["setup_score"] > existing["setup_score"]:
-                all_setups_by_symbol[setup["symbol"]] = setup
 
         elapsed = (datetime.now(timezone.utc) - started).total_seconds()
         status = {
@@ -1000,10 +1264,12 @@ async def run() -> None:
             "worker": {
                 "status": "ok",
                 "duration_seconds": round(elapsed, 2),
-                "usdc_universe_size": len(universe),
-                "analyzed_symbols": len(analyses),
+                **universe_stats,
+                **coverage,
                 "long_candidates": len(long_setups),
                 "short_candidates": len(short_setups),
+                "extended_watchlist_items": len(watchlist),
+                "liquidity_blocked_items": len(liquidity_blocked),
             },
             "sources": [
                 {
@@ -1018,6 +1284,7 @@ async def run() -> None:
                     "status": "ok" if coinalyze_ok else "partial",
                     "data_as_of": now.isoformat() if coinalyze_ok else None,
                     "latency_seconds": 0 if coinalyze_ok else None,
+                    "coverage": f"{enriched_count}/{len(analyses)}",
                     "missing_fields": [] if coinalyze_ok else [coinalyze_error or "enrichment unavailable"],
                 },
                 {
@@ -1030,9 +1297,12 @@ async def run() -> None:
             ],
         }
 
-        await persist_results(scan, regime, list(all_setups_by_symbol.values()), status)
+        await persist_results(scan, regime, long_setups + short_setups, watchlist, status)
         print(
-            f"Worker complete: analyzed={len(analyses)}, longs={len(long_setups)}, "
+            "Worker complete: "
+            f"analyzed={len(analyses)}, tradeable={universe_stats['tradeable_universe_size']}, "
+            f"watchlist={len(watchlist)}, liquidity_blocked={len(liquidity_blocked)}, "
+            f"coinalyze={enriched_count}/{len(analyses)}, longs={len(long_setups)}, "
             f"shorts={len(short_setups)}, quality={data_quality}, duration={elapsed:.1f}s"
         )
 
