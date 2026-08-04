@@ -3,7 +3,7 @@ import json
 import asyncpg
 
 from app.config import settings
-from app.models import MarketRegime, ScanResponse, Setup
+from app.models import MarketRegime, ScanResponse, Setup, WatchlistResponse
 
 
 class RadarRepository:
@@ -49,6 +49,14 @@ class RadarRepository:
     async def get_regime(self) -> MarketRegime | None:
         payload = await self.get_cache("market_regime")
         return MarketRegime.model_validate(payload) if payload is not None else None
+
+    async def get_watchlist(self, limit: int = 20) -> WatchlistResponse | None:
+        payload = await self.get_cache("watchlist")
+        if payload is None:
+            return None
+        response = WatchlistResponse.model_validate(payload)
+        response.items = response.items[:limit]
+        return response
 
     async def get_data_status(self) -> dict | None:
         return await self.get_cache("data_status")

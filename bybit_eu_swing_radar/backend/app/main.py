@@ -8,8 +8,8 @@ from app.repository import RadarRepository
 
 app = FastAPI(
     title="Bybit EU Swing Radar API",
-    version="0.2.0",
-    description="Read-only cached USDC-only swing setup API.",
+    version="0.3.0",
+    description="Read-only cached USDC-only swing setup and discovery-watch API.",
 )
 
 repo = RadarRepository()
@@ -71,6 +71,14 @@ async def setup(symbol: str):
     result = await repo.get_setup(symbol)
     if result is None:
         raise HTTPException(status_code=404, detail="Setup not found.")
+    return result
+
+
+@app.get("/v1/watchlist", dependencies=[Depends(require_api_key)])
+async def watchlist(limit: int = Query(20, ge=1, le=20)):
+    result = await repo.get_watchlist(limit)
+    if result is None:
+        raise HTTPException(status_code=503, detail="No cached watchlist.")
     return result
 
 

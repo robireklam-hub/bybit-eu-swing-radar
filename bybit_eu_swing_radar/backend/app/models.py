@@ -74,4 +74,13 @@ class ScanResponse(BaseModel):
     market_regime: MarketRegime
     longs: list[Setup]
     shorts: list[Setup]
+    extended_watchlist: list[Setup] = Field(default_factory=list)
+    liquidity_blocked: list[Setup] = Field(default_factory=list)
+    universe_stats: dict[str, Any] = Field(default_factory=dict)
+    coverage: dict[str, Any] = Field(default_factory=dict)
     exclusions: list[dict[str, str]] = Field(default_factory=list)
+
+
+class WatchlistResponse(BaseModel):
+    data_as_of: datetime
+    items: list[Setup] = Field(default_factory=list)
