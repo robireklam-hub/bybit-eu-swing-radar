@@ -1,4 +1,4 @@
-"""Bybit EU Trading Radar — day-trade worker v0.5.0.
+"""Bybit EU Trading Radar — day-trade worker v0.6.0.
 
 Separate engine from the swing worker:
 - universe: active Bybit EU USDC spot pairs
@@ -29,6 +29,8 @@ from typing import Any, Iterable
 
 import asyncpg
 import httpx
+
+from journal import persist_day_journal
 
 from worker import (
     BUDAPEST,
@@ -1011,10 +1013,21 @@ async def persist_day_results(
     scan: dict[str, Any],
     setups: list[dict[str, Any]],
     status: dict[str, Any],
-) -> None:
+    bars_by_symbol: dict[str, list[Bar]],
+) -> dict[str, Any]:
     connection = await asyncpg.connect(DATABASE_URL, timeout=30)
     try:
         async with connection.transaction():
+            journal_status = await persist_day_journal(
+                connection,
+                setups,
+                bars_by_symbol,
+                scan,
+                status,
+            )
+            scan["journal"] = journal_status
+            status["journal"] = journal_status
+
             await upsert_cache(connection, "day_trade_scan", scan)
             await upsert_cache(connection, "day_trade_status", status)
 
@@ -1029,6 +1042,7 @@ async def persist_day_results(
                     f"day_trade_setup:{setup['symbol']}",
                     setup,
                 )
+        return journal_status
     finally:
         await connection.close()
 
@@ -1044,7 +1058,7 @@ async def run() -> None:
     async with httpx.AsyncClient(
         timeout=timeout,
         limits=limits,
-        headers={"User-Agent": "Bybit-EU-Trading-Radar-Day/0.5.0"},
+        headers={"User-Agent": "Bybit-EU-Trading-Radar-Day/0.6.0"},
     ) as client:
         bybit = BybitAPI(client)
         coinalyze = CoinalyzeAPI(client)
@@ -1239,7 +1253,7 @@ async def run() -> None:
             },
             "exclusions": exclusions[:100],
             "notes": [
-                "This is an unbacktested day-trade MVP; signals require prospective journaling.",
+                "Prospective journaling starts with v0.6.0 deployment; no historical backfill is created.",
                 "Fast coverage scans all eligible USDC pairs on 5m/15m; 1H/4H deep context is limited to promoted symbols.",
                 "WATCH_ONLY items are not entries.",
             ],
@@ -1298,13 +1312,23 @@ async def run() -> None:
             ],
         }
 
-        await persist_day_results(scan, all_candidates, status)
+        bars_by_symbol = {
+            item.instrument.symbol: item.bars_5m for item in fast_results
+        }
+        journal_status = await persist_day_results(
+            scan,
+            all_candidates,
+            status,
+            bars_by_symbol,
+        )
         print(
             "Day worker complete: "
             f"fast={len(fast_results)}/{len(universe)}, "
             f"deep={len(analyses)}/{len(deep_universe)}, "
             f"strict_longs={len(strict_longs)}, "
             f"strict_shorts={len(strict_shorts)}, "
+            f"journal_new={journal_status.get('new_signals', 0)}, "
+            f"journal_active={journal_status.get('active_signals', 0)}, "
             f"quality={data_quality}, duration={elapsed:.1f}s"
         )
 
