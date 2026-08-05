@@ -359,3 +359,104 @@ class DayTradeJournalSignalsResponse(BaseModel):
     generated_at: datetime
     count: int
     items: list[DayTradeJournalSignal] = Field(default_factory=list)
+
+
+BacktestSignalClass = Literal["STRICT", "SHADOW"]
+
+
+class DayTradeBacktestSignal(BaseModel):
+    id: int
+    job_id: int
+    signal_key: str
+    strategy_version: str
+    signal_class: BacktestSignalClass
+    execution_assumption: str
+    included_primary: bool
+    primary_exclusion_reason: str | None = None
+    symbol: str
+    side: Literal["long", "short"]
+    opened_at: datetime
+    closed_at: datetime
+    setup_type: str
+    entry_price: float
+    trigger_price: float
+    stop_price: float
+    tp1: float
+    tp2: float
+    tp3: float
+    expected_rr: float
+    modeled_tp2_r: float
+    expansion_score: float
+    direction_score: float
+    side_direction_score: float
+    quality_score: float
+    setup_score: float
+    turnover_24h_usdc: float
+    modeled_spread_bps: float
+    cost_bps: float
+    bars_observed: int
+    mfe_r: float
+    mae_r: float
+    exit_price: float
+    exit_reason: str
+    gross_r: float
+    net_r: float
+    btc_structure_1h: str | None = None
+    btc_structure_4h: str | None = None
+    btc_volatility_regime: str | None = None
+
+
+class BacktestAggregate(BaseModel):
+    sample_size: int
+    tp2_count: int
+    stop_count: int
+    ambiguous_stop_count: int
+    time_exit_count: int
+    positive_net_count: int
+    target_hit_rate_pct: float | None = None
+    positive_net_rate_pct: float | None = None
+    average_net_r: float | None = None
+    median_net_r: float | None = None
+    profit_factor: float | None = None
+    average_mfe_r: float | None = None
+    average_mae_r: float | None = None
+
+
+class BacktestGroupStats(BaseModel):
+    key: str
+    stats: BacktestAggregate
+
+
+class DayTradeBacktestStatusResponse(BaseModel):
+    generated_at: datetime
+    exists: bool
+    job: dict[str, Any] = Field(default_factory=dict)
+    progress_pct: float
+    symbol_status: list[dict[str, Any]] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class DayTradeBacktestSummaryResponse(BaseModel):
+    strategy_version: str
+    generated_at: datetime
+    job: dict[str, Any] = Field(default_factory=dict)
+    requested_signal_class: Literal["all", "STRICT", "SHADOW"]
+    requested_side: Literal["both", "long", "short"]
+    primary_only: bool
+    evidence_status: Literal["INSUFFICIENT_SAMPLE", "EARLY_SAMPLE", "EVALUABLE_SAMPLE"]
+    strict_primary_sample: int
+    overall: BacktestAggregate
+    by_signal_class: list[BacktestGroupStats] = Field(default_factory=list)
+    by_side: list[BacktestGroupStats] = Field(default_factory=list)
+    by_setup_type: list[BacktestGroupStats] = Field(default_factory=list)
+    by_execution_assumption: list[BacktestGroupStats] = Field(default_factory=list)
+    by_month: list[BacktestGroupStats] = Field(default_factory=list)
+    by_setup_score_band: list[BacktestGroupStats] = Field(default_factory=list)
+    methodology: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class DayTradeBacktestSignalsResponse(BaseModel):
+    generated_at: datetime
+    count: int
+    items: list[DayTradeBacktestSignal] = Field(default_factory=list)
