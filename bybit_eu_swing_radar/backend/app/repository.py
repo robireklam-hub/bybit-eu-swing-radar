@@ -9,6 +9,12 @@ from asyncpg.exceptions import UndefinedTableError
 
 from app.config import settings
 from app.models import (
+    BacktestAggregate,
+    BacktestGroupStats,
+    DayTradeBacktestSignal,
+    DayTradeBacktestSignalsResponse,
+    DayTradeBacktestStatusResponse,
+    DayTradeBacktestSummaryResponse,
     DayTradeCandidate,
     DayTradeJournalSignal,
     DayTradeJournalSignalsResponse,
@@ -605,3 +611,228 @@ async def _get_day_trade_journal_signals(
 
 RadarRepository.get_day_trade_journal_summary = _get_day_trade_journal_summary
 RadarRepository.get_day_trade_journal_signals = _get_day_trade_journal_signals
+
+
+
+def _backtest_aggregate(rows: list[dict[str, Any]]) -> BacktestAggregate:
+    sample = len(rows)
+    positives = [float(row.get("net_r") or 0.0) for row in rows if float(row.get("net_r") or 0.0) > 0]
+    negatives = [float(row.get("net_r") or 0.0) for row in rows if float(row.get("net_r") or 0.0) < 0]
+    gains = sum(positives)
+    losses = abs(sum(negatives))
+    net_values = [float(row.get("net_r") or 0.0) for row in rows]
+    return BacktestAggregate(
+        sample_size=sample,
+        tp2_count=sum(1 for row in rows if row.get("exit_reason") == "TP2"),
+        stop_count=sum(1 for row in rows if row.get("exit_reason") == "STOP"),
+        ambiguous_stop_count=sum(1 for row in rows if row.get("exit_reason") == "AMBIGUOUS_STOP_FIRST"),
+        time_exit_count=sum(1 for row in rows if row.get("exit_reason") == "TIME_EXIT"),
+        positive_net_count=len(positives),
+        target_hit_rate_pct=(round(sum(1 for row in rows if row.get("exit_reason") == "TP2") / sample * 100.0, 2) if sample else None),
+        positive_net_rate_pct=(round(len(positives) / sample * 100.0, 2) if sample else None),
+        average_net_r=(round(statistics.fmean(net_values), 4) if net_values else None),
+        median_net_r=(round(statistics.median(net_values), 4) if net_values else None),
+        profit_factor=(round(gains / losses, 4) if losses > 0 else None),
+        average_mfe_r=(round(statistics.fmean(float(row.get("mfe_r") or 0.0) for row in rows), 4) if rows else None),
+        average_mae_r=(round(statistics.fmean(float(row.get("mae_r") or 0.0) for row in rows), 4) if rows else None),
+    )
+
+
+def _backtest_groups(rows: list[dict[str, Any]], field: str) -> list[BacktestGroupStats]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        groups[str(row.get(field) or "UNKNOWN")].append(row)
+    return [
+        BacktestGroupStats(key=key, stats=_backtest_aggregate(values))
+        for key, values in sorted(groups.items(), key=lambda item: len(item[1]), reverse=True)
+    ]
+
+
+def _setup_score_band(score: float) -> str:
+    if score >= 80:
+        return "80+"
+    if score >= 70:
+        return "70-79.99"
+    if score >= 65:
+        return "65-69.99"
+    return "<65"
+
+
+async def _get_day_trade_backtest_status(repository: RadarRepository) -> DayTradeBacktestStatusResponse:
+    conn = await repository._connect()
+    try:
+        job_raw = await conn.fetchrow("SELECT * FROM day_trade_backtest_jobs ORDER BY id DESC LIMIT 1")
+        if not job_raw:
+            return DayTradeBacktestStatusResponse(
+                generated_at=datetime.now(timezone.utc), exists=False,
+                job={}, progress_pct=0.0, symbol_status=[],
+                warnings=["Backtest job has not been initialized."],
+            )
+        job = dict(job_raw)
+        symbols_raw = await conn.fetch(
+            """SELECT symbol,status,bars_fetched,evaluation_bars,signal_count,
+                      primary_signal_count,last_error,started_at,completed_at
+               FROM day_trade_backtest_symbols WHERE job_id=$1
+               ORDER BY status,symbol""",
+            int(job["id"]),
+        )
+    except UndefinedTableError:
+        return DayTradeBacktestStatusResponse(
+            generated_at=datetime.now(timezone.utc), exists=False,
+            job={}, progress_pct=0.0, symbol_status=[],
+            warnings=["Backtest tables do not exist yet."],
+        )
+    finally:
+        await conn.close()
+    total = int(job.get("total_symbols") or 0)
+    completed = int(job.get("completed_symbols") or 0)
+    failed = int(job.get("failed_symbols") or 0)
+    progress = round((completed + failed) / total * 100.0, 2) if total else 0.0
+    warnings = job.get("warnings") or []
+    if isinstance(warnings, str): warnings = json.loads(warnings)
+    parameters = job.get("parameters") or {}
+    universe = job.get("universe") or []
+    if isinstance(parameters, str): parameters = json.loads(parameters)
+    if isinstance(universe, str): universe = json.loads(universe)
+    job["parameters"] = parameters
+    job["universe"] = universe
+    job["warnings"] = warnings
+    return DayTradeBacktestStatusResponse(
+        generated_at=datetime.now(timezone.utc), exists=True, job=job,
+        progress_pct=progress, symbol_status=[dict(row) for row in symbols_raw],
+        warnings=list(warnings),
+    )
+
+
+async def _get_day_trade_backtest_summary(
+    repository: RadarRepository,
+    signal_class: str = "all",
+    side: str = "both",
+    primary_only: bool = True,
+) -> DayTradeBacktestSummaryResponse:
+    conn = await repository._connect()
+    try:
+        job_raw = await conn.fetchrow("SELECT * FROM day_trade_backtest_jobs ORDER BY id DESC LIMIT 1")
+        if not job_raw:
+            job = {"status": "NOT_INITIALIZED"}
+            rows_raw = []
+            strict_primary = 0
+        else:
+            job = dict(job_raw)
+            rows_raw = await conn.fetch(
+            """
+            SELECT signal_class, execution_assumption, included_primary,
+                   symbol, side, opened_at, setup_type, exit_reason,
+                   net_r, mfe_r, mae_r, setup_score
+            FROM day_trade_backtest_signals
+            WHERE job_id=$1
+              AND ($2='all' OR signal_class=$2)
+              AND ($3='both' OR side=$3)
+              AND (NOT $4 OR included_primary)
+            ORDER BY opened_at
+            """,
+                int(job["id"]), signal_class, side, primary_only,
+            )
+            strict_primary = int(await conn.fetchval(
+                """SELECT COUNT(*) FROM day_trade_backtest_signals
+                   WHERE job_id=$1 AND signal_class='STRICT' AND included_primary""",
+                int(job["id"]),
+            ) or 0)
+    except UndefinedTableError:
+        job = {"status": "NOT_INITIALIZED"}
+        rows_raw = []
+        strict_primary = 0
+    finally:
+        await conn.close()
+    rows = [dict(row) for row in rows_raw]
+    for row in rows:
+        opened = row.get("opened_at")
+        row["month"] = opened.strftime("%Y-%m") if opened else "UNKNOWN"
+        row["setup_score_band"] = _setup_score_band(float(row.get("setup_score") or 0.0))
+    if strict_primary < 30:
+        evidence = "INSUFFICIENT_SAMPLE"
+    elif strict_primary < 100:
+        evidence = "EARLY_SAMPLE"
+    else:
+        evidence = "EVALUABLE_SAMPLE"
+    warnings = job.get("warnings") or []
+    if isinstance(warnings, str): warnings = json.loads(warnings)
+    params = job.get("parameters") or {}
+    universe = job.get("universe") or []
+    if isinstance(params, str): params = json.loads(params)
+    if isinstance(universe, str): universe = json.loads(universe)
+    job["parameters"] = params
+    job["universe"] = universe
+    job["warnings"] = warnings
+    return DayTradeBacktestSummaryResponse(
+        strategy_version=str(job.get("strategy_version", "0.7.0")),
+        generated_at=datetime.now(timezone.utc), job=job,
+        requested_signal_class=signal_class, requested_side=side,
+        primary_only=primary_only, evidence_status=evidence,
+        strict_primary_sample=strict_primary,
+        overall=_backtest_aggregate(rows),
+        by_signal_class=_backtest_groups(rows, "signal_class"),
+        by_side=_backtest_groups(rows, "side"),
+        by_setup_type=_backtest_groups(rows, "setup_type"),
+        by_execution_assumption=_backtest_groups(rows, "execution_assumption"),
+        by_month=_backtest_groups(rows, "month"),
+        by_setup_score_band=_backtest_groups(rows, "setup_score_band"),
+        methodology=[
+            "Closed 5m bars only; 15m/1h/4h are locally aggregated and must be fully closed.",
+            "Entry is the trigger-bar close; outcome is TP2 versus stop within the configured horizon.",
+            "Same-candle stop/target ambiguity is conservatively stop-first.",
+            "Primary metrics exclude overlapping same-symbol/same-side signals when configured.",
+            "BACKTEST, prospective STRICT and prospective SHADOW samples must remain separate.",
+        ],
+        warnings=list(warnings),
+    )
+
+
+async def _get_day_trade_backtest_signals(
+    repository: RadarRepository,
+    signal_class: str = "all",
+    side: str = "both",
+    symbol: str | None = None,
+    primary_only: bool = True,
+    limit: int = 50,
+) -> DayTradeBacktestSignalsResponse:
+    conn = await repository._connect()
+    try:
+        job_id = await conn.fetchval("SELECT id FROM day_trade_backtest_jobs ORDER BY id DESC LIMIT 1")
+        if job_id is None:
+            rows_raw = []
+        else:
+            rows_raw = await conn.fetch(
+                """
+                SELECT id,job_id,signal_key,strategy_version,signal_class,
+                       execution_assumption,included_primary,primary_exclusion_reason,
+                       symbol,side,opened_at,closed_at,setup_type,entry_price,
+                       trigger_price,stop_price,tp1,tp2,tp3,expected_rr,modeled_tp2_r,
+                       expansion_score,direction_score,side_direction_score,
+                       quality_score,setup_score,turnover_24h_usdc,modeled_spread_bps,
+                       cost_bps,bars_observed,mfe_r,mae_r,exit_price,exit_reason,
+                       gross_r,net_r,btc_structure_1h,btc_structure_4h,btc_volatility_regime
+                FROM day_trade_backtest_signals
+                WHERE job_id=$1
+                  AND ($2='all' OR signal_class=$2)
+                  AND ($3='both' OR side=$3)
+                  AND ($4::text IS NULL OR symbol=$4)
+                  AND (NOT $5 OR included_primary)
+                ORDER BY opened_at DESC LIMIT $6
+                """,
+                int(job_id), signal_class, side,
+                symbol.upper() if symbol else None, primary_only, limit,
+            )
+    except UndefinedTableError:
+        rows_raw = []
+    finally:
+        await conn.close()
+    items = [DayTradeBacktestSignal.model_validate(dict(row)) for row in rows_raw]
+    return DayTradeBacktestSignalsResponse(
+        generated_at=datetime.now(timezone.utc), count=len(items), items=items
+    )
+
+
+RadarRepository.get_day_trade_backtest_status = _get_day_trade_backtest_status
+RadarRepository.get_day_trade_backtest_summary = _get_day_trade_backtest_summary
+RadarRepository.get_day_trade_backtest_signals = _get_day_trade_backtest_signals
