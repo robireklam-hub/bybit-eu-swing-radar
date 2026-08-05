@@ -183,3 +183,84 @@ class TopCandidatesResponse(BaseModel):
     watch_only_longs: list[CompactCandidate] = Field(default_factory=list)
     watch_only_shorts: list[CompactCandidate] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+
+
+
+DayTradeState = Literal["NO_TRADE", "WATCH", "ARMED", "TRIGGERED"]
+
+
+class DayTradeCandidate(BaseModel):
+    symbol: str
+    base_asset: str
+    quote_asset: str = "USDC"
+    strategy_mode: Literal["DAY_TRADE"] = "DAY_TRADE"
+    side: Literal["long", "short"]
+    category: Literal["STRICT", "WATCH_ONLY"]
+    state: DayTradeState
+    grade: Literal["A", "B", "WATCH", "NO_TRADE"]
+    decision: Literal["TRADE", "WAIT", "NO_TRADE"]
+    setup_type: str
+    last_price: float
+    tradeable: bool
+    shortable: bool = False
+    execution_status: str
+    execution_modes: list[str] = Field(default_factory=list)
+    expansion_score: float
+    direction_score: float
+    quality_score: float
+    setup_score: float
+    context_4h: str
+    structure_1h: str
+    structure_15m: str
+    timeframe_conflict: bool = False
+    trigger: dict[str, Any]
+    entry_zone: PriceZone
+    stop: float
+    invalidation: str
+    targets: list[float] = Field(default_factory=list)
+    expected_rr: float
+    expected_holding_time: str
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    derivatives: dict[str, Any] = Field(default_factory=dict)
+    why_now: list[str] = Field(default_factory=list)
+    bullish_scenario: str
+    bearish_scenario: str
+    weakest_point: str
+    risks: list[str] = Field(default_factory=list)
+    data_quality: DataQuality
+    missing_data: list[str] = Field(default_factory=list)
+    data_as_of: datetime
+
+
+class DayTradeScanResponse(BaseModel):
+    strategy_mode: Literal["DAY_TRADE"] = "DAY_TRADE"
+    data_as_of: datetime
+    data_as_of_budapest: str
+    data_quality: DataQuality
+    market_regime: dict[str, Any] = Field(default_factory=dict)
+    strict_longs: list[DayTradeCandidate] = Field(default_factory=list)
+    strict_shorts: list[DayTradeCandidate] = Field(default_factory=list)
+    watch_only_longs: list[DayTradeCandidate] = Field(default_factory=list)
+    watch_only_shorts: list[DayTradeCandidate] = Field(default_factory=list)
+    coverage: dict[str, Any] = Field(default_factory=dict)
+    assumptions: dict[str, Any] = Field(default_factory=dict)
+    exclusions: list[dict[str, str]] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class DayTradeTopCandidatesResponse(BaseModel):
+    strategy_mode: Literal["DAY_TRADE"] = "DAY_TRADE"
+    data_as_of: datetime
+    data_as_of_budapest: str
+    data_quality: DataQuality
+    market_regime: dict[str, Any] = Field(default_factory=dict)
+    requested_limit: int
+    strict_long_count: int
+    strict_short_count: int
+    strict_longs: list[DayTradeCandidate] = Field(default_factory=list)
+    strict_shorts: list[DayTradeCandidate] = Field(default_factory=list)
+    watch_only_longs: list[DayTradeCandidate] = Field(default_factory=list)
+    watch_only_shorts: list[DayTradeCandidate] = Field(default_factory=list)
+    coverage: dict[str, Any] = Field(default_factory=dict)
+    assumptions: dict[str, Any] = Field(default_factory=dict)
+    notes: list[str] = Field(default_factory=list)

@@ -7,9 +7,9 @@ from app.providers.bybit import BybitClient
 from app.repository import RadarRepository
 
 app = FastAPI(
-    title="Bybit EU Swing Radar API",
-    version="0.4.4",
-    description="Read-only cached USDC swing scanner with compact top-candidate and all-pair momentum endpoints.",
+    title="Bybit EU Trading Radar API",
+    version="0.5.0",
+    description="Read-only cached USDC swing and day-trade scanner with separate strategy engines.",
 )
 
 repo = RadarRepository()
@@ -106,6 +106,57 @@ async def momentum_radar(
     result = await repo.get_momentum_radar(direction, limit, min_score)
     if result is None:
         raise HTTPException(status_code=503, detail="No cached momentum radar. Run the background worker first.")
+    return result
+
+
+@app.get("/v1/day-trade/top-candidates", dependencies=[Depends(require_api_key)])
+async def day_trade_top_candidates(
+    limit: int = Query(3, ge=1, le=5),
+    include_watchlist: bool = Query(True),
+):
+    result = await repo.get_day_trade_top_candidates(limit, include_watchlist)
+    if result is None:
+        raise HTTPException(
+            status_code=503,
+            detail="No cached day-trade scan. Run the day-trade worker first.",
+        )
+    return result
+
+
+@app.get("/v1/day-trade/scan", dependencies=[Depends(require_api_key)])
+async def day_trade_scan(
+    direction: str = Query("both", pattern="^(long|short|both)$"),
+    limit: int = Query(10, ge=1, le=20),
+    min_score: float = Query(0, ge=0, le=100),
+    include_watchlist: bool = Query(True),
+):
+    result = await repo.get_day_trade_scan(
+        direction, limit, min_score, include_watchlist
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=503,
+            detail="No cached day-trade scan. Run the day-trade worker first.",
+        )
+    return result
+
+
+@app.get("/v1/day-trade/setup/{symbol}", dependencies=[Depends(require_api_key)])
+async def day_trade_setup(symbol: str):
+    result = await repo.get_day_trade_setup(symbol)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Day-trade setup not found.")
+    return result
+
+
+@app.get("/v1/day-trade/status", dependencies=[Depends(require_api_key)])
+async def day_trade_status():
+    result = await repo.get_day_trade_status()
+    if result is None:
+        raise HTTPException(
+            status_code=503,
+            detail="No cached day-trade status. Run the day-trade worker first.",
+        )
     return result
 
 

@@ -3,7 +3,7 @@ import json
 import asyncpg
 
 from app.config import settings
-from app.models import MarketRegime, MomentumResponse, ScanResponse, Setup, TopCandidatesResponse, WatchlistResponse
+from app.models import DayTradeCandidate, DayTradeScanResponse, DayTradeTopCandidatesResponse, MarketRegime, MomentumResponse, ScanResponse, Setup, TopCandidatesResponse, WatchlistResponse
 
 
 class RadarRepository:
@@ -257,3 +257,87 @@ async def _get_top_candidates(
 
 # Bind as a repository method without changing existing database behavior.
 RadarRepository.get_top_candidates = _get_top_candidates
+
+
+
+async def _get_day_trade_scan(
+    repository: RadarRepository,
+    direction: str = "both",
+    limit: int = 10,
+    min_score: float = 0.0,
+    include_watchlist: bool = True,
+) -> DayTradeScanResponse | None:
+    payload = await repository.get_cache("day_trade_scan")
+    if payload is None:
+        return None
+    response = DayTradeScanResponse.model_validate(payload)
+
+    def filter_items(items: list[DayTradeCandidate]) -> list[DayTradeCandidate]:
+        return [item for item in items if item.setup_score >= min_score][:limit]
+
+    if direction == "long":
+        response.strict_shorts = []
+        response.watch_only_shorts = []
+    elif direction == "short":
+        response.strict_longs = []
+        response.watch_only_longs = []
+
+    response.strict_longs = filter_items(response.strict_longs)
+    response.strict_shorts = filter_items(response.strict_shorts)
+    if include_watchlist:
+        response.watch_only_longs = filter_items(response.watch_only_longs)
+        response.watch_only_shorts = filter_items(response.watch_only_shorts)
+    else:
+        response.watch_only_longs = []
+        response.watch_only_shorts = []
+    return response
+
+
+async def _get_day_trade_top_candidates(
+    repository: RadarRepository,
+    limit: int = 3,
+    include_watchlist: bool = True,
+) -> DayTradeTopCandidatesResponse | None:
+    payload = await repository.get_cache("day_trade_scan")
+    if payload is None:
+        return None
+    scan = DayTradeScanResponse.model_validate(payload)
+    return DayTradeTopCandidatesResponse(
+        data_as_of=scan.data_as_of,
+        data_as_of_budapest=scan.data_as_of_budapest,
+        data_quality=scan.data_quality,
+        market_regime=scan.market_regime,
+        requested_limit=limit,
+        strict_long_count=len(scan.strict_longs),
+        strict_short_count=len(scan.strict_shorts),
+        strict_longs=scan.strict_longs[:limit],
+        strict_shorts=scan.strict_shorts[:limit],
+        watch_only_longs=scan.watch_only_longs[:limit] if include_watchlist else [],
+        watch_only_shorts=scan.watch_only_shorts[:limit] if include_watchlist else [],
+        coverage=scan.coverage,
+        assumptions=scan.assumptions,
+        notes=scan.notes + [
+            "Do not fill missing strict slots with WATCH_ONLY items.",
+            "Only decision=TRADE with state=TRIGGERED is an immediately actionable day-trade setup.",
+        ],
+    )
+
+
+async def _get_day_trade_setup(
+    repository: RadarRepository,
+    symbol: str,
+) -> DayTradeCandidate | None:
+    payload = await repository.get_cache(f"day_trade_setup:{symbol.upper()}")
+    return DayTradeCandidate.model_validate(payload) if payload is not None else None
+
+
+async def _get_day_trade_status(
+    repository: RadarRepository,
+) -> dict | None:
+    return await repository.get_cache("day_trade_status")
+
+
+RadarRepository.get_day_trade_scan = _get_day_trade_scan
+RadarRepository.get_day_trade_top_candidates = _get_day_trade_top_candidates
+RadarRepository.get_day_trade_setup = _get_day_trade_setup
+RadarRepository.get_day_trade_status = _get_day_trade_status
