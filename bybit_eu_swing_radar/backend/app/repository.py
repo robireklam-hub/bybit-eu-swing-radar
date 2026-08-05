@@ -1,9 +1,29 @@
 import json
+import statistics
+from collections import defaultdict
+from datetime import datetime, timezone
+from typing import Any
 
 import asyncpg
+from asyncpg.exceptions import UndefinedTableError
 
 from app.config import settings
-from app.models import DayTradeCandidate, DayTradeScanResponse, DayTradeTopCandidatesResponse, MarketRegime, MomentumResponse, ScanResponse, Setup, TopCandidatesResponse, WatchlistResponse
+from app.models import (
+    DayTradeCandidate,
+    DayTradeJournalSignal,
+    DayTradeJournalSignalsResponse,
+    DayTradeJournalSummaryResponse,
+    DayTradeScanResponse,
+    DayTradeTopCandidatesResponse,
+    JournalAggregate,
+    JournalGroupStats,
+    MarketRegime,
+    MomentumResponse,
+    ScanResponse,
+    Setup,
+    TopCandidatesResponse,
+    WatchlistResponse,
+)
 
 
 class RadarRepository:
@@ -341,3 +361,247 @@ RadarRepository.get_day_trade_scan = _get_day_trade_scan
 RadarRepository.get_day_trade_top_candidates = _get_day_trade_top_candidates
 RadarRepository.get_day_trade_setup = _get_day_trade_setup
 RadarRepository.get_day_trade_status = _get_day_trade_status
+
+
+
+def _json_value(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return value
+
+
+def _journal_aggregate(rows: list[dict[str, Any]]) -> JournalAggregate:
+    closed = [row for row in rows if row.get("status") == "CLOSED"]
+    net_values = [
+        float(row["net_r"])
+        for row in closed
+        if row.get("net_r") is not None
+    ]
+    positive = [value for value in net_values if value > 0]
+    negative = [value for value in net_values if value < 0]
+    tp2_count = sum(row.get("exit_reason") == "TP2" for row in closed)
+    stop_count = sum(row.get("exit_reason") == "STOP" for row in closed)
+    ambiguous = sum(
+        row.get("exit_reason") == "AMBIGUOUS_STOP_FIRST" for row in closed
+    )
+    time_exit = sum(row.get("exit_reason") == "TIME_EXIT" for row in closed)
+    profit_factor = None
+    if negative:
+        profit_factor = sum(positive) / abs(sum(negative))
+    elif positive:
+        profit_factor = None
+
+    return JournalAggregate(
+        sample_size=len(rows),
+        open_count=sum(row.get("status") == "OPEN" for row in rows),
+        closed_count=len(closed),
+        tp2_count=tp2_count,
+        stop_count=stop_count,
+        ambiguous_stop_count=ambiguous,
+        time_exit_count=time_exit,
+        positive_net_count=len(positive),
+        target_hit_rate_pct=(
+            round(tp2_count / len(closed) * 100.0, 2) if closed else None
+        ),
+        positive_net_rate_pct=(
+            round(len(positive) / len(closed) * 100.0, 2) if closed else None
+        ),
+        average_net_r=(
+            round(statistics.fmean(net_values), 4) if net_values else None
+        ),
+        median_net_r=(
+            round(statistics.median(net_values), 4) if net_values else None
+        ),
+        profit_factor=(
+            round(profit_factor, 4) if profit_factor is not None else None
+        ),
+        average_mfe_r=(
+            round(
+                statistics.fmean(float(row.get("mfe_r") or 0.0) for row in closed),
+                4,
+            )
+            if closed
+            else None
+        ),
+        average_mae_r=(
+            round(
+                statistics.fmean(float(row.get("mae_r") or 0.0) for row in closed),
+                4,
+            )
+            if closed
+            else None
+        ),
+    )
+
+
+def _group_journal_rows(
+    rows: list[dict[str, Any]],
+    field: str,
+) -> list[JournalGroupStats]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        groups[str(row.get(field) or "UNKNOWN")].append(row)
+    return [
+        JournalGroupStats(key=key, stats=_journal_aggregate(values))
+        for key, values in sorted(
+            groups.items(),
+            key=lambda item: len(item[1]),
+            reverse=True,
+        )
+    ]
+
+
+def _evidence_status(strict_closed: int) -> str:
+    if strict_closed < 30:
+        return "INSUFFICIENT_SAMPLE"
+    if strict_closed < 100:
+        return "EARLY_SAMPLE"
+    return "EVALUABLE_SAMPLE"
+
+
+async def _get_day_trade_journal_summary(
+    repository: RadarRepository,
+    days: int = 30,
+    signal_class: str = "all",
+) -> DayTradeJournalSummaryResponse:
+    conn = await repository._connect()
+    try:
+        rows_raw = await conn.fetch(
+            """
+            SELECT signal_class, symbol, side, status, setup_type,
+                   exit_reason, net_r, mfe_r, mae_r
+            FROM day_trade_signal_journal
+            WHERE opened_at >= NOW() - ($1::int * INTERVAL '1 day')
+              AND ($2 = 'all' OR signal_class = $2)
+            ORDER BY opened_at DESC
+            """,
+            days,
+            signal_class,
+        )
+        strict_closed = int(
+            await conn.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM day_trade_signal_journal
+                WHERE signal_class = 'STRICT'
+                  AND status = 'CLOSED'
+                  AND opened_at >= NOW() - ($1::int * INTERVAL '1 day')
+                """,
+                days,
+            )
+            or 0
+        )
+        latest_run_raw = await conn.fetchrow(
+            """
+            SELECT run_at, strategy_version, data_quality, coverage,
+                   strict_long_count, strict_short_count,
+                   triggered_trade_count, shadow_trigger_count,
+                   new_signal_count, evaluated_signal_count,
+                   closed_signal_count, active_signal_count
+            FROM day_trade_journal_runs
+            ORDER BY run_at DESC
+            LIMIT 1
+            """
+        )
+    except UndefinedTableError:
+        rows_raw = []
+        strict_closed = 0
+        latest_run_raw = None
+    finally:
+        await conn.close()
+
+    rows = [dict(row) for row in rows_raw]
+    latest_run = dict(latest_run_raw) if latest_run_raw else {}
+    if latest_run.get("coverage") is not None:
+        latest_run["coverage"] = _json_value(latest_run["coverage"])
+
+    warnings = []
+    if strict_closed < 30:
+        warnings.append(
+            "Fewer than 30 closed STRICT signals: no reliable edge conclusion is possible."
+        )
+    elif strict_closed < 100:
+        warnings.append(
+            "The STRICT sample is still early; regime and selection bias can dominate results."
+        )
+    else:
+        warnings.append(
+            "A sample of 100+ signals is evaluable, but it is not proof of a stable future edge."
+        )
+    if not rows:
+        warnings.append(
+            "No journal signals exist in the selected window; the journal is prospective and has no backfill."
+        )
+
+    return DayTradeJournalSummaryResponse(
+        strategy_version="0.6.0",
+        generated_at=datetime.now(timezone.utc),
+        window_days=days,
+        requested_signal_class=signal_class,
+        evidence_status=_evidence_status(strict_closed),
+        strict_closed_sample=strict_closed,
+        overall=_journal_aggregate(rows),
+        by_signal_class=_group_journal_rows(rows, "signal_class"),
+        by_side=_group_journal_rows(rows, "side"),
+        by_setup_type=_group_journal_rows(rows, "setup_type"),
+        latest_run=latest_run,
+        methodology=[
+            "Prospective records only; no historical backfill.",
+            "STRICT and SHADOW signals are reported separately.",
+            "Entry is modeled at the trigger candle close.",
+            "Primary outcome is TP2 versus stop within 8 hours.",
+            "If stop and TP2 occur in the same 5m candle, stop is assumed first.",
+            "Net R subtracts the configured round-trip cost assumption.",
+        ],
+        warnings=warnings,
+    )
+
+
+async def _get_day_trade_journal_signals(
+    repository: RadarRepository,
+    status: str = "all",
+    signal_class: str = "all",
+    symbol: str | None = None,
+    limit: int = 50,
+) -> DayTradeJournalSignalsResponse:
+    conn = await repository._connect()
+    try:
+        rows_raw = await conn.fetch(
+            """
+            SELECT id, signal_key, strategy_version, signal_class, symbol,
+                   side, status, opened_at, expires_at, closed_at, setup_type,
+                   entry_price, trigger_price, stop_price, tp1, tp2, tp3,
+                   expected_rr, modeled_tp2_r, entry_deviation_bps,
+                   entry_within_zone, setup_score, expansion_score, direction_score,
+                   side_direction_score, quality_score, bars_observed, mfe_r,
+                   mae_r, exit_price, exit_reason, gross_r, net_r, cost_bps
+            FROM day_trade_signal_journal
+            WHERE ($1 = 'all' OR status = $1)
+              AND ($2 = 'all' OR signal_class = $2)
+              AND ($3::text IS NULL OR symbol = UPPER($3))
+            ORDER BY opened_at DESC
+            LIMIT $4
+            """,
+            status,
+            signal_class,
+            symbol,
+            limit,
+        )
+    except UndefinedTableError:
+        rows_raw = []
+    finally:
+        await conn.close()
+
+    items = [DayTradeJournalSignal.model_validate(dict(row)) for row in rows_raw]
+    return DayTradeJournalSignalsResponse(
+        generated_at=datetime.now(timezone.utc),
+        count=len(items),
+        items=items,
+    )
+
+
+RadarRepository.get_day_trade_journal_summary = _get_day_trade_journal_summary
+RadarRepository.get_day_trade_journal_signals = _get_day_trade_journal_signals
