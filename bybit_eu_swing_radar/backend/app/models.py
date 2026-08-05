@@ -122,6 +122,10 @@ class MomentumItem(BaseModel):
 
 class MomentumResponse(BaseModel):
     data_as_of: datetime
+    eligible_pairs: int | None = None
     scanned_pairs: int
+    failed_pairs: int = 0
+    failed_symbols: list[str] = Field(default_factory=list)
     minimum_score: float
+    promotion_minimum_score: float | None = None
     items: list[MomentumItem] = Field(default_factory=list)

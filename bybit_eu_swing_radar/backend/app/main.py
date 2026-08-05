@@ -85,7 +85,7 @@ async def watchlist(limit: int = Query(20, ge=1, le=20)):
 @app.get("/v1/momentum-radar", dependencies=[Depends(require_api_key)])
 async def momentum_radar(
     direction: str = Query("both", pattern="^(long|short|both)$"),
-    limit: int = Query(10, ge=1, le=50),
+    limit: int = Query(20, ge=1, le=150),
     min_score: float = Query(50, ge=0, le=100),
 ):
     result = await repo.get_momentum_radar(direction, limit, min_score)
