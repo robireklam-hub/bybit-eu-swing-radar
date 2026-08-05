@@ -122,6 +122,10 @@ class MomentumItem(BaseModel):
 
 class MomentumResponse(BaseModel):
     data_as_of: datetime
+    raw_usdc_instrument_records: int | None = None
+    unique_usdc_instruments: int | None = None
+    duplicate_instrument_records: int = 0
+    duplicate_symbols: list[str] = Field(default_factory=list)
     eligible_pairs: int | None = None
     scanned_pairs: int
     failed_pairs: int = 0
