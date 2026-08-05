@@ -621,8 +621,35 @@ def average_bar_value(bars: list[Bar], field: str) -> float:
 def analyze_momentum(instrument: Instrument, bars_5m: list[Bar], bars_15m: list[Bar]) -> MomentumAnalysis:
     current = bars_5m[-1].close
     atr_15m = atr(bars_15m, 14)
-    if current <= 0 or atr_15m <= 0:
-        raise RuntimeError("Invalid momentum ATR or price")
+    if current <= 0:
+        raise RuntimeError("Invalid momentum price")
+
+    # A flat or almost inactive USDC market can legitimately have zero 15m ATR.
+    # It still belongs to the all-market audit and must be returned explicitly
+    # as NO_ACTIVITY rather than silently disappearing from coverage.
+    if atr_15m <= 0:
+        return MomentumAnalysis(
+            instrument=instrument,
+            bars_5m=bars_5m,
+            bars_15m=bars_15m,
+            score=0.0,
+            side="neutral",
+            return_15m_pct=bars_return_pct(bars_5m, 3),
+            return_1h_pct=bars_return_pct(bars_15m, 4),
+            return_4h_pct=bars_return_pct(bars_15m, 16),
+            previous_1h_return_pct=0.0,
+            acceleration_pct=0.0,
+            volume_ratio_5m=0.0,
+            turnover_acceleration_1h=0.0,
+            atr_15m=0.0,
+            extension_atr=0.0,
+            breakout_price=current,
+            breakout_confirmed=False,
+            distance_to_breakout_atr=0.0,
+            chase_risk=False,
+            stage="NO_ACTIVITY",
+            missing_data=["15m ATR is zero; no usable short-term price movement"],
+        )
 
     return_15m = bars_return_pct(bars_5m, 3)
     return_1h = bars_return_pct(bars_15m, 4)
@@ -730,13 +757,20 @@ def build_momentum_item(momentum: MomentumAnalysis, now: datetime) -> dict[str, 
         condition = "Closed 15m candle above the previous 20-bar 15m high"
         bullish = "Momentum remains constructive while 15m closes hold above the breakout area with sustained turnover."
         bearish = "Loss of the recent 15m swing low or sharp volume failure invalidates continuation."
-    else:
+    elif side == "short":
         invalidation_price = max(bar.high for bar in recent)
         condition = "Closed 15m candle below the previous 20-bar 15m low"
         bullish = "A fast reclaim of the breakdown area creates squeeze risk and invalidates the bearish impulse."
         bearish = "Momentum remains constructive for the short side while 15m closes hold below the breakdown area."
+    else:
+        invalidation_price = None
+        condition = "No trigger: insufficient 15m price movement"
+        bullish = "No bullish momentum thesis is available because the market has no usable short-term range."
+        bearish = "No bearish momentum thesis is available because the market has no usable short-term range."
 
-    if momentum.chase_risk and not instrument.tradeable:
+    if momentum.stage == "NO_ACTIVITY":
+        execution_status = "NO_ACTIVITY"
+    elif momentum.chase_risk and not instrument.tradeable:
         execution_status = "LIQUIDITY_BLOCKED_AND_CHASE_RISK"
     elif momentum.chase_risk:
         execution_status = "NO_TRADE_CHASE_RISK"
@@ -745,7 +779,10 @@ def build_momentum_item(momentum: MomentumAnalysis, now: datetime) -> dict[str, 
     else:
         execution_status = "TRADEABLE_MOMENTUM_WATCH"
 
-    state = "TRIGGERED" if momentum.breakout_confirmed and momentum.score >= 70 else "WATCH" if momentum.score >= MOMENTUM_MIN_SCORE else "NO_TRADE"
+    if momentum.stage == "NO_ACTIVITY":
+        state = "NO_TRADE"
+    else:
+        state = "TRIGGERED" if momentum.breakout_confirmed and momentum.score >= 70 else "WATCH" if momentum.score >= MOMENTUM_MIN_SCORE else "NO_TRADE"
     reasons = [
         f"{momentum.return_1h_pct:+.2f}% 1H move",
         f"{momentum.volume_ratio_5m:.2f}x 5m relative volume",
@@ -784,15 +821,15 @@ def build_momentum_item(momentum: MomentumAnalysis, now: datetime) -> dict[str, 
         "trigger": {
             "timeframe": "15m",
             "condition": condition,
-            "price": round_to_tick(momentum.breakout_price, instrument.tick_size),
+            "price": None if side == "neutral" else round_to_tick(momentum.breakout_price, instrument.tick_size),
             "requires_close": True,
-            "volume_confirmation": "Prefer >=2.0x recent 5m relative volume and rising hourly turnover",
+            "volume_confirmation": None if side == "neutral" else "Prefer >=2.0x recent 5m relative volume and rising hourly turnover",
         },
-        "invalidation_price": round_to_tick(invalidation_price, instrument.tick_size),
+        "invalidation_price": None if invalidation_price is None else round_to_tick(invalidation_price, instrument.tick_size),
         "bullish_scenario": bullish,
         "bearish_scenario": bearish,
         "why_now": reasons,
-        "decision": "NO_TRADE" if momentum.chase_risk or not instrument.tradeable else "WATCH_FOR_TRIGGER",
+        "decision": "NO_TRADE" if momentum.stage == "NO_ACTIVITY" or momentum.chase_risk or not instrument.tradeable else "WATCH_FOR_TRIGGER",
         "data_as_of": now.isoformat(),
     }
 
@@ -1538,11 +1575,14 @@ async def run() -> None:
             if instrument.symbol not in momentum_by_symbol
         )
         momentum_analyses: list[MomentumAnalysis] = []
+        momentum_calculation_failures: list[dict[str, str]] = []
         for instrument, bars_5m, bars_15m in momentum_valid:
             try:
                 momentum_analyses.append(analyze_momentum(instrument, bars_5m, bars_15m))
             except Exception as exc:
-                exclusions.append({"symbol": instrument.symbol, "reason": f"Momentum calculation failed: {exc}"})
+                failure = {"symbol": instrument.symbol, "reason": f"Momentum calculation failed: {exc}"}
+                momentum_calculation_failures.append(failure)
+                exclusions.append(failure)
         momentum_ranked_analyses = sorted(momentum_analyses, key=lambda item: item.score, reverse=True)
         momentum_promoted = [
             item.instrument for item in momentum_ranked_analyses
@@ -1565,6 +1605,9 @@ async def run() -> None:
             "momentum_scanned_pairs": len(momentum_analyses),
             "momentum_failed_pairs": len(momentum_failed_symbols),
             "momentum_failed_symbols": momentum_failed_symbols,
+            "momentum_calculation_failed_pairs": len(momentum_calculation_failures),
+            "momentum_calculation_failures": momentum_calculation_failures,
+            "momentum_no_activity_pairs": sum(1 for item in momentum_analyses if item.stage == "NO_ACTIVITY"),
             "momentum_candidates": sum(1 for item in momentum_analyses if item.score >= MOMENTUM_MIN_SCORE),
             "momentum_promoted_to_deep_scan": sum(1 for item in momentum_promoted if item.symbol in seen),
         })
@@ -1616,6 +1659,9 @@ async def run() -> None:
             "scanned_pairs": len(momentum_analyses),
             "failed_pairs": len(momentum_failed_symbols),
             "failed_symbols": momentum_failed_symbols,
+            "calculation_failed_pairs": len(momentum_calculation_failures),
+            "calculation_failures": momentum_calculation_failures,
+            "no_activity_pairs": sum(1 for item in momentum_analyses if item.stage == "NO_ACTIVITY"),
             "minimum_score": 0.0,
             "promotion_minimum_score": MOMENTUM_MIN_SCORE,
             "items": momentum_items,
@@ -1634,6 +1680,9 @@ async def run() -> None:
             "momentum_scanned_pairs": len(momentum_analyses),
             "momentum_failed_pairs": len(momentum_failed_symbols),
             "momentum_failed_symbols": momentum_failed_symbols,
+            "momentum_calculation_failed_pairs": len(momentum_calculation_failures),
+            "momentum_calculation_failures": momentum_calculation_failures,
+            "momentum_no_activity_pairs": sum(1 for item in momentum_analyses if item.stage == "NO_ACTIVITY"),
         }
         scan = {
             "data_as_of": now.isoformat(),
@@ -1666,6 +1715,9 @@ async def run() -> None:
                 "momentum_scanned_pairs": len(momentum_analyses),
                 "momentum_failed_pairs": len(momentum_failed_symbols),
                 "momentum_failed_symbols": momentum_failed_symbols,
+                "momentum_calculation_failed_pairs": len(momentum_calculation_failures),
+                "momentum_calculation_failures": momentum_calculation_failures,
+                "momentum_no_activity_pairs": sum(1 for item in momentum_analyses if item.stage == "NO_ACTIVITY"),
                 "momentum_output_items": len(momentum_items),
             },
             "sources": [
