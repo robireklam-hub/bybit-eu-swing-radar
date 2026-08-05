@@ -92,7 +92,7 @@ class MomentumItem(BaseModel):
     symbol: str
     base_asset: str
     quote_asset: str = "USDC"
-    side: Literal["long", "short"]
+    side: Literal["long", "short", "neutral"]
     state: Literal["NO_TRADE", "WATCH", "TRIGGERED"]
     stage: str
     momentum_score: float
@@ -112,7 +112,7 @@ class MomentumItem(BaseModel):
     turnover_24h_usdc: float
     spread_bps: float
     trigger: dict[str, Any]
-    invalidation_price: float
+    invalidation_price: float | None = None
     bullish_scenario: str
     bearish_scenario: str
     why_now: list[str] = Field(default_factory=list)
@@ -126,6 +126,9 @@ class MomentumResponse(BaseModel):
     scanned_pairs: int
     failed_pairs: int = 0
     failed_symbols: list[str] = Field(default_factory=list)
+    calculation_failed_pairs: int = 0
+    calculation_failures: list[dict[str, str]] = Field(default_factory=list)
+    no_activity_pairs: int = 0
     minimum_score: float
     promotion_minimum_score: float | None = None
     items: list[MomentumItem] = Field(default_factory=list)
