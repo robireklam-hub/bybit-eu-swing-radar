@@ -8,8 +8,8 @@ from app.repository import RadarRepository
 
 app = FastAPI(
     title="Bybit EU Swing Radar API",
-    version="0.4.0",
-    description="Read-only cached USDC swing scanner plus all-pair explosive-move momentum radar.",
+    version="0.4.4",
+    description="Read-only cached USDC swing scanner with compact top-candidate and all-pair momentum endpoints.",
 )
 
 repo = RadarRepository()
@@ -50,6 +50,21 @@ async def scan(
     min_score: float = Query(70, ge=0, le=100),
 ):
     result = await repo.get_latest_scan(direction, limit, min_score)
+    if result is None:
+        raise HTTPException(
+            status_code=503,
+            detail="No fresh cached scan. Run and populate the background scanner first.",
+        )
+    return result
+
+
+@app.get("/v1/top-candidates", dependencies=[Depends(require_api_key)])
+async def top_candidates(
+    limit: int = Query(3, ge=1, le=5),
+    include_watchlist: bool = Query(True),
+):
+    """Return a compact strict long/short ranking without oversized scan payloads."""
+    result = await repo.get_top_candidates(limit, include_watchlist)
     if result is None:
         raise HTTPException(
             status_code=503,

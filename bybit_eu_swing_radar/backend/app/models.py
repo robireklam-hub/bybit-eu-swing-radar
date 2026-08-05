@@ -136,3 +136,50 @@ class MomentumResponse(BaseModel):
     minimum_score: float
     promotion_minimum_score: float | None = None
     items: list[MomentumItem] = Field(default_factory=list)
+
+
+
+class CompactCandidate(BaseModel):
+    symbol: str
+    side: Side
+    category: Literal["STRICT", "WATCH_ONLY"]
+    state: SetupState
+    grade: Literal["A", "B", "WATCH", "NO_TRADE"]
+    decision: Literal["TRADE", "WAIT", "NO_TRADE"]
+    last_price: float | None = None
+    setup_score: float
+    expansion_score: float
+    direction_score: float
+    quality_score: float
+    shortable: bool = False
+    tradeable: bool
+    execution_status: str
+    execution_modes: list[str] = Field(default_factory=list)
+    trigger: PriceCondition | None = None
+    entry_zone: PriceZone | None = None
+    stop: float | None = None
+    invalidation: str | None = None
+    targets: list[float] = Field(default_factory=list)
+    expected_rr: float | None = None
+    turnover_24h_usdc: float | None = None
+    spread_bps: float | None = None
+    volume_ratio_4h: float | None = None
+    liquidity_reasons: list[str] = Field(default_factory=list)
+    weakest_point: str | None = None
+    data_quality: DataQuality
+    missing_data: list[str] = Field(default_factory=list)
+
+
+class TopCandidatesResponse(BaseModel):
+    data_as_of: datetime
+    data_as_of_budapest: str
+    data_quality: DataQuality
+    market_regime: dict[str, Any] = Field(default_factory=dict)
+    requested_limit: int
+    strict_long_count: int
+    strict_short_count: int
+    strict_longs: list[CompactCandidate] = Field(default_factory=list)
+    strict_shorts: list[CompactCandidate] = Field(default_factory=list)
+    watch_only_longs: list[CompactCandidate] = Field(default_factory=list)
+    watch_only_shorts: list[CompactCandidate] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
