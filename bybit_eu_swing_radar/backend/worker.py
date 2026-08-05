@@ -79,10 +79,13 @@ TOP_LIQUID_DISCOVERY = min(max(env_int("TOP_LIQUID_DISCOVERY", 15), 5), MAX_UNIV
 COINALYZE_ENRICH_LIMIT = min(max(env_int("COINALYZE_ENRICH_LIMIT", 9), 1), 9)
 KLINE_LIMIT = min(max(env_int("KLINE_LIMIT", 220), 100), 1000)
 HTTP_CONCURRENCY = min(max(env_int("HTTP_CONCURRENCY", 5), 1), 10)
-MOMENTUM_HTTP_CONCURRENCY = min(max(env_int("MOMENTUM_HTTP_CONCURRENCY", 8), 2), 16)
-MOMENTUM_OUTPUT_LIMIT = min(max(env_int("MOMENTUM_OUTPUT_LIMIT", 20), 5), 50)
+MOMENTUM_HTTP_CONCURRENCY = min(max(env_int("MOMENTUM_HTTP_CONCURRENCY", 4), 1), 8)
+MOMENTUM_OUTPUT_LIMIT = min(max(env_int("MOMENTUM_OUTPUT_LIMIT", 120), 20), 150)
 MOMENTUM_DEEP_LIMIT = min(max(env_int("MOMENTUM_DEEP_LIMIT", 10), 3), 20)
 MOMENTUM_MIN_SCORE = env_float("MOMENTUM_MIN_SCORE", 50.0)
+MOMENTUM_SYMBOL_RETRY_PASSES = min(max(env_int("MOMENTUM_SYMBOL_RETRY_PASSES", 2), 0), 4)
+BYBIT_MAX_RETRIES = min(max(env_int("BYBIT_MAX_RETRIES", 4), 1), 8)
+BYBIT_RETRY_BASE_SECONDS = max(env_float("BYBIT_RETRY_BASE_SECONDS", 0.75), 0.1)
 DEFAULT_DISCOVERY_SYMBOLS = {
     "BTCUSDC", "ETHUSDC", "SOLUSDC", "XRPUSDC",
     "AVAXUSDC", "APTUSDC", "ADAUSDC", "LINKUSDC", "DOGEUSDC",
@@ -185,12 +188,35 @@ class BybitAPI:
         self.client = client
 
     async def public_get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        response = await self.client.get(f"{BYBIT_BASE_URL}{path}", params=params)
-        response.raise_for_status()
-        payload = response.json()
-        if payload.get("retCode") != 0:
-            raise RuntimeError(f"Bybit error {payload.get('retCode')}: {payload.get('retMsg')}")
-        return payload
+        """Call a Bybit public endpoint with bounded retry/backoff."""
+        last_error: Exception | None = None
+        for attempt in range(BYBIT_MAX_RETRIES):
+            try:
+                response = await self.client.get(f"{BYBIT_BASE_URL}{path}", params=params)
+
+                if response.status_code == 429 or response.status_code >= 500:
+                    if attempt + 1 < BYBIT_MAX_RETRIES:
+                        await asyncio.sleep(BYBIT_RETRY_BASE_SECONDS * (2 ** attempt))
+                        continue
+
+                response.raise_for_status()
+                payload = response.json()
+                ret_code = int(payload.get("retCode", 0))
+
+                if ret_code in {10000, 10006, 10016} and attempt + 1 < BYBIT_MAX_RETRIES:
+                    await asyncio.sleep(BYBIT_RETRY_BASE_SECONDS * (2 ** attempt))
+                    continue
+
+                if ret_code != 0:
+                    raise RuntimeError(f"Bybit error {ret_code}: {payload.get('retMsg')}")
+                return payload
+            except (httpx.RequestError, httpx.HTTPStatusError, ValueError, RuntimeError) as exc:
+                last_error = exc
+                if attempt + 1 >= BYBIT_MAX_RETRIES:
+                    raise
+                await asyncio.sleep(BYBIT_RETRY_BASE_SECONDS * (2 ** attempt))
+
+        raise RuntimeError(f"Bybit request failed after retries: {last_error}")
 
 
     async def instruments(self) -> list[dict[str, Any]]:
@@ -563,12 +589,18 @@ async def fetch_momentum_bars(
 ) -> tuple[Instrument, list[Bar], list[Bar]] | None:
     """Fetch lightweight closed-candle data for every eligible USDC pair."""
     try:
+        # One semaphore permit now means one active Bybit request. The previous
+        # implementation started two simultaneous requests per symbol.
         async with semaphore:
-            bars_5m, bars_15m = await asyncio.gather(
-                api.klines(instrument.symbol, "5", limit=72),
-                api.klines(instrument.symbol, "15", limit=80),
-            )
+            bars_5m = await api.klines(instrument.symbol, "5", limit=72)
+            bars_15m = await api.klines(instrument.symbol, "15", limit=80)
+
         if len(bars_5m) < 18 or len(bars_15m) < 12:
+            print(
+                f"WARN {instrument.symbol}: insufficient momentum history "
+                f"(5m={len(bars_5m)}, 15m={len(bars_15m)})",
+                file=sys.stderr,
+            )
             return None
         return instrument, bars_5m, bars_15m
     except Exception as exc:
@@ -765,10 +797,18 @@ def build_momentum_item(momentum: MomentumAnalysis, now: datetime) -> dict[str, 
     }
 
 
-def rank_momentum(momentums: list[MomentumAnalysis], now: datetime) -> list[dict[str, Any]]:
+def rank_momentum(
+    momentums: list[MomentumAnalysis],
+    now: datetime,
+    cache_min_score: float = 0.0,
+) -> list[dict[str, Any]]:
+    """Cache low-score items too so min_score=0 is a real audit request."""
     ranked = sorted(
-        [item for item in momentums if item.score >= MOMENTUM_MIN_SCORE],
+        [item for item in momentums if item.score >= cache_min_score],
         key=lambda item: (
+            item.stage == "BREAKOUT_CONFIRMED",
+            item.stage == "EARLY_ACCELERATION",
+            item.stage == "MOMENTUM_WATCH",
             item.score,
             abs(item.instrument.price_change_24h_pct),
             item.instrument.turnover_24h,
@@ -1472,7 +1512,31 @@ async def run() -> None:
         momentum_fetched = await asyncio.gather(
             *(fetch_momentum_bars(bybit, instrument, momentum_semaphore) for instrument in candidate_pool)
         )
-        momentum_valid = [item for item in momentum_fetched if item is not None]
+        momentum_by_symbol = {
+            item[0].symbol: item for item in momentum_fetched if item is not None
+        }
+
+        for retry_pass in range(MOMENTUM_SYMBOL_RETRY_PASSES):
+            missing_instruments = [
+                instrument for instrument in candidate_pool
+                if instrument.symbol not in momentum_by_symbol
+            ]
+            if not missing_instruments:
+                break
+            await asyncio.sleep(1.5 * (retry_pass + 1))
+            retry_semaphore = asyncio.Semaphore(max(1, MOMENTUM_HTTP_CONCURRENCY // 2))
+            retried = await asyncio.gather(
+                *(fetch_momentum_bars(bybit, instrument, retry_semaphore) for instrument in missing_instruments)
+            )
+            for item in retried:
+                if item is not None:
+                    momentum_by_symbol[item[0].symbol] = item
+
+        momentum_valid = list(momentum_by_symbol.values())
+        momentum_failed_symbols = sorted(
+            instrument.symbol for instrument in candidate_pool
+            if instrument.symbol not in momentum_by_symbol
+        )
         momentum_analyses: list[MomentumAnalysis] = []
         for instrument, bars_5m, bars_15m in momentum_valid:
             try:
@@ -1497,7 +1561,10 @@ async def run() -> None:
             "analysis_universe_size": len(universe),
             "tradeable_universe_size": sum(1 for item in universe if item.tradeable),
             "liquidity_blocked_size": sum(1 for item in universe if not item.tradeable),
+            "momentum_eligible_pairs": len(candidate_pool),
             "momentum_scanned_pairs": len(momentum_analyses),
+            "momentum_failed_pairs": len(momentum_failed_symbols),
+            "momentum_failed_symbols": momentum_failed_symbols,
             "momentum_candidates": sum(1 for item in momentum_analyses if item.score >= MOMENTUM_MIN_SCORE),
             "momentum_promoted_to_deep_scan": sum(1 for item in momentum_promoted if item.symbol in seen),
         })
@@ -1542,11 +1609,15 @@ async def run() -> None:
             item for item in all_watchlist
             if item.get("metrics", {}).get("execution_status") == "LIQUIDITY_BLOCKED"
         ]
-        momentum_items = rank_momentum(momentum_analyses, now)
+        momentum_items = rank_momentum(momentum_analyses, now, cache_min_score=0.0)
         momentum_radar = {
             "data_as_of": now.isoformat(),
+            "eligible_pairs": len(candidate_pool),
             "scanned_pairs": len(momentum_analyses),
-            "minimum_score": MOMENTUM_MIN_SCORE,
+            "failed_pairs": len(momentum_failed_symbols),
+            "failed_symbols": momentum_failed_symbols,
+            "minimum_score": 0.0,
+            "promotion_minimum_score": MOMENTUM_MIN_SCORE,
             "items": momentum_items,
         }
         regime = build_market_regime(analyses, now, coinalyze_ok, borrow_ok)
@@ -1559,6 +1630,10 @@ async def run() -> None:
             "coinalyze_enrichment_limit": COINALYZE_ENRICH_LIMIT,
             "borrowability_checked_symbols": len(analyses) if borrow_ok else 0,
             "symbols_missing_history": missing_history,
+            "momentum_eligible_pairs": len(candidate_pool),
+            "momentum_scanned_pairs": len(momentum_analyses),
+            "momentum_failed_pairs": len(momentum_failed_symbols),
+            "momentum_failed_symbols": momentum_failed_symbols,
         }
         scan = {
             "data_as_of": now.isoformat(),
@@ -1587,7 +1662,10 @@ async def run() -> None:
                 "short_candidates": len(short_setups),
                 "extended_watchlist_items": len(watchlist),
                 "liquidity_blocked_items": len(liquidity_blocked),
+                "momentum_eligible_pairs": len(candidate_pool),
                 "momentum_scanned_pairs": len(momentum_analyses),
+                "momentum_failed_pairs": len(momentum_failed_symbols),
+                "momentum_failed_symbols": momentum_failed_symbols,
                 "momentum_output_items": len(momentum_items),
             },
             "sources": [
@@ -1623,6 +1701,7 @@ async def run() -> None:
             f"watchlist={len(watchlist)}, liquidity_blocked={len(liquidity_blocked)}, "
             f"coinalyze={enriched_count}/{len(analyses)}, longs={len(long_setups)}, "
             f"shorts={len(short_setups)}, momentum={len(momentum_items)}, "
+            f"momentum_coverage={len(momentum_analyses)}/{len(candidate_pool)}, "
             f"quality={data_quality}, duration={elapsed:.1f}s"
         )
 
