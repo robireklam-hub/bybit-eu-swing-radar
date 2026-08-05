@@ -8,8 +8,8 @@ from app.repository import RadarRepository
 
 app = FastAPI(
     title="Bybit EU Trading Radar API",
-    version="0.5.2",
-    description="Read-only cached USDC swing and day-trade scanner with separate strategy engines.",
+    version="0.6.0",
+    description="Read-only cached USDC swing/day scanner with prospective day-trade journaling.",
 )
 
 repo = RadarRepository()
@@ -158,6 +158,35 @@ async def day_trade_status():
             detail="No cached day-trade status. Run the day-trade worker first.",
         )
     return result
+
+
+@app.get(
+    "/v1/day-trade/journal/summary",
+    dependencies=[Depends(require_api_key)],
+)
+async def day_trade_journal_summary(
+    days: int = Query(30, ge=1, le=365),
+    signal_class: str = Query("all", pattern="^(all|STRICT|SHADOW)$"),
+):
+    return await repo.get_day_trade_journal_summary(days, signal_class)
+
+
+@app.get(
+    "/v1/day-trade/journal/signals",
+    dependencies=[Depends(require_api_key)],
+)
+async def day_trade_journal_signals(
+    status: str = Query("all", pattern="^(all|OPEN|CLOSED)$"),
+    signal_class: str = Query("all", pattern="^(all|STRICT|SHADOW)$"),
+    symbol: str | None = Query(None, min_length=3, max_length=30),
+    limit: int = Query(50, ge=1, le=100),
+):
+    return await repo.get_day_trade_journal_signals(
+        status,
+        signal_class,
+        symbol,
+        limit,
+    )
 
 
 @app.get("/v1/data-status", dependencies=[Depends(require_api_key)])
