@@ -8,8 +8,8 @@ from app.repository import RadarRepository
 
 app = FastAPI(
     title="Bybit EU Trading Radar API",
-    version="0.6.0",
-    description="Read-only cached USDC swing/day scanner with prospective day-trade journaling.",
+    version="0.7.0",
+    description="Read-only cached USDC swing/day scanner with prospective journaling and historical replay.",
 )
 
 repo = RadarRepository()
@@ -186,6 +186,44 @@ async def day_trade_journal_signals(
         signal_class,
         symbol,
         limit,
+    )
+
+
+@app.get(
+    "/v1/day-trade/backtest/status",
+    dependencies=[Depends(require_api_key)],
+)
+async def day_trade_backtest_status():
+    return await repo.get_day_trade_backtest_status()
+
+
+@app.get(
+    "/v1/day-trade/backtest/summary",
+    dependencies=[Depends(require_api_key)],
+)
+async def day_trade_backtest_summary(
+    signal_class: str = Query("all", pattern="^(all|STRICT|SHADOW)$"),
+    side: str = Query("both", pattern="^(both|long|short)$"),
+    primary_only: bool = Query(True),
+):
+    return await repo.get_day_trade_backtest_summary(
+        signal_class, side, primary_only
+    )
+
+
+@app.get(
+    "/v1/day-trade/backtest/signals",
+    dependencies=[Depends(require_api_key)],
+)
+async def day_trade_backtest_signals(
+    signal_class: str = Query("all", pattern="^(all|STRICT|SHADOW)$"),
+    side: str = Query("both", pattern="^(both|long|short)$"),
+    symbol: str | None = Query(None, min_length=3, max_length=30),
+    primary_only: bool = Query(True),
+    limit: int = Query(50, ge=1, le=100),
+):
+    return await repo.get_day_trade_backtest_signals(
+        signal_class, side, symbol, primary_only, limit
     )
 
 
