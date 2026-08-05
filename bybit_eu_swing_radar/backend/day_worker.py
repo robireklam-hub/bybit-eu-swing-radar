@@ -562,6 +562,48 @@ def nearest_barrier(
     return max(levels) if levels else None
 
 
+
+def watch_bucket(
+    tradeable: bool,
+    shortable: bool,
+    side: str,
+    conflict_4h: bool,
+    expected_rr: float,
+    score: float,
+) -> str:
+    if not tradeable or (side == "short" and not shortable):
+        return "LIQUIDITY_OR_BORROW_BLOCKED"
+    if conflict_4h:
+        return "TIMEFRAME_CONFLICT"
+    if expected_rr < 1.0:
+        return "POOR_RR"
+    if score >= 65 and expected_rr >= 1.2:
+        return "NEAR_STRICT"
+    return "LOW_CONVICTION"
+
+
+def watch_rank(item: dict[str, Any]) -> tuple:
+    bucket_rank = {
+        "NEAR_STRICT": 4,
+        "LOW_CONVICTION": 3,
+        "TIMEFRAME_CONFLICT": 2,
+        "POOR_RR": 1,
+        "LIQUIDITY_OR_BORROW_BLOCKED": 0,
+    }
+    executable_side = (
+        item["tradeable"]
+        and not item["timeframe_conflict"]
+        and (item["side"] == "long" or item["shortable"])
+    )
+    return (
+        bucket_rank.get(item.get("watch_bucket", ""), -1),
+        1 if executable_side else 0,
+        item["expected_rr"],
+        item["quality_score"],
+        item["setup_score"],
+        item["metrics"].get("turnover_24h_usdc", 0.0),
+    )
+
 def build_day_candidate(
     analysis: DayAnalysis,
     side: str,
@@ -668,19 +710,25 @@ def build_day_candidate(
     gross_tp3 = entry + direction_multiplier * risk * 2.5
 
     barrier = nearest_barrier(analysis, side, entry)
-    target_for_rr = gross_tp2
+
+    # Targets remain monotonic and preserve their semantic meaning:
+    # TP1=1R, TP2=minimum required RR, TP3=2.5R.
+    # A nearer structural barrier is reported separately and only constrains
+    # the realistic RR calculation; it never replaces or reorders TP levels.
+    reward_reference = gross_tp2
     if barrier is not None:
         if side == "long" and entry < barrier < gross_tp2:
-            target_for_rr = barrier
+            reward_reference = barrier
         elif side == "short" and gross_tp2 < barrier < entry:
-            target_for_rr = barrier
+            reward_reference = barrier
 
     assumed_cost = entry * DAY_ASSUMED_ROUND_TRIP_COST_BPS / 10_000.0
-    gross_reward = abs(target_for_rr - entry)
+    gross_reward = abs(reward_reference - entry)
     expected_rr = max(
         0.0,
         (gross_reward - assumed_cost) / max(risk + assumed_cost, 1e-12),
     )
+    barrier_rr = abs(barrier - entry) / risk if barrier is not None else None
 
     strict_execution = analysis.instrument.tradeable and (
         side == "long" or analysis.shortable
@@ -722,6 +770,22 @@ def build_day_candidate(
         else "DAY_TRADE_BLOCKED"
     )
     category = "STRICT" if strict else "WATCH_ONLY"
+    technical_grade = setup_grade(score)
+    displayed_grade = technical_grade if strict else (
+        "WATCH" if score >= 55 else "NO_TRADE"
+    )
+    candidate_watch_bucket = (
+        "STRICT"
+        if strict
+        else watch_bucket(
+            analysis.instrument.tradeable,
+            analysis.shortable,
+            side,
+            conflict_4h,
+            expected_rr,
+            score,
+        )
+    )
     if category == "WATCH_ONLY":
         decision = "NO_TRADE"
 
@@ -765,7 +829,9 @@ def build_day_candidate(
         "side": side,
         "category": category,
         "state": state,
-        "grade": setup_grade(score),
+        "grade": displayed_grade,
+        "technical_grade": technical_grade,
+        "watch_bucket": candidate_watch_bucket,
         "decision": decision,
         "setup_type": setup_type,
         "last_price": round_to_tick(current, analysis.instrument.tick_size),
@@ -778,10 +844,8 @@ def build_day_candidate(
             else (["USDC_SPOT_MARGIN_SHORT"] if analysis.shortable else [])
         ),
         "expansion_score": round(analysis.expansion_score, 2),
-        "direction_score": round(
-            analysis.direction_score if side == "long" else -analysis.direction_score,
-            2,
-        ),
+        "direction_score": round(analysis.direction_score, 2),
+        "side_direction_score": round(side_direction, 2),
         "quality_score": round(analysis.quality_score, 2),
         "setup_score": round(score, 2),
         "context_4h": analysis.structure_4h,
@@ -804,7 +868,7 @@ def build_day_candidate(
         "invalidation": invalidation,
         "targets": [
             round_to_tick(gross_tp1, analysis.instrument.tick_size),
-            round_to_tick(target_for_rr, analysis.instrument.tick_size),
+            round_to_tick(gross_tp2, analysis.instrument.tick_size),
             round_to_tick(gross_tp3, analysis.instrument.tick_size),
         ],
         "expected_rr": round(expected_rr, 2),
@@ -826,6 +890,17 @@ def build_day_candidate(
             "atr_15m": round_to_tick(analysis.atr_15m, analysis.instrument.tick_size),
             "atr_ratio_15m": round(analysis.atr_ratio_15m, 3),
             "distance_to_trigger_atr_5m": round(distance_atr, 3),
+            "nearest_structural_barrier": (
+                None
+                if barrier is None
+                else round_to_tick(barrier, analysis.instrument.tick_size)
+            ),
+            "barrier_rr_gross": (
+                None if barrier_rr is None else round(barrier_rr, 2)
+            ),
+            "target_path_valid": (
+                barrier is None or barrier_rr is None or barrier_rr >= DAY_MIN_RR
+            ),
             "assumed_round_trip_cost_bps": DAY_ASSUMED_ROUND_TRIP_COST_BPS,
             "liquidity_reasons": liquidity_reasons,
             "max_borrowing_amount": analysis.max_borrowing_amount,
@@ -854,7 +929,8 @@ def build_day_candidate(
 def build_day_regime(
     analyses: list[DayAnalysis],
     now: datetime,
-    coinalyze_ok: bool,
+    coinalyze_request_ok: bool,
+    coinalyze_enriched_symbols: int,
     borrowability_ok: bool,
 ) -> dict[str, Any]:
     btc = next(
@@ -878,7 +954,18 @@ def build_day_regime(
         elif btc.atr_ratio_15m <= 0.75:
             volatility = "compressed"
 
-    overall = "GOOD" if coinalyze_ok and borrowability_ok else "PARTIAL"
+    if len(analyses) > 0 and coinalyze_enriched_symbols == len(analyses):
+        coinalyze_quality = "GOOD"
+    elif coinalyze_enriched_symbols > 0:
+        coinalyze_quality = "PARTIAL"
+    else:
+        coinalyze_quality = "DEGRADED" if not coinalyze_request_ok else "PARTIAL"
+
+    overall = (
+        "GOOD"
+        if coinalyze_quality == "GOOD" and borrowability_ok
+        else "PARTIAL"
+    )
     return {
         "strategy_mode": "DAY_TRADE",
         "data_as_of": now.isoformat(),
@@ -894,7 +981,7 @@ def build_day_regime(
         "source_quality": {
             "Bybit EU market data": "GOOD",
             "Bybit EU Spot Margin": "GOOD" if borrowability_ok else "PARTIAL",
-            "Coinalyze derivatives": "GOOD" if coinalyze_ok else "PARTIAL",
+            "Coinalyze derivatives": coinalyze_quality,
         },
         "notes": [
             "Day-trade context uses 4H/1H, setup 15m and closed 5m trigger.",
@@ -1088,7 +1175,7 @@ async def run() -> None:
                 item for item in all_candidates
                 if item["side"] == "long" and item["category"] == "WATCH_ONLY"
             ],
-            key=lambda item: item["setup_score"],
+            key=watch_rank,
             reverse=True,
         )
         watch_shorts = sorted(
@@ -1096,12 +1183,19 @@ async def run() -> None:
                 item for item in all_candidates
                 if item["side"] == "short" and item["category"] == "WATCH_ONLY"
             ],
-            key=lambda item: item["setup_score"],
+            key=watch_rank,
             reverse=True,
         )
 
+        coinalyze_enriched_count = sum(
+            1 for item in analyses if item.derivatives
+        )
         regime = build_day_regime(
-            analyses, now, coinalyze_ok, borrow_ok
+            analyses,
+            now,
+            coinalyze_ok,
+            coinalyze_enriched_count,
+            borrow_ok,
         )
         data_quality = regime["data_quality"]
         coverage = {
@@ -1118,9 +1212,7 @@ async def run() -> None:
             "deep_context_failed_symbols": context_failed_symbols,
             "deep_calculation_failed_pairs": len(calculation_failures),
             "deep_calculation_failures": calculation_failures,
-            "coinalyze_enriched_symbols": sum(
-                1 for item in analyses if item.derivatives
-            ),
+            "coinalyze_enriched_symbols": coinalyze_enriched_count,
             "borrowability_checked_symbols": len(analyses) if borrow_ok else 0,
         }
 
@@ -1183,14 +1275,25 @@ async def run() -> None:
                 },
                 {
                     "source": "Coinalyze",
-                    "status": "ok" if coinalyze_ok else "partial",
-                    "data_as_of": now.isoformat() if coinalyze_ok else None,
-                    "coverage": (
-                        f"{coverage['coinalyze_enriched_symbols']}/{len(analyses)}"
+                    "status": (
+                        "ok"
+                        if coinalyze_enriched_count == len(analyses) and len(analyses) > 0
+                        else "partial"
+                        if coinalyze_enriched_count > 0
+                        else "degraded"
                     ),
-                    "missing_fields": [] if coinalyze_ok else [
-                        coinalyze_error or "Derivatives enrichment unavailable"
-                    ],
+                    "data_as_of": (
+                        now.isoformat() if coinalyze_enriched_count > 0 else None
+                    ),
+                    "coverage": f"{coinalyze_enriched_count}/{len(analyses)}",
+                    "missing_fields": (
+                        []
+                        if coinalyze_enriched_count == len(analyses)
+                        else [
+                            coinalyze_error
+                            or "Derivatives enrichment is only partially available"
+                        ]
+                    ),
                 },
             ],
         }
