@@ -49,6 +49,7 @@ class Setup(BaseModel):
     thesis: list[str] = Field(default_factory=list)
     expansion_score: float
     direction_score: float
+    side_direction_score: float
     quality_score: float
     setup_score: float
     trigger: PriceCondition | None = None
@@ -145,6 +146,8 @@ class CompactCandidate(BaseModel):
     category: Literal["STRICT", "WATCH_ONLY"]
     state: SetupState
     grade: Literal["A", "B", "WATCH", "NO_TRADE"]
+    technical_grade: Literal["A", "B", "WATCH", "NO_TRADE"] | None = None
+    watch_bucket: str | None = None
     decision: Literal["TRADE", "WAIT", "NO_TRADE"]
     last_price: float | None = None
     setup_score: float
