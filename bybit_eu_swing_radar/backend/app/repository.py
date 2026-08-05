@@ -3,7 +3,7 @@ import json
 import asyncpg
 
 from app.config import settings
-from app.models import MarketRegime, ScanResponse, Setup, WatchlistResponse
+from app.models import MarketRegime, MomentumResponse, ScanResponse, Setup, WatchlistResponse
 
 
 class RadarRepository:
@@ -60,3 +60,16 @@ class RadarRepository:
 
     async def get_data_status(self) -> dict | None:
         return await self.get_cache("data_status")
+
+
+    async def get_momentum_radar(
+        self, direction: str = "both", limit: int = 10, min_score: float = 50.0
+    ) -> MomentumResponse | None:
+        payload = await self.get_cache("momentum_radar")
+        if payload is None:
+            return None
+        response = MomentumResponse.model_validate(payload)
+        if direction in {"long", "short"}:
+            response.items = [item for item in response.items if item.side == direction]
+        response.items = [item for item in response.items if item.momentum_score >= min_score][:limit]
+        return response

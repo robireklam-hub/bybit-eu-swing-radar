@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 
 
 DataQuality = Literal["GOOD", "PARTIAL", "DEGRADED"]
-SetupState = Literal["WATCH", "ARMED", "TRIGGERED", "MANAGED", "INVALIDATED", "EXPIRED"]
+SetupState = Literal["NO_TRADE", "WATCH", "ARMED", "TRIGGERED", "MANAGED", "INVALIDATED", "EXPIRED"]
 Side = Literal["long", "short", "neutral"]
 
 
@@ -17,6 +17,7 @@ class MarketRegime(BaseModel):
     alt_breadth: float | None = None
     volatility_regime: str
     preferred_side: Literal["long", "short", "neutral"]
+    source_quality: dict[str, str] = Field(default_factory=dict)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -76,6 +77,7 @@ class ScanResponse(BaseModel):
     shorts: list[Setup]
     extended_watchlist: list[Setup] = Field(default_factory=list)
     liquidity_blocked: list[Setup] = Field(default_factory=list)
+    momentum_radar: list[dict[str, Any]] = Field(default_factory=list)
     universe_stats: dict[str, Any] = Field(default_factory=dict)
     coverage: dict[str, Any] = Field(default_factory=dict)
     exclusions: list[dict[str, str]] = Field(default_factory=list)
@@ -84,3 +86,42 @@ class ScanResponse(BaseModel):
 class WatchlistResponse(BaseModel):
     data_as_of: datetime
     items: list[Setup] = Field(default_factory=list)
+
+
+class MomentumItem(BaseModel):
+    symbol: str
+    base_asset: str
+    quote_asset: str = "USDC"
+    side: Literal["long", "short"]
+    state: Literal["NO_TRADE", "WATCH", "TRIGGERED"]
+    stage: str
+    momentum_score: float
+    last_price: float
+    price_change_24h_pct: float
+    return_15m_pct: float
+    return_1h_pct: float
+    return_4h_pct: float
+    acceleration_pct: float
+    volume_ratio_5m: float
+    turnover_acceleration_1h: float
+    extension_atr_15m: float
+    breakout_confirmed: bool
+    chase_risk: bool
+    tradeable: bool
+    execution_status: str
+    turnover_24h_usdc: float
+    spread_bps: float
+    trigger: dict[str, Any]
+    invalidation_price: float
+    bullish_scenario: str
+    bearish_scenario: str
+    why_now: list[str] = Field(default_factory=list)
+    decision: str
+    data_as_of: datetime
+
+
+class MomentumResponse(BaseModel):
+    data_as_of: datetime
+    scanned_pairs: int
+    minimum_score: float
+    items: list[MomentumItem] = Field(default_factory=list)

@@ -8,8 +8,8 @@ from app.repository import RadarRepository
 
 app = FastAPI(
     title="Bybit EU Swing Radar API",
-    version="0.3.0",
-    description="Read-only cached USDC-only swing setup and discovery-watch API.",
+    version="0.4.0",
+    description="Read-only cached USDC swing scanner plus all-pair explosive-move momentum radar.",
 )
 
 repo = RadarRepository()
@@ -79,6 +79,18 @@ async def watchlist(limit: int = Query(20, ge=1, le=20)):
     result = await repo.get_watchlist(limit)
     if result is None:
         raise HTTPException(status_code=503, detail="No cached watchlist.")
+    return result
+
+
+@app.get("/v1/momentum-radar", dependencies=[Depends(require_api_key)])
+async def momentum_radar(
+    direction: str = Query("both", pattern="^(long|short|both)$"),
+    limit: int = Query(10, ge=1, le=50),
+    min_score: float = Query(50, ge=0, le=100),
+):
+    result = await repo.get_momentum_radar(direction, limit, min_score)
+    if result is None:
+        raise HTTPException(status_code=503, detail="No cached momentum radar. Run the background worker first.")
     return result
 
 
