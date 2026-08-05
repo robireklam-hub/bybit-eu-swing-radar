@@ -201,6 +201,8 @@ class DayTradeCandidate(BaseModel):
     category: Literal["STRICT", "WATCH_ONLY"]
     state: DayTradeState
     grade: Literal["A", "B", "WATCH", "NO_TRADE"]
+    technical_grade: Literal["A", "B", "WATCH", "NO_TRADE"] | None = None
+    watch_bucket: str | None = None
     decision: Literal["TRADE", "WAIT", "NO_TRADE"]
     setup_type: str
     last_price: float
@@ -210,6 +212,7 @@ class DayTradeCandidate(BaseModel):
     execution_modes: list[str] = Field(default_factory=list)
     expansion_score: float
     direction_score: float
+    side_direction_score: float
     quality_score: float
     setup_score: float
     context_4h: str
@@ -248,6 +251,7 @@ class DayTradeScanResponse(BaseModel):
     coverage: dict[str, Any] = Field(default_factory=dict)
     assumptions: dict[str, Any] = Field(default_factory=dict)
     exclusions: list[dict[str, str]] = Field(default_factory=list)
+    journal: dict[str, Any] = Field(default_factory=dict)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -267,3 +271,91 @@ class DayTradeTopCandidatesResponse(BaseModel):
     coverage: dict[str, Any] = Field(default_factory=dict)
     assumptions: dict[str, Any] = Field(default_factory=dict)
     notes: list[str] = Field(default_factory=list)
+
+
+JournalSignalClass = Literal["STRICT", "SHADOW"]
+JournalSignalStatus = Literal["OPEN", "CLOSED"]
+
+
+class DayTradeJournalSignal(BaseModel):
+    id: int
+    signal_key: str
+    strategy_version: str
+    signal_class: JournalSignalClass
+    symbol: str
+    side: Literal["long", "short"]
+    status: JournalSignalStatus
+    opened_at: datetime
+    expires_at: datetime
+    closed_at: datetime | None = None
+    setup_type: str
+    entry_price: float
+    trigger_price: float
+    stop_price: float
+    tp1: float
+    tp2: float
+    tp3: float
+    expected_rr: float
+    modeled_tp2_r: float
+    entry_deviation_bps: float
+    entry_within_zone: bool
+    setup_score: float
+    expansion_score: float
+    direction_score: float
+    side_direction_score: float
+    quality_score: float
+    bars_observed: int
+    mfe_r: float
+    mae_r: float
+    exit_price: float | None = None
+    exit_reason: str | None = None
+    gross_r: float | None = None
+    net_r: float | None = None
+    cost_bps: float
+
+
+class JournalAggregate(BaseModel):
+    sample_size: int
+    open_count: int
+    closed_count: int
+    tp2_count: int
+    stop_count: int
+    ambiguous_stop_count: int
+    time_exit_count: int
+    positive_net_count: int
+    target_hit_rate_pct: float | None = None
+    positive_net_rate_pct: float | None = None
+    average_net_r: float | None = None
+    median_net_r: float | None = None
+    profit_factor: float | None = None
+    average_mfe_r: float | None = None
+    average_mae_r: float | None = None
+
+
+class JournalGroupStats(BaseModel):
+    key: str
+    stats: JournalAggregate
+
+
+class DayTradeJournalSummaryResponse(BaseModel):
+    strategy_version: str
+    generated_at: datetime
+    window_days: int
+    requested_signal_class: Literal["all", "STRICT", "SHADOW"]
+    evidence_status: Literal[
+        "INSUFFICIENT_SAMPLE", "EARLY_SAMPLE", "EVALUABLE_SAMPLE"
+    ]
+    strict_closed_sample: int
+    overall: JournalAggregate
+    by_signal_class: list[JournalGroupStats] = Field(default_factory=list)
+    by_side: list[JournalGroupStats] = Field(default_factory=list)
+    by_setup_type: list[JournalGroupStats] = Field(default_factory=list)
+    latest_run: dict[str, Any] = Field(default_factory=dict)
+    methodology: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class DayTradeJournalSignalsResponse(BaseModel):
+    generated_at: datetime
+    count: int
+    items: list[DayTradeJournalSignal] = Field(default_factory=list)
