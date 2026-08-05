@@ -455,21 +455,52 @@ def build_universe(
     Lower-liquidity mandatory symbols remain in discovery as WATCH_ONLY, never
     as executable signals.
     """
-    ticker_map = {str(item.get("symbol", "")): item for item in tickers}
+    ticker_map = {str(item.get("symbol", "")).upper(): item for item in tickers}
     candidates: list[Instrument] = []
     exclusions: list[dict[str, str]] = []
-    active_usdc_count = 0
+
+    # Bybit EU can return more than one instrument-info row for the same spot
+    # symbol. Momentum coverage must compare unique markets with unique markets,
+    # not raw records with a symbol-keyed result dictionary.
+    raw_usdc_instrument_records = 0
+    normalized_by_symbol: dict[str, dict[str, Any]] = {}
+    duplicate_symbols: set[str] = set()
+
+    def record_rank(item: dict[str, Any]) -> tuple[int, int, int, int]:
+        return (
+            1 if item.get("status") == "Trading" else 0,
+            1 if str(item.get("stTag", "0")) != "1" else 0,
+            1 if str(item.get("marginTrading", "none")).lower() != "none" else 0,
+            1 if safe_float(item.get("priceFilter", {}).get("tickSize"), 0.0) > 0 else 0,
+        )
 
     for raw in instruments:
         symbol = str(raw.get("symbol", "")).upper()
+        quote = str(raw.get("quoteCoin", "")).upper()
+        if quote != "USDC" or not symbol:
+            continue
+        raw_usdc_instrument_records += 1
+
+        existing = normalized_by_symbol.get(symbol)
+        if existing is None:
+            normalized_by_symbol[symbol] = raw
+            continue
+
+        duplicate_symbols.add(symbol)
+        if record_rank(raw) > record_rank(existing):
+            normalized_by_symbol[symbol] = raw
+
+    unique_usdc_instruments = len(normalized_by_symbol)
+    duplicate_instrument_records = raw_usdc_instrument_records - unique_usdc_instruments
+    active_usdc_count = 0
+
+    for symbol, raw in normalized_by_symbol.items():
         base = str(raw.get("baseCoin", "")).upper()
         quote = str(raw.get("quoteCoin", "")).upper()
-        if quote != "USDC":
-            continue
-        active_usdc_count += 1
         if raw.get("status") != "Trading":
             exclusions.append({"symbol": symbol, "reason": "Not Trading"})
             continue
+        active_usdc_count += 1
         if base in STABLE_BASES:
             exclusions.append({"symbol": symbol, "reason": "Stable/fiat base asset excluded"})
             continue
@@ -552,6 +583,10 @@ def build_universe(
             selected.append(btc)
 
     stats = {
+        "raw_usdc_instrument_records": raw_usdc_instrument_records,
+        "unique_usdc_instruments": unique_usdc_instruments,
+        "duplicate_instrument_records": duplicate_instrument_records,
+        "duplicate_symbols": sorted(duplicate_symbols),
         "active_usdc_pairs": active_usdc_count,
         "eligible_discovery_pairs": len(candidates),
         "analysis_universe_size": len(selected),
@@ -1616,6 +1651,9 @@ async def run() -> None:
             f"{len(universe)} symbols; tradeable={universe_stats['tradeable_universe_size']}; "
             f"liquidity_blocked={universe_stats['liquidity_blocked_size']}; "
             f"mandatory_found={universe_stats['mandatory_found']}; "
+            f"raw_usdc_records={universe_stats['raw_usdc_instrument_records']}; "
+            f"unique_usdc={universe_stats['unique_usdc_instruments']}; "
+            f"duplicate_records={universe_stats['duplicate_instrument_records']}; "
             f"momentum_scanned={len(momentum_analyses)}; momentum_candidates={universe_stats['momentum_candidates']}"
         )
 
@@ -1655,6 +1693,10 @@ async def run() -> None:
         momentum_items = rank_momentum(momentum_analyses, now, cache_min_score=0.0)
         momentum_radar = {
             "data_as_of": now.isoformat(),
+            "raw_usdc_instrument_records": universe_stats["raw_usdc_instrument_records"],
+            "unique_usdc_instruments": universe_stats["unique_usdc_instruments"],
+            "duplicate_instrument_records": universe_stats["duplicate_instrument_records"],
+            "duplicate_symbols": universe_stats["duplicate_symbols"],
             "eligible_pairs": len(candidate_pool),
             "scanned_pairs": len(momentum_analyses),
             "failed_pairs": len(momentum_failed_symbols),
@@ -1671,6 +1713,10 @@ async def run() -> None:
         enriched_count = sum(1 for item in analyses if item.derivatives)
         data_quality = regime["data_quality"]
         coverage = {
+            "raw_usdc_instrument_records": universe_stats["raw_usdc_instrument_records"],
+            "unique_usdc_instruments": universe_stats["unique_usdc_instruments"],
+            "duplicate_instrument_records": universe_stats["duplicate_instrument_records"],
+            "duplicate_symbols": universe_stats["duplicate_symbols"],
             "analyzed_symbols": len(analyses),
             "coinalyze_enriched_symbols": enriched_count,
             "coinalyze_enrichment_limit": COINALYZE_ENRICH_LIMIT,
