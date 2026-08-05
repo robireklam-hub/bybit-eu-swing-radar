@@ -34,7 +34,13 @@ import httpx
 
 
 BUDAPEST = ZoneInfo("Europe/Budapest")
-INTERVAL_MS = {"60": 60 * 60 * 1000, "240": 4 * 60 * 60 * 1000, "D": 24 * 60 * 60 * 1000}
+INTERVAL_MS = {
+    "5": 5 * 60 * 1000,
+    "15": 15 * 60 * 1000,
+    "60": 60 * 60 * 1000,
+    "240": 4 * 60 * 60 * 1000,
+    "D": 24 * 60 * 60 * 1000,
+}
 STABLE_BASES = {
     "USDC", "USDT", "DAI", "FDUSD", "TUSD", "USDE", "USDS", "PYUSD",
     "EUR", "EURC", "BUSD", "USD1", "RLUSD", "USDD", "USDQ",
@@ -73,6 +79,10 @@ TOP_LIQUID_DISCOVERY = min(max(env_int("TOP_LIQUID_DISCOVERY", 15), 5), MAX_UNIV
 COINALYZE_ENRICH_LIMIT = min(max(env_int("COINALYZE_ENRICH_LIMIT", 9), 1), 9)
 KLINE_LIMIT = min(max(env_int("KLINE_LIMIT", 220), 100), 1000)
 HTTP_CONCURRENCY = min(max(env_int("HTTP_CONCURRENCY", 5), 1), 10)
+MOMENTUM_HTTP_CONCURRENCY = min(max(env_int("MOMENTUM_HTTP_CONCURRENCY", 8), 2), 16)
+MOMENTUM_OUTPUT_LIMIT = min(max(env_int("MOMENTUM_OUTPUT_LIMIT", 20), 5), 50)
+MOMENTUM_DEEP_LIMIT = min(max(env_int("MOMENTUM_DEEP_LIMIT", 10), 3), 20)
+MOMENTUM_MIN_SCORE = env_float("MOMENTUM_MIN_SCORE", 50.0)
 DEFAULT_DISCOVERY_SYMBOLS = {
     "BTCUSDC", "ETHUSDC", "SOLUSDC", "XRPUSDC",
     "AVAXUSDC", "APTUSDC", "ADAUSDC", "LINKUSDC", "DOGEUSDC",
@@ -110,6 +120,7 @@ class Instrument:
     bid: float
     ask: float
     spread_bps: float
+    price_change_24h_pct: float
     tradeable: bool
     liquidity_reasons: list[str]
     discovery_source: str
@@ -143,6 +154,30 @@ class Analysis:
     missing_data: list[str]
     shortable: bool = False
     max_borrowing_amount: float = 0.0
+
+
+@dataclass
+class MomentumAnalysis:
+    instrument: Instrument
+    bars_5m: list[Bar]
+    bars_15m: list[Bar]
+    score: float
+    side: str
+    return_15m_pct: float
+    return_1h_pct: float
+    return_4h_pct: float
+    previous_1h_return_pct: float
+    acceleration_pct: float
+    volume_ratio_5m: float
+    turnover_acceleration_1h: float
+    atr_15m: float
+    extension_atr: float
+    breakout_price: float
+    breakout_confirmed: bool
+    distance_to_breakout_atr: float
+    chase_risk: bool
+    stage: str
+    missing_data: list[str]
 
 
 class BybitAPI:
@@ -261,10 +296,11 @@ class CoinalyzeAPI:
         from_ts: int,
         to_ts: int,
         convert_to_usd: bool = False,
+        interval: str = "4hour",
     ) -> Any:
         params: dict[str, Any] = {
             "symbols": ",".join(symbols),
-            "interval": "4hour",
+            "interval": interval,
             "from": from_ts,
             "to": to_ts,
         }
@@ -385,7 +421,7 @@ def round_to_tick(value: float, tick_size: float) -> float:
 
 def build_universe(
     instruments: list[dict[str, Any]], tickers: list[dict[str, Any]]
-) -> tuple[list[Instrument], list[dict[str, str]], dict[str, Any]]:
+) -> tuple[list[Instrument], list[dict[str, str]], dict[str, Any], list[Instrument]]:
     """Build a broad analysis universe and a strict execution subset.
 
     All analyzed instruments are Bybit EU spot pairs quoted in USDC. The strict
@@ -422,6 +458,7 @@ def build_universe(
         turnover = safe_float(ticker.get("turnover24h"))
         volume = safe_float(ticker.get("volume24h"))
         last = safe_float(ticker.get("lastPrice"))
+        price_change_24h_pct = safe_float(ticker.get("price24hPcnt")) * 100.0
         bid = safe_float(ticker.get("bid1Price"))
         ask = safe_float(ticker.get("ask1Price"))
         if min(last, bid, ask) <= 0:
@@ -455,6 +492,7 @@ def build_universe(
                 bid=bid,
                 ask=ask,
                 spread_bps=spread_bps,
+                price_change_24h_pct=price_change_24h_pct,
                 tradeable=tradeable,
                 liquidity_reasons=liquidity_reasons,
                 discovery_source="mandatory" if symbol in DISCOVERY_SYMBOLS else "market",
@@ -499,7 +537,7 @@ def build_universe(
         "max_executable_spread_bps": MAX_SPREAD_BPS,
         "max_discovery_spread_bps": DISCOVERY_MAX_SPREAD_BPS,
     }
-    return selected, exclusions, stats
+    return selected, exclusions, stats, candidates
 
 
 async def fetch_analysis_bars(
@@ -518,6 +556,226 @@ async def fetch_analysis_bars(
     except Exception as exc:
         print(f"WARN {instrument.symbol}: kline fetch failed: {exc}", file=sys.stderr)
         return None
+
+
+async def fetch_momentum_bars(
+    api: BybitAPI, instrument: Instrument, semaphore: asyncio.Semaphore
+) -> tuple[Instrument, list[Bar], list[Bar]] | None:
+    """Fetch lightweight closed-candle data for every eligible USDC pair."""
+    try:
+        async with semaphore:
+            bars_5m, bars_15m = await asyncio.gather(
+                api.klines(instrument.symbol, "5", limit=72),
+                api.klines(instrument.symbol, "15", limit=80),
+            )
+        if len(bars_5m) < 18 or len(bars_15m) < 12:
+            return None
+        return instrument, bars_5m, bars_15m
+    except Exception as exc:
+        print(f"WARN {instrument.symbol}: momentum fetch failed: {exc}", file=sys.stderr)
+        return None
+
+
+def bars_return_pct(bars: list[Bar], periods: int) -> float:
+    if len(bars) <= periods or bars[-periods - 1].close <= 0:
+        return 0.0
+    return (bars[-1].close / bars[-periods - 1].close - 1.0) * 100.0
+
+
+def average_bar_value(bars: list[Bar], field: str) -> float:
+    return mean(getattr(bar, field) for bar in bars) if bars else 0.0
+
+
+def analyze_momentum(instrument: Instrument, bars_5m: list[Bar], bars_15m: list[Bar]) -> MomentumAnalysis:
+    current = bars_5m[-1].close
+    atr_15m = atr(bars_15m, 14)
+    if current <= 0 or atr_15m <= 0:
+        raise RuntimeError("Invalid momentum ATR or price")
+
+    return_15m = bars_return_pct(bars_5m, 3)
+    return_1h = bars_return_pct(bars_15m, 4)
+    return_4h = bars_return_pct(bars_15m, 16)
+    previous_1h = 0.0
+    if len(bars_15m) >= 9 and bars_15m[-9].close > 0:
+        previous_1h = (bars_15m[-5].close / bars_15m[-9].close - 1.0) * 100.0
+    acceleration = return_1h - previous_1h
+
+    recent_5m_volume = average_bar_value(bars_5m[-3:], "volume")
+    baseline_5m_volume = average_bar_value(bars_5m[-27:-3], "volume")
+    volume_ratio_5m = recent_5m_volume / baseline_5m_volume if baseline_5m_volume > 0 else 1.0
+
+    recent_hour_turnover = sum(bar.turnover for bar in bars_15m[-4:])
+    prior_hours = [
+        sum(bar.turnover for bar in bars_15m[start:start + 4])
+        for start in range(max(0, len(bars_15m) - 28), len(bars_15m) - 4, 4)
+        if len(bars_15m[start:start + 4]) == 4
+    ]
+    baseline_hour_turnover = mean(prior_hours[-6:])
+    turnover_acceleration = recent_hour_turnover / baseline_hour_turnover if baseline_hour_turnover > 0 else 1.0
+
+    prior_window = bars_15m[-21:-1]
+    prior_high = max(bar.high for bar in prior_window)
+    prior_low = min(bar.low for bar in prior_window)
+    weighted_direction = 0.50 * return_1h + 0.30 * return_4h + 0.20 * return_15m
+    side = "long" if weighted_direction >= 0 else "short"
+    breakout_confirmed = current > prior_high if side == "long" else current < prior_low
+    breakout_price = prior_high if side == "long" else prior_low
+    distance_to_breakout_atr = abs(breakout_price - current) / atr_15m
+
+    ema20_15m = ema([bar.close for bar in bars_15m], 20)
+    extension_atr = abs(current - ema20_15m) / atr_15m
+
+    price_score = clamp(abs(return_1h) / 8.0 * 100.0)
+    volume_score = clamp((volume_ratio_5m - 1.0) / 4.0 * 100.0)
+    turnover_score = clamp((turnover_acceleration - 1.0) / 4.0 * 100.0)
+    acceleration_score = clamp(abs(acceleration) / 5.0 * 100.0)
+    breakout_score = 100.0 if breakout_confirmed else clamp(100.0 - distance_to_breakout_atr * 55.0)
+    daily_move_score = clamp(abs(instrument.price_change_24h_pct) / 25.0 * 100.0)
+
+    alignment = (
+        (return_15m >= 0 and return_1h >= 0 and return_4h >= 0)
+        or (return_15m <= 0 and return_1h <= 0 and return_4h <= 0)
+    )
+    alignment_bonus = 7.0 if alignment else -8.0
+    extreme_move_bonus = 10.0 if abs(instrument.price_change_24h_pct) >= 25.0 else 5.0 if abs(instrument.price_change_24h_pct) >= 15.0 else 0.0
+    score = clamp(
+        0.20 * price_score
+        + 0.20 * volume_score
+        + 0.15 * turnover_score
+        + 0.15 * acceleration_score
+        + 0.15 * breakout_score
+        + 0.15 * daily_move_score
+        + alignment_bonus
+        + extreme_move_bonus
+    )
+
+    chase_risk = bool(
+        abs(instrument.price_change_24h_pct) >= 25.0
+        or abs(return_4h) >= 20.0
+        or extension_atr >= 3.5
+    )
+    if chase_risk:
+        stage = "EXTENDED_CHASE_RISK"
+    elif breakout_confirmed and score >= 70:
+        stage = "BREAKOUT_CONFIRMED"
+    elif score >= 60 and abs(instrument.price_change_24h_pct) < 15 and extension_atr < 2.5:
+        stage = "EARLY_ACCELERATION"
+    elif score >= MOMENTUM_MIN_SCORE:
+        stage = "MOMENTUM_WATCH"
+    else:
+        stage = "LOW_SIGNAL"
+
+    return MomentumAnalysis(
+        instrument=instrument,
+        bars_5m=bars_5m,
+        bars_15m=bars_15m,
+        score=score,
+        side=side,
+        return_15m_pct=return_15m,
+        return_1h_pct=return_1h,
+        return_4h_pct=return_4h,
+        previous_1h_return_pct=previous_1h,
+        acceleration_pct=acceleration,
+        volume_ratio_5m=volume_ratio_5m,
+        turnover_acceleration_1h=turnover_acceleration,
+        atr_15m=atr_15m,
+        extension_atr=extension_atr,
+        breakout_price=breakout_price,
+        breakout_confirmed=breakout_confirmed,
+        distance_to_breakout_atr=distance_to_breakout_atr,
+        chase_risk=chase_risk,
+        stage=stage,
+        missing_data=[],
+    )
+
+
+def build_momentum_item(momentum: MomentumAnalysis, now: datetime) -> dict[str, Any]:
+    instrument = momentum.instrument
+    side = momentum.side
+    recent = momentum.bars_15m[-8:]
+    if side == "long":
+        invalidation_price = min(bar.low for bar in recent)
+        condition = "Closed 15m candle above the previous 20-bar 15m high"
+        bullish = "Momentum remains constructive while 15m closes hold above the breakout area with sustained turnover."
+        bearish = "Loss of the recent 15m swing low or sharp volume failure invalidates continuation."
+    else:
+        invalidation_price = max(bar.high for bar in recent)
+        condition = "Closed 15m candle below the previous 20-bar 15m low"
+        bullish = "A fast reclaim of the breakdown area creates squeeze risk and invalidates the bearish impulse."
+        bearish = "Momentum remains constructive for the short side while 15m closes hold below the breakdown area."
+
+    if momentum.chase_risk and not instrument.tradeable:
+        execution_status = "LIQUIDITY_BLOCKED_AND_CHASE_RISK"
+    elif momentum.chase_risk:
+        execution_status = "NO_TRADE_CHASE_RISK"
+    elif not instrument.tradeable:
+        execution_status = "LIQUIDITY_BLOCKED"
+    else:
+        execution_status = "TRADEABLE_MOMENTUM_WATCH"
+
+    state = "TRIGGERED" if momentum.breakout_confirmed and momentum.score >= 70 else "WATCH" if momentum.score >= MOMENTUM_MIN_SCORE else "NO_TRADE"
+    reasons = [
+        f"{momentum.return_1h_pct:+.2f}% 1H move",
+        f"{momentum.volume_ratio_5m:.2f}x 5m relative volume",
+        f"{momentum.turnover_acceleration_1h:.2f}x hourly turnover acceleration",
+    ]
+    if momentum.breakout_confirmed:
+        reasons.append("15m range breakout confirmed on a closed candle")
+    if momentum.chase_risk:
+        reasons.append("Move is extended; chasing is prohibited")
+    if not instrument.tradeable:
+        reasons.extend(instrument.liquidity_reasons)
+
+    return {
+        "symbol": instrument.symbol,
+        "base_asset": instrument.base,
+        "quote_asset": "USDC",
+        "side": side,
+        "state": state,
+        "stage": momentum.stage,
+        "momentum_score": round(momentum.score, 2),
+        "last_price": instrument.last_price,
+        "price_change_24h_pct": round(instrument.price_change_24h_pct, 3),
+        "return_15m_pct": round(momentum.return_15m_pct, 3),
+        "return_1h_pct": round(momentum.return_1h_pct, 3),
+        "return_4h_pct": round(momentum.return_4h_pct, 3),
+        "acceleration_pct": round(momentum.acceleration_pct, 3),
+        "volume_ratio_5m": round(momentum.volume_ratio_5m, 3),
+        "turnover_acceleration_1h": round(momentum.turnover_acceleration_1h, 3),
+        "extension_atr_15m": round(momentum.extension_atr, 3),
+        "breakout_confirmed": momentum.breakout_confirmed,
+        "chase_risk": momentum.chase_risk,
+        "tradeable": instrument.tradeable,
+        "execution_status": execution_status,
+        "turnover_24h_usdc": round(instrument.turnover_24h, 2),
+        "spread_bps": round(instrument.spread_bps, 3),
+        "trigger": {
+            "timeframe": "15m",
+            "condition": condition,
+            "price": round_to_tick(momentum.breakout_price, instrument.tick_size),
+            "requires_close": True,
+            "volume_confirmation": "Prefer >=2.0x recent 5m relative volume and rising hourly turnover",
+        },
+        "invalidation_price": round_to_tick(invalidation_price, instrument.tick_size),
+        "bullish_scenario": bullish,
+        "bearish_scenario": bearish,
+        "why_now": reasons,
+        "decision": "NO_TRADE" if momentum.chase_risk or not instrument.tradeable else "WATCH_FOR_TRIGGER",
+        "data_as_of": now.isoformat(),
+    }
+
+
+def rank_momentum(momentums: list[MomentumAnalysis], now: datetime) -> list[dict[str, Any]]:
+    ranked = sorted(
+        [item for item in momentums if item.score >= MOMENTUM_MIN_SCORE],
+        key=lambda item: (
+            item.score,
+            abs(item.instrument.price_change_24h_pct),
+            item.instrument.turnover_24h,
+        ),
+        reverse=True,
+    )
+    return [build_momentum_item(item, now) for item in ranked[:MOMENTUM_OUTPUT_LIMIT]]
 
 
 def analyze_market(
@@ -681,12 +939,12 @@ async def enrich_coinalyze(analyses: list[Analysis], api: CoinalyzeAPI) -> tuple
             return False, "No matching Coinalyze markets"
 
         now_ts = int(time.time())
-        from_ts = now_ts - 8 * 24 * 60 * 60
+        from_ts = now_ts - 3 * 24 * 60 * 60
         current_oi, current_funding, oi_history, liquidation_history = await asyncio.gather(
             api.batch_current("/open-interest", symbols, convert_to_usd=True),
             api.batch_current("/funding-rate", symbols),
-            api.batch_history("/open-interest-history", symbols, from_ts, now_ts, convert_to_usd=True),
-            api.batch_history("/liquidation-history", symbols, from_ts, now_ts, convert_to_usd=True),
+            api.batch_history("/open-interest-history", symbols, from_ts, now_ts, convert_to_usd=True, interval="1hour"),
+            api.batch_history("/liquidation-history", symbols, from_ts, now_ts, convert_to_usd=True, interval="4hour"),
         )
         oi_map = {item["symbol"]: item for item in current_oi}
         funding_map = {item["symbol"]: item for item in current_funding}
@@ -700,12 +958,19 @@ async def enrich_coinalyze(analyses: list[Analysis], api: CoinalyzeAPI) -> tuple
                 continue
             symbol = str(market["symbol"])
             oi_rows = oi_hist_map.get(symbol, [])
-            oi_change_24h_pct: float | None = None
-            if len(oi_rows) >= 7:
+
+            def oi_change(periods: int) -> float | None:
+                if len(oi_rows) < periods + 1:
+                    return None
                 latest = safe_float(oi_rows[-1].get("c"))
-                prior = safe_float(oi_rows[-7].get("c"))
-                if prior > 0:
-                    oi_change_24h_pct = (latest / prior - 1.0) * 100.0
+                prior = safe_float(oi_rows[-periods - 1].get("c"))
+                if latest <= 0 or prior <= 0:
+                    return None
+                return (latest / prior - 1.0) * 100.0
+
+            oi_change_1h_pct = oi_change(1)
+            oi_change_4h_pct = oi_change(4)
+            oi_change_24h_pct = oi_change(24)
             liq_rows = liq_map.get(symbol, [])[-6:]
             long_liq = sum(safe_float(row.get("l")) for row in liq_rows)
             short_liq = sum(safe_float(row.get("s")) for row in liq_rows)
@@ -718,6 +983,8 @@ async def enrich_coinalyze(analyses: list[Analysis], api: CoinalyzeAPI) -> tuple
                 "exchange": market.get("exchange"),
                 "quote_asset": market.get("quote_asset"),
                 "open_interest_usd": current_oi_value,
+                "oi_change_1h_pct": oi_change_1h_pct,
+                "oi_change_4h_pct": oi_change_4h_pct,
                 "oi_change_24h_pct": oi_change_24h_pct,
                 "funding_rate": funding,
                 "long_liquidations_24h_usd": long_liq,
@@ -982,8 +1249,8 @@ def build_watch_setup(analysis: Analysis, now: datetime) -> dict[str, Any]:
         "base_asset": instrument.base,
         "quote_asset": "USDC",
         "side": side,
-        "state": "WATCH",
-        "grade": "WATCH" if score >= 60 and not liquidity_blocked else "NO_TRADE",
+        "state": "WATCH" if score >= 60 else "NO_TRADE",
+        "grade": "WATCH" if score >= 60 else "NO_TRADE",
         "confidence": "MEDIUM" if score >= 70 and data_quality == "GOOD" else "LOW",
         "last_price": last_price,
         "shortable": analysis.shortable,
@@ -1053,7 +1320,7 @@ def rank_watchlist(analyses: list[Analysis], now: datetime, excluded_symbols: se
         ),
         reverse=True,
     )
-    return items[:20]
+    return items
 
 
 def build_market_regime(
@@ -1096,10 +1363,9 @@ def build_market_regime(
         preferred = "neutral"
 
     enriched_count = sum(1 for item in analyses if item.derivatives)
-    full_enrichment_target = min(len(analyses), COINALYZE_ENRICH_LIMIT)
     quality = "GOOD" if (
         len(analyses) >= 10
-        and enriched_count >= full_enrichment_target
+        and enriched_count == len(analyses)
         and borrow_ok
     ) else "PARTIAL"
     notes = [
@@ -1123,6 +1389,11 @@ def build_market_regime(
         "alt_breadth": round(alt_breadth, 2),
         "volatility_regime": volatility,
         "preferred_side": preferred,
+        "source_quality": {
+            "bybit_market_data": "GOOD" if analyses else "DEGRADED",
+            "bybit_spot_margin": "GOOD" if borrow_ok else "PARTIAL",
+            "coinalyze_derivatives": "GOOD" if enriched_count == len(analyses) else "PARTIAL",
+        },
         "notes": notes,
     }
 
@@ -1145,6 +1416,7 @@ async def persist_results(
     regime: dict[str, Any],
     setups: list[dict[str, Any]],
     watchlist: list[dict[str, Any]],
+    momentum_radar: dict[str, Any],
     status: dict[str, Any],
 ) -> None:
     connection = await asyncpg.connect(DATABASE_URL, timeout=30)
@@ -1156,6 +1428,7 @@ async def persist_results(
                 "data_as_of": scan["data_as_of"],
                 "items": watchlist,
             })
+            await upsert_cache(connection, "momentum_radar", momentum_radar)
             await upsert_cache(connection, "data_status", status)
             best_by_symbol: dict[str, dict[str, Any]] = {}
             for setup in setups + watchlist:
@@ -1185,20 +1458,55 @@ async def run() -> None:
     async with httpx.AsyncClient(
         timeout=timeout,
         limits=limits,
-        headers={"User-Agent": "Bybit-EU-Swing-Radar/0.3.0"},
+        headers={"User-Agent": "Bybit-EU-Swing-Radar/0.4.0"},
     ) as client:
         bybit = BybitAPI(client)
         coinalyze = CoinalyzeAPI(client)
 
         instruments_raw, tickers_raw = await asyncio.gather(bybit.instruments(), bybit.tickers())
-        universe, exclusions, universe_stats = build_universe(instruments_raw, tickers_raw)
-        if not universe:
+        universe, exclusions, universe_stats, candidate_pool = build_universe(instruments_raw, tickers_raw)
+        if not candidate_pool:
             raise RuntimeError("No Bybit EU USDC spot pairs passed the discovery safety filters")
+
+        momentum_semaphore = asyncio.Semaphore(MOMENTUM_HTTP_CONCURRENCY)
+        momentum_fetched = await asyncio.gather(
+            *(fetch_momentum_bars(bybit, instrument, momentum_semaphore) for instrument in candidate_pool)
+        )
+        momentum_valid = [item for item in momentum_fetched if item is not None]
+        momentum_analyses: list[MomentumAnalysis] = []
+        for instrument, bars_5m, bars_15m in momentum_valid:
+            try:
+                momentum_analyses.append(analyze_momentum(instrument, bars_5m, bars_15m))
+            except Exception as exc:
+                exclusions.append({"symbol": instrument.symbol, "reason": f"Momentum calculation failed: {exc}"})
+        momentum_ranked_analyses = sorted(momentum_analyses, key=lambda item: item.score, reverse=True)
+        momentum_promoted = [
+            item.instrument for item in momentum_ranked_analyses
+            if item.score >= MOMENTUM_MIN_SCORE
+        ][:MOMENTUM_DEEP_LIMIT]
+        seen = {item.symbol for item in universe}
+        deep_cap = min(MAX_UNIVERSE + MOMENTUM_DEEP_LIMIT, 50)
+        for instrument in momentum_promoted:
+            if instrument.symbol not in seen and len(universe) < deep_cap:
+                universe.append(instrument)
+                seen.add(instrument.symbol)
+
+        if not universe:
+            raise RuntimeError("No Bybit EU USDC spot pairs selected for deep analysis")
+        universe_stats.update({
+            "analysis_universe_size": len(universe),
+            "tradeable_universe_size": sum(1 for item in universe if item.tradeable),
+            "liquidity_blocked_size": sum(1 for item in universe if not item.tradeable),
+            "momentum_scanned_pairs": len(momentum_analyses),
+            "momentum_candidates": sum(1 for item in momentum_analyses if item.score >= MOMENTUM_MIN_SCORE),
+            "momentum_promoted_to_deep_scan": sum(1 for item in momentum_promoted if item.symbol in seen),
+        })
         print(
             "USDC analysis universe: "
             f"{len(universe)} symbols; tradeable={universe_stats['tradeable_universe_size']}; "
             f"liquidity_blocked={universe_stats['liquidity_blocked_size']}; "
-            f"mandatory_found={universe_stats['mandatory_found']}"
+            f"mandatory_found={universe_stats['mandatory_found']}; "
+            f"momentum_scanned={len(momentum_analyses)}; momentum_candidates={universe_stats['momentum_candidates']}"
         )
 
         semaphore = asyncio.Semaphore(HTTP_CONCURRENCY)
@@ -1228,11 +1536,19 @@ async def run() -> None:
         long_setups.sort(key=lambda item: item["setup_score"], reverse=True)
         short_setups.sort(key=lambda item: item["setup_score"], reverse=True)
         executable_symbols = {item["symbol"] for item in long_setups + short_setups}
-        watchlist = rank_watchlist(analyses, now, executable_symbols)
+        all_watchlist = rank_watchlist(analyses, now, executable_symbols)
+        watchlist = all_watchlist[:20]
         liquidity_blocked = [
-            item for item in watchlist
+            item for item in all_watchlist
             if item.get("metrics", {}).get("execution_status") == "LIQUIDITY_BLOCKED"
         ]
+        momentum_items = rank_momentum(momentum_analyses, now)
+        momentum_radar = {
+            "data_as_of": now.isoformat(),
+            "scanned_pairs": len(momentum_analyses),
+            "minimum_score": MOMENTUM_MIN_SCORE,
+            "items": momentum_items,
+        }
         regime = build_market_regime(analyses, now, coinalyze_ok, borrow_ok)
 
         enriched_count = sum(1 for item in analyses if item.derivatives)
@@ -1253,6 +1569,7 @@ async def run() -> None:
             "shorts": short_setups[:10],
             "extended_watchlist": watchlist,
             "liquidity_blocked": liquidity_blocked,
+            "momentum_radar": momentum_items,
             "universe_stats": universe_stats,
             "coverage": coverage,
             "exclusions": exclusions[:100],
@@ -1270,6 +1587,8 @@ async def run() -> None:
                 "short_candidates": len(short_setups),
                 "extended_watchlist_items": len(watchlist),
                 "liquidity_blocked_items": len(liquidity_blocked),
+                "momentum_scanned_pairs": len(momentum_analyses),
+                "momentum_output_items": len(momentum_items),
             },
             "sources": [
                 {
@@ -1297,13 +1616,14 @@ async def run() -> None:
             ],
         }
 
-        await persist_results(scan, regime, long_setups + short_setups, watchlist, status)
+        await persist_results(scan, regime, long_setups + short_setups, watchlist, momentum_radar, status)
         print(
             "Worker complete: "
             f"analyzed={len(analyses)}, tradeable={universe_stats['tradeable_universe_size']}, "
             f"watchlist={len(watchlist)}, liquidity_blocked={len(liquidity_blocked)}, "
             f"coinalyze={enriched_count}/{len(analyses)}, longs={len(long_setups)}, "
-            f"shorts={len(short_setups)}, quality={data_quality}, duration={elapsed:.1f}s"
+            f"shorts={len(short_setups)}, momentum={len(momentum_items)}, "
+            f"quality={data_quality}, duration={elapsed:.1f}s"
         )
 
 
