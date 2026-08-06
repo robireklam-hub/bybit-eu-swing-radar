@@ -15,6 +15,15 @@ from app.models import (
     DayTradeBacktestSignalsResponse,
     DayTradeBacktestStatusResponse,
     DayTradeBacktestSummaryResponse,
+    DayTradeDiagnosticStatusResponse,
+    DayTradeEdgeDiagnosticsResponse,
+    DayTradeGateWaterfallResponse,
+    DiagnosticCohortStats,
+    DiagnosticCountGroup,
+    DiagnosticGateStep,
+    DiagnosticSegment,
+    DiagnosticSensitivityStats,
+    ExcursionThreshold,
     DayTradeCandidate,
     DayTradeJournalSignal,
     DayTradeJournalSignalsResponse,
@@ -836,3 +845,456 @@ async def _get_day_trade_backtest_signals(
 RadarRepository.get_day_trade_backtest_status = _get_day_trade_backtest_status
 RadarRepository.get_day_trade_backtest_summary = _get_day_trade_backtest_summary
 RadarRepository.get_day_trade_backtest_signals = _get_day_trade_backtest_signals
+
+
+# ---------------------------------------------------------------------------
+# v0.7.1 strict-gate and edge diagnostics
+# ---------------------------------------------------------------------------
+
+
+def _diag_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_diagnostic_job(job: dict[str, Any]) -> dict[str, Any]:
+    for field in ("parameters", "universe", "warnings"):
+        value = job.get(field) or ([] if field in {"universe", "warnings"} else {})
+        if isinstance(value, str):
+            value = json.loads(value)
+        job[field] = value
+    return job
+
+
+async def _latest_diagnostic_job(
+    repository: RadarRepository,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    conn = await repository._connect()
+    try:
+        job_raw = await conn.fetchrow(
+            "SELECT * FROM day_trade_diagnostic_jobs ORDER BY id DESC LIMIT 1"
+        )
+        if not job_raw:
+            return None, []
+        job = _normalize_diagnostic_job(dict(job_raw))
+        symbols_raw = await conn.fetch(
+            """
+            SELECT symbol,status,bars_fetched,evaluation_bars,event_count,
+                   primary_event_count,strict_eligible_count,strict_trade_count,
+                   last_error,started_at,completed_at
+            FROM day_trade_diagnostic_symbols
+            WHERE job_id=$1 ORDER BY status,symbol
+            """,
+            int(job["id"]),
+        )
+        return job, [dict(row) for row in symbols_raw]
+    except UndefinedTableError:
+        return None, []
+    finally:
+        await conn.close()
+
+
+async def _get_day_trade_diagnostic_status(
+    repository: RadarRepository,
+) -> DayTradeDiagnosticStatusResponse:
+    job, symbols = await _latest_diagnostic_job(repository)
+    if job is None:
+        return DayTradeDiagnosticStatusResponse(
+            generated_at=datetime.now(timezone.utc),
+            exists=False,
+            job={},
+            progress_pct=0.0,
+            symbol_status=[],
+            warnings=["Diagnostic job has not been initialized."],
+        )
+    total = int(job.get("total_symbols") or 0)
+    completed = int(job.get("completed_symbols") or 0)
+    failed = int(job.get("failed_symbols") or 0)
+    progress = round((completed + failed) / total * 100.0, 2) if total else 0.0
+    return DayTradeDiagnosticStatusResponse(
+        generated_at=datetime.now(timezone.utc),
+        exists=True,
+        job=job,
+        progress_pct=progress,
+        symbol_status=symbols,
+        warnings=list(job.get("warnings") or []),
+    )
+
+
+async def _fetch_diagnostic_events(
+    repository: RadarRepository,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    conn = await repository._connect()
+    try:
+        job_raw = await conn.fetchrow(
+            "SELECT * FROM day_trade_diagnostic_jobs ORDER BY id DESC LIMIT 1"
+        )
+        if not job_raw:
+            return None, []
+        job = _normalize_diagnostic_job(dict(job_raw))
+        rows_raw = await conn.fetch(
+            """
+            SELECT id,job_id,event_key,strategy_version,symbol,side,opened_at,
+                   dataset_split,universe_group,execution_assumption,
+                   borrowability_status,included_primary,primary_exclusion_reason,
+                   candidate_built,pass_tradeable,pass_side_execution_model,
+                   pass_no_timeframe_conflict,pass_expansion,pass_direction,
+                   pass_quality,pass_setup,pass_rr,pass_volume_confirmation,
+                   pass_score_gates,pass_strict_eligible,pass_strict_trade,
+                   near_strict,first_failed_gate,setup_type,expected_rr,
+                   expansion_score,direction_score,side_direction_score,
+                   quality_score,setup_score,volume_ratio_5m,
+                   turnover_24h_usdc,modeled_spread_bps,timeframe_conflict,
+                   btc_structure_1h,btc_structure_4h,btc_volatility_regime,
+                   base_horizon_hours,base_cost_bps,base_exit_reason,
+                   base_gross_r,base_net_r,base_mfe_r,base_mae_r,sensitivity
+            FROM day_trade_diagnostic_events
+            WHERE job_id=$1 ORDER BY opened_at
+            """,
+            int(job["id"]),
+        )
+    except UndefinedTableError:
+        return None, []
+    finally:
+        await conn.close()
+    rows: list[dict[str, Any]] = []
+    for raw in rows_raw:
+        row = dict(raw)
+        sensitivity = row.get("sensitivity") or {}
+        if isinstance(sensitivity, str):
+            sensitivity = json.loads(sensitivity)
+        row["sensitivity"] = sensitivity
+        rows.append(row)
+    return job, rows
+
+
+def _filter_diagnostic_rows(
+    rows: list[dict[str, Any]],
+    side: str,
+    split: str,
+    universe_group: str,
+    primary_only: bool,
+) -> list[dict[str, Any]]:
+    return [
+        row for row in rows
+        if (side == "both" or row.get("side") == side)
+        and (split == "all" or row.get("dataset_split") == split)
+        and (universe_group == "all" or row.get("universe_group") == universe_group)
+        and (not primary_only or bool(row.get("included_primary")))
+    ]
+
+
+def _diagnostic_segment(key: str, rows: list[dict[str, Any]]) -> DiagnosticSegment:
+    return DiagnosticSegment(
+        key=key,
+        trigger_count=len(rows),
+        candidate_count=sum(1 for row in rows if row.get("candidate_built")),
+        near_strict_count=sum(1 for row in rows if row.get("near_strict")),
+        strict_eligible_count=sum(1 for row in rows if row.get("pass_strict_eligible")),
+        strict_trade_count=sum(1 for row in rows if row.get("pass_strict_trade")),
+    )
+
+
+def _diagnostic_segments(
+    rows: list[dict[str, Any]], field: str
+) -> list[DiagnosticSegment]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        groups[str(row.get(field) or "UNKNOWN")].append(row)
+    return [
+        _diagnostic_segment(key, values)
+        for key, values in sorted(groups.items(), key=lambda item: len(item[1]), reverse=True)
+    ]
+
+
+async def _get_day_trade_gate_waterfall(
+    repository: RadarRepository,
+    side: str = "both",
+    split: str = "all",
+    universe_group: str = "all",
+    primary_only: bool = False,
+) -> DayTradeGateWaterfallResponse:
+    job, all_rows = await _fetch_diagnostic_events(repository)
+    rows = _filter_diagnostic_rows(
+        all_rows, side, split, universe_group, primary_only
+    )
+    gate_fields = [
+        ("TRIGGER_DETECTED", None),
+        ("CANDIDATE_BUILT", "candidate_built"),
+        ("LIQUIDITY_EXECUTION", "pass_tradeable"),
+        ("SIDE_EXECUTION_MODEL", "pass_side_execution_model"),
+        ("TIMEFRAME_ALIGNMENT", "pass_no_timeframe_conflict"),
+        ("EXPANSION_55", "pass_expansion"),
+        ("DIRECTION_35", "pass_direction"),
+        ("QUALITY_65", "pass_quality"),
+        ("SETUP_70", "pass_setup"),
+        ("NET_RR_1_8", "pass_rr"),
+        ("VOLUME_1_3X", "pass_volume_confirmation"),
+        ("STRICT_TRADE", "pass_strict_trade"),
+    ]
+    active = list(rows)
+    trigger_count = len(rows)
+    waterfall: list[DiagnosticGateStep] = []
+    for gate, field in gate_fields:
+        reached = len(active)
+        passed_rows = active if field is None else [row for row in active if bool(row.get(field))]
+        passed = len(passed_rows)
+        waterfall.append(DiagnosticGateStep(
+            gate=gate,
+            reached_count=reached,
+            passed_count=passed,
+            failed_count=reached - passed,
+            pass_rate_from_reached_pct=(round(passed / reached * 100.0, 2) if reached else None),
+            pass_rate_from_trigger_pct=(round(passed / trigger_count * 100.0, 2) if trigger_count else None),
+        ))
+        active = passed_rows
+
+    failures: dict[str, int] = defaultdict(int)
+    for row in rows:
+        failures[str(row.get("first_failed_gate") or "UNKNOWN")] += 1
+    first_failures = [
+        DiagnosticCountGroup(
+            key=key,
+            count=count,
+            pct_of_trigger=(round(count / trigger_count * 100.0, 2) if trigger_count else None),
+        )
+        for key, count in sorted(failures.items(), key=lambda item: item[1], reverse=True)
+    ]
+    warnings = [] if job is None else list(job.get("warnings") or [])
+    return DayTradeGateWaterfallResponse(
+        strategy_version=str((job or {}).get("strategy_version", "0.7.1")),
+        generated_at=datetime.now(timezone.utc),
+        job=job or {"status": "NOT_INITIALIZED"},
+        requested_side=side,
+        requested_split=split,
+        requested_universe_group=universe_group,
+        primary_only=primary_only,
+        trigger_count=trigger_count,
+        primary_count=sum(1 for row in rows if row.get("included_primary")),
+        strict_eligible_count=sum(1 for row in rows if row.get("pass_strict_eligible")),
+        strict_trade_count=sum(1 for row in rows if row.get("pass_strict_trade")),
+        waterfall=waterfall,
+        first_failures=first_failures,
+        by_side=_diagnostic_segments(rows, "side"),
+        by_split=_diagnostic_segments(rows, "dataset_split"),
+        by_universe_group=_diagnostic_segments(rows, "universe_group"),
+        methodology=[
+            "The waterfall is sequential: each gate is evaluated only on events that passed every previous gate.",
+            "STRICT_ELIGIBLE passes execution model, timeframe, score and net-RR gates; STRICT_TRADE additionally passes 5m volume confirmation.",
+            "Technical short execution in technical_only mode is not historical borrowability evidence.",
+            "Use all triggers for gate diagnosis; primary_only is optional and removes overlapping same-symbol/same-side triggers.",
+        ],
+        warnings=warnings,
+    )
+
+
+def _cohort_match(row: dict[str, Any], cohort: str) -> bool:
+    if not row.get("candidate_built") or row.get("base_net_r") is None:
+        return False
+    if cohort == "ALL_VALID_CANDIDATES":
+        return True
+    if cohort == "LIQUID_EXECUTABLE":
+        return bool(row.get("pass_tradeable") and row.get("pass_side_execution_model"))
+    if cohort == "SCORE_GATES_PASS":
+        return bool(row.get("pass_score_gates"))
+    if cohort == "NEAR_STRICT":
+        return bool(row.get("near_strict"))
+    if cohort == "STRICT_ELIGIBLE":
+        return bool(row.get("pass_strict_eligible"))
+    if cohort == "STRICT_TRADE":
+        return bool(row.get("pass_strict_trade"))
+    return False
+
+
+def _base_performance_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "exit_reason": row.get("base_exit_reason"),
+            "net_r": row.get("base_net_r"),
+            "mfe_r": row.get("base_mfe_r"),
+            "mae_r": row.get("base_mae_r"),
+        }
+        for row in rows if row.get("base_net_r") is not None
+    ]
+
+
+def _sensitivity_performance_rows(
+    rows: list[dict[str, Any]], horizon_hours: int, cost_bps: float
+) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    horizon_key = str(horizon_hours)
+    cost_key = f"{cost_bps:g}"
+    for row in rows:
+        data = (row.get("sensitivity") or {}).get(horizon_key)
+        if not data:
+            continue
+        net = (data.get("net_r_by_cost") or {}).get(cost_key)
+        if net is None:
+            continue
+        output.append({
+            "exit_reason": data.get("exit_reason"),
+            "net_r": float(net),
+            "mfe_r": _diag_float(data.get("mfe_r")),
+            "mae_r": _diag_float(data.get("mae_r")),
+        })
+    return output
+
+
+def _diagnostic_group_performance(
+    rows: list[dict[str, Any]], field: str
+) -> list[BacktestGroupStats]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        groups[str(row.get(field) or "UNKNOWN")].append(row)
+    return [
+        BacktestGroupStats(key=key, stats=_backtest_aggregate(_base_performance_rows(values)))
+        for key, values in sorted(groups.items(), key=lambda item: len(item[1]), reverse=True)
+    ]
+
+
+def _score_band(value: float, kind: str) -> str:
+    if kind == "setup":
+        if value >= 80: return "80+"
+        if value >= 70: return "70-79.99"
+        if value >= 65: return "65-69.99"
+        if value >= 55: return "55-64.99"
+        return "<55"
+    if kind == "expansion":
+        if value >= 70: return "70+"
+        if value >= 55: return "55-69.99"
+        if value >= 40: return "40-54.99"
+        return "<40"
+    if kind == "direction":
+        if value >= 50: return "50+"
+        if value >= 35: return "35-49.99"
+        if value >= 20: return "20-34.99"
+        return "<20"
+    if kind == "quality":
+        if value >= 80: return "80+"
+        if value >= 65: return "65-79.99"
+        if value >= 50: return "50-64.99"
+        return "<50"
+    return "UNKNOWN"
+
+
+def _excursion_thresholds(
+    rows: list[dict[str, Any]], field: str
+) -> list[ExcursionThreshold]:
+    values = [_diag_float(row.get(field)) for row in rows if row.get(field) is not None]
+    sample = len(values)
+    thresholds = [0.25, 0.5, 0.75, 1.0, 1.2, 1.5, 1.8, 2.0, 2.5]
+    return [
+        ExcursionThreshold(
+            threshold_r=threshold,
+            reached_count=sum(1 for value in values if value >= threshold),
+            reached_pct=(
+                round(sum(1 for value in values if value >= threshold) / sample * 100.0, 2)
+                if sample else None
+            ),
+        )
+        for threshold in thresholds
+    ]
+
+
+async def _get_day_trade_edge_diagnostics(
+    repository: RadarRepository,
+    cohort: str = "NEAR_STRICT",
+    side: str = "both",
+    split: str = "all",
+    universe_group: str = "all",
+    primary_only: bool = True,
+) -> DayTradeEdgeDiagnosticsResponse:
+    job, all_rows = await _fetch_diagnostic_events(repository)
+    filtered = _filter_diagnostic_rows(
+        all_rows, side, split, universe_group, primary_only
+    )
+    valid = [row for row in filtered if row.get("candidate_built") and row.get("base_net_r") is not None]
+    cohort_keys = [
+        "ALL_VALID_CANDIDATES",
+        "LIQUID_EXECUTABLE",
+        "SCORE_GATES_PASS",
+        "NEAR_STRICT",
+        "STRICT_ELIGIBLE",
+        "STRICT_TRADE",
+    ]
+    cohort_performance: list[DiagnosticCohortStats] = []
+    cohort_rows: dict[str, list[dict[str, Any]]] = {}
+    for key in cohort_keys:
+        values = [row for row in valid if _cohort_match(row, key)]
+        cohort_rows[key] = values
+        cohort_performance.append(DiagnosticCohortStats(
+            key=key,
+            count=len(values),
+            stats=_backtest_aggregate(_base_performance_rows(values)),
+        ))
+    selected = cohort_rows.get(cohort, [])
+    parameters = (job or {}).get("parameters") or {}
+    horizons = parameters.get("horizon_hours") or [2, 4, 8]
+    costs = parameters.get("cost_bps") or [0, 10, 20, 30]
+    sensitivity = [
+        DiagnosticSensitivityStats(
+            horizon_hours=int(hours),
+            cost_bps=float(cost),
+            stats=_backtest_aggregate(
+                _sensitivity_performance_rows(selected, int(hours), float(cost))
+            ),
+        )
+        for hours in horizons for cost in costs
+    ]
+
+    for row in selected:
+        row["btc_regime_key"] = (
+            f"1H:{row.get('btc_structure_1h') or 'UNKNOWN'}|"
+            f"4H:{row.get('btc_structure_4h') or 'UNKNOWN'}|"
+            f"VOL:{row.get('btc_volatility_regime') or 'UNKNOWN'}"
+        )
+        row["setup_score_band"] = _score_band(_diag_float(row.get("setup_score")), "setup")
+        row["expansion_score_band"] = _score_band(_diag_float(row.get("expansion_score")), "expansion")
+        row["direction_score_band"] = _score_band(_diag_float(row.get("side_direction_score")), "direction")
+        row["quality_score_band"] = _score_band(_diag_float(row.get("quality_score")), "quality")
+
+    warnings = [] if job is None else list(job.get("warnings") or [])
+    base_horizon = int(parameters.get("base_horizon_hours") or 8)
+    base_cost = float(parameters.get("base_cost_bps") or 20.0)
+    return DayTradeEdgeDiagnosticsResponse(
+        strategy_version=str((job or {}).get("strategy_version", "0.7.1")),
+        generated_at=datetime.now(timezone.utc),
+        job=job or {"status": "NOT_INITIALIZED"},
+        selected_cohort=cohort,
+        requested_side=side,
+        requested_split=split,
+        requested_universe_group=universe_group,
+        primary_only=primary_only,
+        base_horizon_hours=base_horizon,
+        base_cost_bps=base_cost,
+        selected_sample=len(selected),
+        selected_performance=_backtest_aggregate(_base_performance_rows(selected)),
+        cohort_performance=cohort_performance,
+        sensitivity=sensitivity,
+        by_side=_diagnostic_group_performance(selected, "side"),
+        by_split=_diagnostic_group_performance(selected, "dataset_split"),
+        by_universe_group=_diagnostic_group_performance(selected, "universe_group"),
+        by_btc_regime=_diagnostic_group_performance(selected, "btc_regime_key"),
+        by_setup_score_band=_diagnostic_group_performance(selected, "setup_score_band"),
+        by_expansion_score_band=_diagnostic_group_performance(selected, "expansion_score_band"),
+        by_direction_score_band=_diagnostic_group_performance(selected, "direction_score_band"),
+        by_quality_score_band=_diagnostic_group_performance(selected, "quality_score_band"),
+        mfe_thresholds=_excursion_thresholds(selected, "base_mfe_r"),
+        mae_thresholds=_excursion_thresholds(selected, "base_mae_r"),
+        methodology=[
+            "Development and validation are chronological; validation must not be used to select rules.",
+            "The base result uses the configured maximum horizon and base cost; sensitivity changes one horizon/cost assumption at a time.",
+            "Cohort comparisons are diagnostic. The best in-sample cell must not be promoted without untouched validation and prospective confirmation.",
+            "MFE/MAE thresholds describe excursion distributions; they do not by themselves define an optimal stop or target.",
+        ],
+        warnings=warnings,
+    )
+
+
+RadarRepository.get_day_trade_diagnostic_status = _get_day_trade_diagnostic_status
+RadarRepository.get_day_trade_gate_waterfall = _get_day_trade_gate_waterfall
+RadarRepository.get_day_trade_edge_diagnostics = _get_day_trade_edge_diagnostics
