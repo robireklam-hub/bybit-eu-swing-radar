@@ -8,8 +8,8 @@ from app.repository import RadarRepository
 
 app = FastAPI(
     title="Bybit EU Trading Radar API",
-    version="0.7.0",
-    description="Read-only cached USDC swing/day scanner with prospective journaling and historical replay.",
+    version="0.7.1",
+    description="Read-only cached USDC swing/day scanner with journaling, replay and strict-gate diagnostics.",
 )
 
 repo = RadarRepository()
@@ -224,6 +224,48 @@ async def day_trade_backtest_signals(
 ):
     return await repo.get_day_trade_backtest_signals(
         signal_class, side, symbol, primary_only, limit
+    )
+
+
+@app.get(
+    "/v1/day-trade/backtest/diagnostics/status",
+    dependencies=[Depends(require_api_key)],
+)
+async def day_trade_diagnostic_status():
+    return await repo.get_day_trade_diagnostic_status()
+
+
+@app.get(
+    "/v1/day-trade/backtest/diagnostics/waterfall",
+    dependencies=[Depends(require_api_key)],
+)
+async def day_trade_gate_waterfall(
+    side: str = Query("both", pattern="^(both|long|short)$"),
+    split: str = Query("all", pattern="^(all|DEVELOPMENT|VALIDATION)$"),
+    universe_group: str = Query("all", pattern="^(all|MAJOR_LIQUID|OTHER)$"),
+    primary_only: bool = Query(False),
+):
+    return await repo.get_day_trade_gate_waterfall(
+        side, split, universe_group, primary_only
+    )
+
+
+@app.get(
+    "/v1/day-trade/backtest/diagnostics/edge",
+    dependencies=[Depends(require_api_key)],
+)
+async def day_trade_edge_diagnostics(
+    cohort: str = Query(
+        "NEAR_STRICT",
+        pattern="^(ALL_VALID_CANDIDATES|LIQUID_EXECUTABLE|SCORE_GATES_PASS|NEAR_STRICT|STRICT_ELIGIBLE|STRICT_TRADE)$",
+    ),
+    side: str = Query("both", pattern="^(both|long|short)$"),
+    split: str = Query("all", pattern="^(all|DEVELOPMENT|VALIDATION)$"),
+    universe_group: str = Query("all", pattern="^(all|MAJOR_LIQUID|OTHER)$"),
+    primary_only: bool = Query(True),
+):
+    return await repo.get_day_trade_edge_diagnostics(
+        cohort, side, split, universe_group, primary_only
     )
 
 
