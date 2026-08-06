@@ -130,6 +130,10 @@ DIAGNOSTIC_ENABLED = env_bool("DIAGNOSTIC_ENABLED", True)
 DIAGNOSTIC_JOB_NAME = os.getenv(
     "DIAGNOSTIC_JOB_NAME", "v071-90d-strict-gate-diagnostics"
 ).strip()
+
+DIAGNOSTIC_RUN_LOCK_NAME = (
+    "trading-radar:day-diagnostic:" + DIAGNOSTIC_JOB_NAME
+)
 DIAGNOSTIC_REUSE_LATEST_BACKTEST = env_bool(
     "DIAGNOSTIC_REUSE_LATEST_BACKTEST", True
 )
@@ -1187,7 +1191,28 @@ async def run_diagnostic_batch() -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
         api = HistoricalBybitAPI(client)
         connection = await asyncpg.connect(DATABASE_URL, timeout=30)
+        lock_acquired = False
         try:
+            lock_row = await connection.fetchrow(
+                """
+                SELECT pg_try_advisory_lock(hashtext($1)) AS acquired
+                """,
+                DIAGNOSTIC_RUN_LOCK_NAME,
+            )
+            lock_acquired = bool(lock_row["acquired"])
+            if not lock_acquired:
+                result = {
+                    "enabled": True,
+                    "job_name": DIAGNOSTIC_JOB_NAME,
+                    "status": "SKIPPED_ALREADY_RUNNING",
+                    "reason": "Another diagnostic worker owns the advisory lock",
+                }
+                print(
+                    "Diagnostic worker skipped: another run is active",
+                    flush=True,
+                )
+                return result
+
             await ensure_schema(connection)
             job = await create_job_if_needed(connection, api)
             job_id = int(job["id"])
@@ -1209,6 +1234,13 @@ async def run_diagnostic_batch() -> dict[str, Any]:
             )
             await reset_stale_symbols(connection, job_id)
             claimed = await claim_symbols(connection, job_id)
+            if claimed:
+                print(
+                    "Diagnostic batch claimed: "
+                    f"job_id={job_id}, symbols="
+                    + ",".join(str(row["symbol"]) for row in claimed),
+                    flush=True,
+                )
             if not claimed:
                 counts = await update_job_counts(connection, job_id)
                 return {
@@ -1229,6 +1261,10 @@ async def run_diagnostic_batch() -> dict[str, Any]:
             for row in claimed:
                 symbol_id = int(row["id"])
                 symbol = str(row["symbol"])
+                print(
+                    f"Diagnostic symbol start: {symbol}",
+                    flush=True,
+                )
                 metadata = row["metadata"]
                 if isinstance(metadata, str):
                     metadata = json.loads(metadata)
@@ -1281,6 +1317,14 @@ async def run_diagnostic_batch() -> dict[str, Any]:
                         "strict_eligible": int(stored["strict_eligible"] or 0),
                         "strict_trade": int(stored["strict_trade"] or 0),
                     })
+                    print(
+                        "Diagnostic symbol complete: "
+                        f"{symbol}, events={int(stored['total'] or 0)}, "
+                        f"primary={int(stored['primary_count'] or 0)}, "
+                        f"strict_eligible={int(stored['strict_eligible'] or 0)}, "
+                        f"strict_trade={int(stored['strict_trade'] or 0)}",
+                        flush=True,
+                    )
                 except Exception as exc:
                     await connection.execute(
                         """
@@ -1295,6 +1339,11 @@ async def run_diagnostic_batch() -> dict[str, Any]:
                         "status": "FAILED",
                         "error": f"{type(exc).__name__}: {exc}",
                     })
+                    print(
+                        f"Diagnostic symbol failed: {symbol}: "
+                        f"{type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
             counts = await update_job_counts(connection, job_id)
             return {
                 "enabled": True,
@@ -1304,4 +1353,14 @@ async def run_diagnostic_batch() -> dict[str, Any]:
                 **counts,
             }
         finally:
+            if lock_acquired:
+                try:
+                    await connection.execute(
+                        """
+                        SELECT pg_advisory_unlock(hashtext($1))
+                        """,
+                        DIAGNOSTIC_RUN_LOCK_NAME,
+                    )
+                except Exception:
+                    pass
             await connection.close()
