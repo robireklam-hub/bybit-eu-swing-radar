@@ -460,3 +460,114 @@ class DayTradeBacktestSignalsResponse(BaseModel):
     generated_at: datetime
     count: int
     items: list[DayTradeBacktestSignal] = Field(default_factory=list)
+
+
+DiagnosticCohort = Literal[
+    "ALL_VALID_CANDIDATES",
+    "LIQUID_EXECUTABLE",
+    "SCORE_GATES_PASS",
+    "NEAR_STRICT",
+    "STRICT_ELIGIBLE",
+    "STRICT_TRADE",
+]
+
+
+class DiagnosticGateStep(BaseModel):
+    gate: str
+    reached_count: int
+    passed_count: int
+    failed_count: int
+    pass_rate_from_reached_pct: float | None = None
+    pass_rate_from_trigger_pct: float | None = None
+
+
+class DiagnosticCountGroup(BaseModel):
+    key: str
+    count: int
+    pct_of_trigger: float | None = None
+
+
+class DiagnosticSegment(BaseModel):
+    key: str
+    trigger_count: int
+    candidate_count: int
+    near_strict_count: int
+    strict_eligible_count: int
+    strict_trade_count: int
+
+
+class DayTradeDiagnosticStatusResponse(BaseModel):
+    generated_at: datetime
+    exists: bool
+    job: dict[str, Any] = Field(default_factory=dict)
+    progress_pct: float
+    symbol_status: list[dict[str, Any]] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class DayTradeGateWaterfallResponse(BaseModel):
+    strategy_version: str
+    generated_at: datetime
+    job: dict[str, Any] = Field(default_factory=dict)
+    requested_side: Literal["both", "long", "short"]
+    requested_split: Literal["all", "DEVELOPMENT", "VALIDATION"]
+    requested_universe_group: Literal["all", "MAJOR_LIQUID", "OTHER"]
+    primary_only: bool
+    trigger_count: int
+    primary_count: int
+    strict_eligible_count: int
+    strict_trade_count: int
+    waterfall: list[DiagnosticGateStep] = Field(default_factory=list)
+    first_failures: list[DiagnosticCountGroup] = Field(default_factory=list)
+    by_side: list[DiagnosticSegment] = Field(default_factory=list)
+    by_split: list[DiagnosticSegment] = Field(default_factory=list)
+    by_universe_group: list[DiagnosticSegment] = Field(default_factory=list)
+    methodology: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class DiagnosticSensitivityStats(BaseModel):
+    horizon_hours: int
+    cost_bps: float
+    stats: BacktestAggregate
+
+
+class DiagnosticCohortStats(BaseModel):
+    key: DiagnosticCohort
+    count: int
+    stats: BacktestAggregate
+
+
+class ExcursionThreshold(BaseModel):
+    threshold_r: float
+    reached_count: int
+    reached_pct: float | None = None
+
+
+class DayTradeEdgeDiagnosticsResponse(BaseModel):
+    strategy_version: str
+    generated_at: datetime
+    job: dict[str, Any] = Field(default_factory=dict)
+    selected_cohort: DiagnosticCohort
+    requested_side: Literal["both", "long", "short"]
+    requested_split: Literal["all", "DEVELOPMENT", "VALIDATION"]
+    requested_universe_group: Literal["all", "MAJOR_LIQUID", "OTHER"]
+    primary_only: bool
+    base_horizon_hours: int
+    base_cost_bps: float
+    selected_sample: int
+    selected_performance: BacktestAggregate
+    cohort_performance: list[DiagnosticCohortStats] = Field(default_factory=list)
+    sensitivity: list[DiagnosticSensitivityStats] = Field(default_factory=list)
+    by_side: list[BacktestGroupStats] = Field(default_factory=list)
+    by_split: list[BacktestGroupStats] = Field(default_factory=list)
+    by_universe_group: list[BacktestGroupStats] = Field(default_factory=list)
+    by_btc_regime: list[BacktestGroupStats] = Field(default_factory=list)
+    by_setup_score_band: list[BacktestGroupStats] = Field(default_factory=list)
+    by_expansion_score_band: list[BacktestGroupStats] = Field(default_factory=list)
+    by_direction_score_band: list[BacktestGroupStats] = Field(default_factory=list)
+    by_quality_score_band: list[BacktestGroupStats] = Field(default_factory=list)
+    mfe_thresholds: list[ExcursionThreshold] = Field(default_factory=list)
+    mae_thresholds: list[ExcursionThreshold] = Field(default_factory=list)
+    methodology: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
