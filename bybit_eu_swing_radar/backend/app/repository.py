@@ -30,6 +30,7 @@ from app.models import (
     DayTradeJournalSummaryResponse,
     DayTradeScanResponse,
     DayTradeTopCandidatesResponse,
+    DayTradeSymbolAuditResponse,
     JournalAggregate,
     JournalGroupStats,
     MarketRegime,
@@ -458,6 +459,18 @@ async def _get_day_trade_setup(
     return DayTradeCandidate.model_validate(payload) if payload is not None else None
 
 
+async def _get_day_trade_audit(
+    repository: RadarRepository,
+    symbol: str,
+) -> DayTradeSymbolAuditResponse | None:
+    payload = await repository.get_cache(f"day_trade_audit:{symbol.upper()}")
+    return (
+        DayTradeSymbolAuditResponse.model_validate(payload)
+        if payload is not None
+        else None
+    )
+
+
 async def _get_day_trade_status(
     repository: RadarRepository,
 ) -> dict | None:
@@ -467,6 +480,7 @@ async def _get_day_trade_status(
 RadarRepository.get_day_trade_scan = _get_day_trade_scan
 RadarRepository.get_day_trade_top_candidates = _get_day_trade_top_candidates
 RadarRepository.get_day_trade_setup = _get_day_trade_setup
+RadarRepository.get_day_trade_audit = _get_day_trade_audit
 RadarRepository.get_day_trade_status = _get_day_trade_status
 
 

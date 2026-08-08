@@ -149,6 +149,17 @@ async def day_trade_setup(symbol: str):
     return result
 
 
+@app.get("/v1/day-trade/audit/{symbol}", dependencies=[Depends(require_api_key)])
+async def day_trade_audit(symbol: str):
+    result = await repo.get_day_trade_audit(symbol)
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Day-trade audit snapshot not found for this symbol. Wait for the next day worker run.",
+        )
+    return result
+
+
 @app.get("/v1/day-trade/status", dependencies=[Depends(require_api_key)])
 async def day_trade_status():
     result = await repo.get_day_trade_status()

@@ -273,6 +273,74 @@ class DayTradeTopCandidatesResponse(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class DayTradeAuditTrigger(BaseModel):
+    timeframe: str
+    condition: str
+    price: float
+    requires_close: bool
+    volume_confirmation: str
+    triggered: bool
+
+
+class DayTradeBarrierSource(BaseModel):
+    price: float
+    timeframe: str
+    swing_type: Literal["SWING_HIGH", "SWING_LOW"]
+    pivot_start_ms: int
+    pivot_time: str
+    confirmed_at: str
+    prominence: float
+    prominence_atr: float | None = None
+    search_window_start: str
+    search_window_end: str
+    trigger_window_start: str
+    trigger_window_excluded: bool
+    same_structure_as_trigger: bool
+
+
+class DayTradeAuditSide(BaseModel):
+    symbol: str
+    side: Literal["long", "short"]
+    category: Literal["STRICT", "WATCH_ONLY"]
+    state: DayTradeState
+    decision: Literal["TRADE", "WAIT", "NO_TRADE"]
+    watch_bucket: str | None = None
+    tradeable: bool
+    shortable: bool
+    execution_status: str
+    timeframe_conflict: bool
+    side_direction_score: float
+    setup_score: float
+    trigger: DayTradeAuditTrigger
+    entry: float
+    entry_zone: PriceZone
+    stop: float
+    tp1: float
+    tp2: float
+    tp3: float
+    expected_rr: float
+    expected_rr_without_barrier: float
+    expected_rr_with_barrier: float
+    target_path_valid: bool
+    nearest_structural_barrier: float | None = None
+    barrier_rr_gross: float | None = None
+    barrier_rr_net: float | None = None
+    barrier_before_tp2: bool
+    barrier_source: DayTradeBarrierSource | None = None
+    volume_ratio_5m: float
+
+
+class DayTradeSymbolAuditResponse(BaseModel):
+    strategy_mode: Literal["DAY_TRADE"] = "DAY_TRADE"
+    strategy_version: str
+    data_as_of: datetime
+    data_as_of_budapest: str
+    symbol: str
+    long: DayTradeAuditSide | None = None
+    short: DayTradeAuditSide | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
 JournalSignalClass = Literal["STRICT", "SHADOW"]
 JournalSignalStatus = Literal["OPEN", "CLOSED"]
 
