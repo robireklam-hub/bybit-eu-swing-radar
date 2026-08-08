@@ -1,4 +1,4 @@
-"""Railway cron entry point for Trading Radar v0.7.1 diagnostics.
+"""Railway cron entry point for Trading Radar v0.7.2 diagnostics.
 
 Recommended start command:
     python diagnostic_worker.py
