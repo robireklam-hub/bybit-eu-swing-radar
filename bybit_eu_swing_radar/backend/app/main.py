@@ -8,7 +8,7 @@ from app.repository import RadarRepository
 
 app = FastAPI(
     title="Bybit EU Trading Radar API",
-    version="0.7.1",
+    version="0.7.2",
     description="Read-only cached USDC swing/day scanner with journaling, replay and strict-gate diagnostics.",
 )
 
