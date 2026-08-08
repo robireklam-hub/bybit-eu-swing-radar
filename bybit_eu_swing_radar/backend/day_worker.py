@@ -637,6 +637,55 @@ def nearest_structural_barrier(
 
 
 
+
+def compact_day_audit_side(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Return the small, audit-only representation used by GPT Actions."""
+    metrics = candidate.get("metrics") or {}
+    targets = list(candidate.get("targets") or [])
+    while len(targets) < 3:
+        targets.append(0.0)
+    trigger = candidate.get("trigger") or {}
+    entry = float(trigger.get("price") or 0.0)
+    return {
+        "symbol": candidate["symbol"],
+        "side": candidate["side"],
+        "category": candidate["category"],
+        "state": candidate["state"],
+        "decision": candidate["decision"],
+        "watch_bucket": candidate.get("watch_bucket"),
+        "tradeable": bool(candidate.get("tradeable")),
+        "shortable": bool(candidate.get("shortable")),
+        "execution_status": candidate.get("execution_status", ""),
+        "timeframe_conflict": bool(candidate.get("timeframe_conflict")),
+        "side_direction_score": float(candidate.get("side_direction_score", 0.0)),
+        "setup_score": float(candidate.get("setup_score", 0.0)),
+        "trigger": {
+            "timeframe": trigger.get("timeframe", "5m"),
+            "condition": trigger.get("condition", ""),
+            "price": entry,
+            "requires_close": bool(trigger.get("requires_close", True)),
+            "volume_confirmation": trigger.get("volume_confirmation", ""),
+            "triggered": bool(trigger.get("triggered")),
+        },
+        "entry": entry,
+        "entry_zone": candidate["entry_zone"],
+        "stop": float(candidate["stop"]),
+        "tp1": float(targets[0]),
+        "tp2": float(targets[1]),
+        "tp3": float(targets[2]),
+        "expected_rr": float(candidate.get("expected_rr", 0.0)),
+        "expected_rr_without_barrier": float(metrics.get("expected_rr_without_barrier", 0.0)),
+        "expected_rr_with_barrier": float(metrics.get("expected_rr_with_barrier", 0.0)),
+        "target_path_valid": bool(metrics.get("target_path_valid", False)),
+        "nearest_structural_barrier": metrics.get("nearest_structural_barrier"),
+        "barrier_rr_gross": metrics.get("barrier_rr_gross"),
+        "barrier_rr_net": metrics.get("barrier_rr_net"),
+        "barrier_before_tp2": bool(metrics.get("barrier_before_tp2", False)),
+        "barrier_source": metrics.get("barrier_source"),
+        "volume_ratio_5m": float(metrics.get("volume_ratio_5m", 0.0)),
+    }
+
+
 def watch_bucket(
     tradeable: bool,
     shortable: bool,
@@ -1145,6 +1194,37 @@ async def persist_day_results(
                     connection,
                     f"day_trade_setup:{setup['symbol']}",
                     setup,
+                )
+
+            # Compact, two-sided symbol audit cache. This is deliberately
+            # separate from the full scan so GPT Actions never need to pull
+            # the oversized raw day_trade_scan payload for calculation audits.
+            audit_by_symbol: dict[str, dict[str, Any]] = {}
+            for setup in setups:
+                record = audit_by_symbol.setdefault(
+                    setup["symbol"],
+                    {
+                        "strategy_mode": "DAY_TRADE",
+                        "strategy_version": "0.7.2",
+                        "data_as_of": scan["data_as_of"],
+                        "data_as_of_budapest": scan["data_as_of_budapest"],
+                        "symbol": setup["symbol"],
+                        "long": None,
+                        "short": None,
+                        "notes": [
+                            "Compact audit payload; no ranking or fallback transformation is applied.",
+                            "Both sides come from the same cached day-trade worker snapshot.",
+                            "Barrier provenance is emitted only for confirmed 15m pivots outside the trigger window.",
+                        ],
+                    },
+                )
+                record[setup["side"]] = compact_day_audit_side(setup)
+
+            for symbol, audit_payload in audit_by_symbol.items():
+                await upsert_cache(
+                    connection,
+                    f"day_trade_audit:{symbol}",
+                    audit_payload,
                 )
         return journal_status
     finally:
