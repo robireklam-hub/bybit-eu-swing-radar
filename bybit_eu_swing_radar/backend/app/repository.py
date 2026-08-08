@@ -40,6 +40,8 @@ from app.models import (
     WatchlistResponse,
 )
 
+CURRENT_DAY_STRATEGY_VERSION = "0.7.2"
+
 
 class RadarRepository:
     async def _connect(self) -> asyncpg.Connection:
@@ -328,6 +330,77 @@ async def _get_day_trade_scan(
     return response
 
 
+def _day_watch_rank(candidate: DayTradeCandidate) -> tuple:
+    metrics = candidate.metrics or {}
+    bucket_rank = {
+        "NEAR_STRICT": 4,
+        "LOW_CONVICTION": 3,
+        "POOR_RR": 2,
+        "TIMEFRAME_CONFLICT": 1,
+        "LIQUIDITY_OR_BORROW_BLOCKED": 0,
+    }
+    target_path_valid = bool(metrics.get("target_path_valid", False))
+    triggered = bool((candidate.trigger or {}).get("triggered"))
+    execution_ok = candidate.tradeable and (
+        candidate.side == "long" or candidate.shortable
+    ) and not candidate.timeframe_conflict
+    return (
+        1 if execution_ok else 0,
+        1 if target_path_valid else 0,
+        bucket_rank.get(candidate.watch_bucket or "", -1),
+        1 if candidate.side_direction_score > 0 else 0,
+        1 if triggered else 0,
+        candidate.expected_rr,
+        candidate.side_direction_score,
+        candidate.setup_score,
+        candidate.quality_score,
+    )
+
+
+def _rankable_day_watch(candidate: DayTradeCandidate) -> bool:
+    """Top-candidate watchlist is intentionally sparse; never fill weak slots."""
+    metrics = candidate.metrics or {}
+    return (
+        candidate.category == "WATCH_ONLY"
+        and candidate.tradeable
+        and (candidate.side == "long" or candidate.shortable)
+        and not candidate.timeframe_conflict
+        and candidate.side_direction_score > 0
+        and bool(metrics.get("target_path_valid", False))
+        and candidate.expected_rr >= 1.0
+        and candidate.setup_score >= 55.0
+    )
+
+
+def _dedupe_day_watchlists(
+    longs: list[DayTradeCandidate],
+    shorts: list[DayTradeCandidate],
+    strict_symbols: set[str],
+) -> tuple[list[DayTradeCandidate], list[DayTradeCandidate], list[str]]:
+    by_symbol: dict[str, list[DayTradeCandidate]] = defaultdict(list)
+    for candidate in [*longs, *shorts]:
+        if candidate.symbol in strict_symbols or not _rankable_day_watch(candidate):
+            continue
+        by_symbol[candidate.symbol].append(candidate)
+
+    kept_longs: list[DayTradeCandidate] = []
+    kept_shorts: list[DayTradeCandidate] = []
+    removed: list[str] = []
+    for symbol, candidates in by_symbol.items():
+        winner = max(candidates, key=_day_watch_rank)
+        for candidate in candidates:
+            if candidate is not winner:
+                removed.append(f"{symbol}:{candidate.side}")
+        if winner.side == "long":
+            kept_longs.append(winner)
+        else:
+            kept_shorts.append(winner)
+
+    kept_longs.sort(key=_day_watch_rank, reverse=True)
+    kept_shorts.sort(key=_day_watch_rank, reverse=True)
+    return kept_longs, kept_shorts, sorted(removed)
+
+
 async def _get_day_trade_top_candidates(
     repository: RadarRepository,
     limit: int = 3,
@@ -337,6 +410,18 @@ async def _get_day_trade_top_candidates(
     if payload is None:
         return None
     scan = DayTradeScanResponse.model_validate(payload)
+    strict_longs = scan.strict_longs[:limit]
+    strict_shorts = scan.strict_shorts[:limit]
+    strict_symbols = {item.symbol for item in [*scan.strict_longs, *scan.strict_shorts]}
+    watch_longs: list[DayTradeCandidate] = []
+    watch_shorts: list[DayTradeCandidate] = []
+    dedup_removed: list[str] = []
+    if include_watchlist:
+        watch_longs, watch_shorts, dedup_removed = _dedupe_day_watchlists(
+            scan.watch_only_longs,
+            scan.watch_only_shorts,
+            strict_symbols,
+        )
     return DayTradeTopCandidatesResponse(
         data_as_of=scan.data_as_of,
         data_as_of_budapest=scan.data_as_of_budapest,
@@ -345,14 +430,21 @@ async def _get_day_trade_top_candidates(
         requested_limit=limit,
         strict_long_count=len(scan.strict_longs),
         strict_short_count=len(scan.strict_shorts),
-        strict_longs=scan.strict_longs[:limit],
-        strict_shorts=scan.strict_shorts[:limit],
-        watch_only_longs=scan.watch_only_longs[:limit] if include_watchlist else [],
-        watch_only_shorts=scan.watch_only_shorts[:limit] if include_watchlist else [],
+        strict_longs=strict_longs,
+        strict_shorts=strict_shorts,
+        watch_only_longs=watch_longs[:limit],
+        watch_only_shorts=watch_shorts[:limit],
         coverage=scan.coverage,
         assumptions=scan.assumptions,
         notes=scan.notes + [
-            "Do not fill missing strict slots with WATCH_ONLY items.",
+            "Do not fill missing strict or watch slots with weaker fallback items.",
+            "Top watchlists are cross-side deduplicated: one symbol can appear on only one dominant side.",
+            "Top watchlists exclude timeframe-conflict, blocked, invalid-target-path and expected-RR<1.0 items.",
+            (
+                "Cross-side watch variants removed: " + ", ".join(dedup_removed)
+                if dedup_removed
+                else "No cross-side watch variants required removal."
+            ),
             "Only decision=TRADE with state=TRIGGERED is an immediately actionable day-trade setup.",
         ],
     )
@@ -490,11 +582,13 @@ async def _get_day_trade_journal_summary(
                    exit_reason, net_r, mfe_r, mae_r
             FROM day_trade_signal_journal
             WHERE opened_at >= NOW() - ($1::int * INTERVAL '1 day')
+              AND strategy_version = $3
               AND ($2 = 'all' OR signal_class = $2)
             ORDER BY opened_at DESC
             """,
             days,
             signal_class,
+            CURRENT_DAY_STRATEGY_VERSION,
         )
         strict_closed = int(
             await conn.fetchval(
@@ -502,10 +596,12 @@ async def _get_day_trade_journal_summary(
                 SELECT COUNT(*)
                 FROM day_trade_signal_journal
                 WHERE signal_class = 'STRICT'
+                  AND strategy_version = $2
                   AND status = 'CLOSED'
                   AND opened_at >= NOW() - ($1::int * INTERVAL '1 day')
                 """,
                 days,
+                CURRENT_DAY_STRATEGY_VERSION,
             )
             or 0
         )
@@ -517,9 +613,11 @@ async def _get_day_trade_journal_summary(
                    new_signal_count, evaluated_signal_count,
                    closed_signal_count, active_signal_count
             FROM day_trade_journal_runs
+            WHERE strategy_version = $1
             ORDER BY run_at DESC
             LIMIT 1
-            """
+            """,
+            CURRENT_DAY_STRATEGY_VERSION,
         )
     except UndefinedTableError:
         rows_raw = []
@@ -552,7 +650,7 @@ async def _get_day_trade_journal_summary(
         )
 
     return DayTradeJournalSummaryResponse(
-        strategy_version="0.6.0",
+        strategy_version=CURRENT_DAY_STRATEGY_VERSION,
         generated_at=datetime.now(timezone.utc),
         window_days=days,
         requested_signal_class=signal_class,
@@ -594,15 +692,17 @@ async def _get_day_trade_journal_signals(
                    side_direction_score, quality_score, bars_observed, mfe_r,
                    mae_r, exit_price, exit_reason, gross_r, net_r, cost_bps
             FROM day_trade_signal_journal
-            WHERE ($1 = 'all' OR status = $1)
+            WHERE strategy_version = $4
+              AND ($1 = 'all' OR status = $1)
               AND ($2 = 'all' OR signal_class = $2)
               AND ($3::text IS NULL OR symbol = UPPER($3))
             ORDER BY opened_at DESC
-            LIMIT $4
+            LIMIT $5
             """,
             status,
             signal_class,
             symbol,
+            CURRENT_DAY_STRATEGY_VERSION,
             limit,
         )
     except UndefinedTableError:
@@ -774,7 +874,7 @@ async def _get_day_trade_backtest_summary(
     job["universe"] = universe
     job["warnings"] = warnings
     return DayTradeBacktestSummaryResponse(
-        strategy_version=str(job.get("strategy_version", "0.7.0")),
+        strategy_version=str(job.get("strategy_version", "0.7.2")),
         generated_at=datetime.now(timezone.utc), job=job,
         requested_signal_class=signal_class, requested_side=side,
         primary_only=primary_only, evidence_status=evidence,
@@ -848,7 +948,7 @@ RadarRepository.get_day_trade_backtest_signals = _get_day_trade_backtest_signals
 
 
 # ---------------------------------------------------------------------------
-# v0.7.1 strict-gate and edge diagnostics
+# v0.7.2 strict-gate and edge diagnostics
 # ---------------------------------------------------------------------------
 
 
@@ -943,7 +1043,7 @@ async def _fetch_diagnostic_events(
                    borrowability_status,included_primary,primary_exclusion_reason,
                    candidate_built,pass_tradeable,pass_side_execution_model,
                    pass_no_timeframe_conflict,pass_expansion,pass_direction,
-                   pass_quality,pass_setup,pass_rr,pass_volume_confirmation,
+                   pass_quality,pass_setup,pass_target_path,pass_rr,pass_volume_confirmation,
                    pass_score_gates,pass_strict_eligible,pass_strict_trade,
                    near_strict,first_failed_gate,setup_type,expected_rr,
                    expansion_score,direction_score,side_direction_score,
@@ -1032,6 +1132,7 @@ async def _get_day_trade_gate_waterfall(
         ("DIRECTION_35", "pass_direction"),
         ("QUALITY_65", "pass_quality"),
         ("SETUP_70", "pass_setup"),
+        ("TARGET_PATH", "pass_target_path"),
         ("NET_RR_1_8", "pass_rr"),
         ("VOLUME_1_3X", "pass_volume_confirmation"),
         ("STRICT_TRADE", "pass_strict_trade"),
@@ -1066,7 +1167,7 @@ async def _get_day_trade_gate_waterfall(
     ]
     warnings = [] if job is None else list(job.get("warnings") or [])
     return DayTradeGateWaterfallResponse(
-        strategy_version=str((job or {}).get("strategy_version", "0.7.1")),
+        strategy_version=str((job or {}).get("strategy_version", "0.7.2")),
         generated_at=datetime.now(timezone.utc),
         job=job or {"status": "NOT_INITIALIZED"},
         requested_side=side,
@@ -1084,7 +1185,7 @@ async def _get_day_trade_gate_waterfall(
         by_universe_group=_diagnostic_segments(rows, "universe_group"),
         methodology=[
             "The waterfall is sequential: each gate is evaluated only on events that passed every previous gate.",
-            "STRICT_ELIGIBLE passes execution model, timeframe, score and net-RR gates; STRICT_TRADE additionally passes 5m volume confirmation.",
+            "STRICT_ELIGIBLE passes execution model, timeframe, score, structural target-path and net-RR gates; STRICT_TRADE additionally passes 5m volume confirmation.",
             "Technical short execution in technical_only mode is not historical borrowability evidence.",
             "Use all triggers for gate diagnosis; primary_only is optional and removes overlapping same-symbol/same-side triggers.",
         ],
@@ -1261,7 +1362,7 @@ async def _get_day_trade_edge_diagnostics(
     base_horizon = int(parameters.get("base_horizon_hours") or 8)
     base_cost = float(parameters.get("base_cost_bps") or 20.0)
     return DayTradeEdgeDiagnosticsResponse(
-        strategy_version=str((job or {}).get("strategy_version", "0.7.1")),
+        strategy_version=str((job or {}).get("strategy_version", "0.7.2")),
         generated_at=datetime.now(timezone.utc),
         job=job or {"status": "NOT_INITIALIZED"},
         selected_cohort=cohort,
