@@ -1,4 +1,4 @@
-"""Incremental historical replay engine for Trading Radar v0.7.0.
+"""Incremental historical replay engine for Trading Radar v0.7.2.
 
 The replay is research infrastructure, not an execution guarantee.
 It reuses the live day-trade scoring functions while enforcing closed-bar
@@ -9,7 +9,7 @@ Known limitations are stored with every job:
 - current active-symbol selection creates survivorship bias;
 - historical bid/ask spread and borrowability are unavailable from the kline
   endpoint, so spread is modelled and short borrowability is not verified;
-- Coinalyze derivatives context is not part of v0.7.0 replay scoring;
+- Coinalyze derivatives context is not part of v0.7.2 replay scoring;
 - the selected liquid universe is evaluated directly rather than recreating the
   live full-universe top-30 promotion at every 5m timestamp.
 """
@@ -43,7 +43,7 @@ from day_worker import (
 )
 from worker import Bar, BybitAPI, Instrument, safe_float
 
-STRATEGY_VERSION = "0.7.0"
+STRATEGY_VERSION = "0.7.2"
 FIVE_MIN_MS = 5 * 60 * 1000
 
 
@@ -76,7 +76,7 @@ def env_float(name: str, default: float) -> float:
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 BACKTEST_ENABLED = env_bool("BACKTEST_ENABLED", True)
-BACKTEST_JOB_NAME = os.getenv("BACKTEST_JOB_NAME", "v070-90d-liquid-usdc").strip()
+BACKTEST_JOB_NAME = os.getenv("BACKTEST_JOB_NAME", "v072-90d-netrr-structural-barrier").strip()
 BACKTEST_LOOKBACK_DAYS = min(max(env_int("BACKTEST_LOOKBACK_DAYS", 90), 7), 365)
 BACKTEST_WARMUP_DAYS = min(max(env_int("BACKTEST_WARMUP_DAYS", 14), 14), 45)
 BACKTEST_SYMBOL_LIMIT = min(max(env_int("BACKTEST_SYMBOL_LIMIT", 30), 3), 60)
@@ -727,7 +727,7 @@ WARNINGS = [
     "Current active-symbol selection creates survivorship bias.",
     "Historical spread is modelled from rolling 24h turnover; it is not bid/ask history.",
     "Historical short borrowability is unavailable; technical shorts are research-only unless explicitly labelled current proxy.",
-    "Coinalyze OI/funding is excluded from replay v0.7.0.",
+    "Coinalyze OI/funding is excluded from replay v0.7.2.",
     "The selected liquid universe is replayed directly; historical full-universe top-30 promotion is not reconstructed.",
     "Entry is modelled at the closed trigger-bar close and costs are a configurable assumption.",
     "Same-candle stop and TP2 is treated as stop-first.",
