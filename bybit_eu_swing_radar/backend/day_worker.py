@@ -1,4 +1,4 @@
-"""Bybit EU Trading Radar — day-trade worker v0.6.0.
+"""Bybit EU Trading Radar — day-trade worker v0.7.2.
 
 Separate engine from the swing worker:
 - universe: active Bybit EU USDC spot pairs
@@ -88,6 +88,11 @@ DAY_MIN_EXPANSION_SCORE = env_float("DAY_MIN_EXPANSION_SCORE", 55.0)
 DAY_MIN_DIRECTION_SCORE = env_float("DAY_MIN_DIRECTION_SCORE", 35.0)
 DAY_MIN_QUALITY_SCORE = env_float("DAY_MIN_QUALITY_SCORE", 65.0)
 DAY_TRIGGER_VOLUME_RATIO = env_float("DAY_TRIGGER_VOLUME_RATIO", 1.3)
+DAY_BARRIER_LOOKBACK_15M = min(max(env_int("DAY_BARRIER_LOOKBACK_15M", 96), 32), 240)
+DAY_BARRIER_PIVOT_LEFT = min(max(env_int("DAY_BARRIER_PIVOT_LEFT", 2), 1), 5)
+DAY_BARRIER_PIVOT_RIGHT = min(max(env_int("DAY_BARRIER_PIVOT_RIGHT", 2), 1), 5)
+DAY_BARRIER_MIN_PROMINENCE_ATR = env_float("DAY_BARRIER_MIN_PROMINENCE_ATR", 0.10)
+
 
 DEFAULT_DAY_SYMBOLS = {
     "BTCUSDC", "ETHUSDC", "SOLUSDC", "XRPUSDC", "DOGEUSDC",
@@ -551,17 +556,84 @@ def setup_grade(score: float) -> str:
     return "NO_TRADE"
 
 
-def nearest_barrier(
+def _iso_from_ms(value: int) -> str:
+    return datetime.fromtimestamp(value / 1000.0, tz=timezone.utc).isoformat()
+
+
+def nearest_structural_barrier(
     analysis: DayAnalysis,
     side: str,
     entry: float,
-) -> float | None:
-    history = analysis.bars_15m[-100:-20]
+    trigger_window_start_ms: int,
+) -> dict[str, Any] | None:
+    """Return the nearest confirmed 15m pivot in the trade direction.
+
+    A barrier is structural only when it is a confirmed 2-sided pivot (configurable)
+    with minimum ATR prominence. The pivot and all right-side confirmation bars must
+    pre-date the 5m trigger lookback window, so the barrier cannot be the same recent
+    structure from which the trigger itself was derived.
+    """
+    bars = analysis.bars_15m[-DAY_BARRIER_LOOKBACK_15M:]
+    left = DAY_BARRIER_PIVOT_LEFT
+    right = DAY_BARRIER_PIVOT_RIGHT
+    if len(bars) < left + right + 1:
+        return None
+
+    candidates: list[dict[str, Any]] = []
+    interval_ms = 15 * 60 * 1000
+    min_prominence = max(analysis.atr_15m * DAY_BARRIER_MIN_PROMINENCE_ATR, 0.0)
+
+    for index in range(left, len(bars) - right):
+        pivot = bars[index]
+        confirmation_end_ms = bars[index + right].start_ms + interval_ms
+        # Exclude the whole trigger-formation window and anything confirmed inside it.
+        if confirmation_end_ms > trigger_window_start_ms:
+            continue
+
+        left_rows = bars[index - left:index]
+        right_rows = bars[index + 1:index + right + 1]
+        if side == "long":
+            left_ref = max(row.high for row in left_rows)
+            right_ref = max(row.high for row in right_rows)
+            is_pivot = pivot.high > left_ref and pivot.high >= right_ref
+            prominence = min(pivot.high - left_ref, pivot.high - right_ref)
+            price = pivot.high
+            swing_type = "SWING_HIGH"
+            if not is_pivot or prominence < min_prominence or price <= entry:
+                continue
+        else:
+            left_ref = min(row.low for row in left_rows)
+            right_ref = min(row.low for row in right_rows)
+            is_pivot = pivot.low < left_ref and pivot.low <= right_ref
+            prominence = min(left_ref - pivot.low, right_ref - pivot.low)
+            price = pivot.low
+            swing_type = "SWING_LOW"
+            if not is_pivot or prominence < min_prominence or price >= entry:
+                continue
+
+        candidates.append({
+            "price": price,
+            "timeframe": "15m",
+            "swing_type": swing_type,
+            "pivot_start_ms": pivot.start_ms,
+            "pivot_time": _iso_from_ms(pivot.start_ms),
+            "confirmed_at": _iso_from_ms(confirmation_end_ms),
+            "prominence": prominence,
+            "prominence_atr": (
+                prominence / analysis.atr_15m if analysis.atr_15m > 0 else None
+            ),
+            "search_window_start": _iso_from_ms(bars[0].start_ms),
+            "search_window_end": _iso_from_ms(trigger_window_start_ms),
+            "trigger_window_start": _iso_from_ms(trigger_window_start_ms),
+            "trigger_window_excluded": True,
+            "same_structure_as_trigger": False,
+        })
+
+    if not candidates:
+        return None
     if side == "long":
-        levels = [bar.high for bar in history if bar.high > entry]
-        return min(levels) if levels else None
-    levels = [bar.low for bar in history if bar.low < entry]
-    return max(levels) if levels else None
+        return min(candidates, key=lambda item: item["price"])
+    return max(candidates, key=lambda item: item["price"])
 
 
 
@@ -707,30 +779,55 @@ def build_day_candidate(
         return None
 
     direction_multiplier = 1.0 if side == "long" else -1.0
-    gross_tp1 = entry + direction_multiplier * risk
-    gross_tp2 = entry + direction_multiplier * risk * DAY_MIN_RR
-    gross_tp3 = entry + direction_multiplier * risk * 2.5
-
-    barrier = nearest_barrier(analysis, side, entry)
-
-    # Targets remain monotonic and preserve their semantic meaning:
-    # TP1=1R, TP2=minimum required RR, TP3=2.5R.
-    # A nearer structural barrier is reported separately and only constrains
-    # the realistic RR calculation; it never replaces or reorders TP levels.
-    reward_reference = gross_tp2
-    if barrier is not None:
-        if side == "long" and entry < barrier < gross_tp2:
-            reward_reference = barrier
-        elif side == "short" and gross_tp2 < barrier < entry:
-            reward_reference = barrier
-
     assumed_cost = entry * DAY_ASSUMED_ROUND_TRIP_COST_BPS / 10_000.0
+
+    # Net-R convention: denominator is the pre-cost stop distance (risk).
+    # Round-trip cost is subtracted from PnL. Therefore a target intended to
+    # deliver N net R must have gross reward = N*risk + cost. This makes the
+    # 1.8R strict gate mathematically attainable and matches journal/backtest
+    # net-R accounting.
+    def target_for_net_r(net_r: float) -> float:
+        required_reward = net_r * risk + assumed_cost
+        return entry + direction_multiplier * required_reward
+
+    gross_tp1 = target_for_net_r(1.0)
+    gross_tp2 = target_for_net_r(DAY_MIN_RR)
+    gross_tp3 = target_for_net_r(2.5)
+
+    trigger_window_start_ms = previous_5m[0].start_ms
+    barrier_info = nearest_structural_barrier(
+        analysis, side, entry, trigger_window_start_ms
+    )
+    barrier = None if barrier_info is None else float(barrier_info["price"])
+
+    expected_rr_without_barrier = max(
+        0.0,
+        (abs(gross_tp2 - entry) - assumed_cost) / max(risk, 1e-12),
+    )
+    barrier_before_tp2 = False
+    if barrier is not None:
+        barrier_before_tp2 = (
+            entry < barrier < gross_tp2
+            if side == "long"
+            else gross_tp2 < barrier < entry
+        )
+
+    reward_reference = barrier if barrier_before_tp2 else gross_tp2
     gross_reward = abs(reward_reference - entry)
     expected_rr = max(
         0.0,
-        (gross_reward - assumed_cost) / max(risk + assumed_cost, 1e-12),
+        (gross_reward - assumed_cost) / max(risk, 1e-12),
     )
     barrier_rr = abs(barrier - entry) / risk if barrier is not None else None
+    barrier_net_rr = (
+        max(0.0, (abs(barrier - entry) - assumed_cost) / max(risk, 1e-12))
+        if barrier is not None
+        else None
+    )
+    target_path_valid = (
+        not barrier_before_tp2
+        or (barrier_net_rr is not None and barrier_net_rr + 1e-9 >= DAY_MIN_RR)
+    )
 
     strict_execution = analysis.instrument.tradeable and (
         side == "long" or analysis.shortable
@@ -740,7 +837,7 @@ def build_day_candidate(
         and analysis.expansion_score >= DAY_MIN_EXPANSION_SCORE
         and side_direction >= DAY_MIN_DIRECTION_SCORE
         and analysis.quality_score >= DAY_MIN_QUALITY_SCORE
-        and expected_rr >= DAY_MIN_RR
+        and expected_rr + 1e-9 >= DAY_MIN_RR
     )
     strict = strict_execution and strict_scores and not conflict_4h
 
@@ -898,11 +995,18 @@ def build_day_candidate(
                 else round_to_tick(barrier, analysis.instrument.tick_size)
             ),
             "barrier_rr_gross": (
-                None if barrier_rr is None else round(barrier_rr, 2)
+                None if barrier_rr is None else round(barrier_rr, 4)
             ),
-            "target_path_valid": (
-                barrier is None or barrier_rr is None or barrier_rr >= DAY_MIN_RR
+            "barrier_rr_net": (
+                None if barrier_net_rr is None else round(barrier_net_rr, 4)
             ),
+            "expected_rr_without_barrier": round(expected_rr_without_barrier, 4),
+            "expected_rr_with_barrier": round(expected_rr, 4),
+            "target_path_valid": target_path_valid,
+            "barrier_before_tp2": barrier_before_tp2,
+            "barrier_source": barrier_info,
+            "rr_denominator": "PRE_COST_STOP_DISTANCE",
+            "target_definition": "NET_R_AFTER_ROUND_TRIP_COST",
             "assumed_round_trip_cost_bps": DAY_ASSUMED_ROUND_TRIP_COST_BPS,
             "liquidity_reasons": liquidity_reasons,
             "max_borrowing_amount": analysis.max_borrowing_amount,
@@ -920,7 +1024,7 @@ def build_day_candidate(
             "5m signals are vulnerable to false breakouts",
             "A 2–3% BTC move against the trade can invalidate intraday structure",
             "Model RR uses a configurable cost assumption, not the account's exact fee tier",
-            "The day-trade score is an unbacktested MVP until signal journaling proves an edge",
+            "Only backtests and journal records matching strategy v0.7.2 are comparable with this live engine",
         ],
         "data_quality": "GOOD" if analysis.instrument.tradeable else "PARTIAL",
         "missing_data": sorted(set(missing)),
@@ -1058,7 +1162,7 @@ async def run() -> None:
     async with httpx.AsyncClient(
         timeout=timeout,
         limits=limits,
-        headers={"User-Agent": "Bybit-EU-Trading-Radar-Day/0.6.0"},
+        headers={"User-Agent": "Bybit-EU-Trading-Radar-Day/0.7.2"},
     ) as client:
         bybit = BybitAPI(client)
         coinalyze = CoinalyzeAPI(client)
@@ -1246,14 +1350,18 @@ async def run() -> None:
                 "context_timeframes": ["4H", "1H"],
                 "setup_timeframe": "15m",
                 "trigger_timeframe": "5m closed candle",
+                "strategy_version": "0.7.2",
                 "minimum_expected_rr_after_assumed_cost": DAY_MIN_RR,
                 "assumed_round_trip_cost_bps": DAY_ASSUMED_ROUND_TRIP_COST_BPS,
                 "minimum_turnover_usdc": DAY_MIN_TURNOVER_USDC,
                 "max_spread_bps": DAY_MAX_SPREAD_BPS,
+                "rr_denominator": "PRE_COST_STOP_DISTANCE",
+                "target_definition": "NET_R_AFTER_ROUND_TRIP_COST",
+                "barrier_model": "CONFIRMED_15M_PIVOT_EXCLUDING_TRIGGER_WINDOW",
             },
             "exclusions": exclusions[:100],
             "notes": [
-                "Prospective journaling starts with v0.6.0 deployment; no historical backfill is created.",
+                "Prospective journal records are version-separated; v0.7.2 creates no historical backfill.",
                 "Fast coverage scans all eligible USDC pairs on 5m/15m; 1H/4H deep context is limited to promoted symbols.",
                 "WATCH_ONLY items are not entries.",
             ],
