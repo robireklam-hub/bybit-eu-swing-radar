@@ -1,4 +1,4 @@
-"""Railway cron entry point for Trading Radar historical replay v0.7.0.
+"""Railway cron entry point for Trading Radar historical replay v0.7.2.
 
 Recommended service start command:
     python backtest_worker.py
