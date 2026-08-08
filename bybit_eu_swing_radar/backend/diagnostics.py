@@ -1,6 +1,6 @@
-"""Strict-gate waterfall and edge diagnostics for Trading Radar v0.7.1.
+"""Strict-gate waterfall and edge diagnostics for Trading Radar v0.7.2.
 
-This module replays the exact completed v0.7.0 time window and universe by
+This module replays the latest completed backtest time window and universe by
 preference, then stores every closed-5m breakout trigger instead of only the
 STRICT/SHADOW subset. It is diagnostic research infrastructure, not an
 execution engine.
@@ -59,7 +59,7 @@ from day_worker import (
 )
 from worker import Bar, Instrument, safe_float
 
-STRATEGY_VERSION = "0.7.1"
+STRATEGY_VERSION = "0.7.2"
 
 
 def env_bool(name: str, default: bool) -> bool:
@@ -128,7 +128,7 @@ def env_int_list(name: str, default: list[int]) -> list[int]:
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 DIAGNOSTIC_ENABLED = env_bool("DIAGNOSTIC_ENABLED", True)
 DIAGNOSTIC_JOB_NAME = os.getenv(
-    "DIAGNOSTIC_JOB_NAME", "v071-90d-strict-gate-diagnostics"
+    "DIAGNOSTIC_JOB_NAME", "v072-90d-strict-gate-diagnostics"
 ).strip()
 
 DIAGNOSTIC_RUN_LOCK_NAME = (
@@ -268,6 +268,7 @@ CREATE TABLE IF NOT EXISTS day_trade_diagnostic_events (
     pass_direction BOOLEAN NOT NULL,
     pass_quality BOOLEAN NOT NULL,
     pass_setup BOOLEAN NOT NULL,
+    pass_target_path BOOLEAN NOT NULL,
     pass_rr BOOLEAN NOT NULL,
     pass_volume_confirmation BOOLEAN NOT NULL,
     pass_score_gates BOOLEAN NOT NULL,
@@ -314,6 +315,8 @@ CREATE INDEX IF NOT EXISTS idx_day_diagnostic_events_strict
     ON day_trade_diagnostic_events (job_id, pass_strict_eligible, pass_strict_trade, included_primary);
 CREATE INDEX IF NOT EXISTS idx_day_diagnostic_events_split
     ON day_trade_diagnostic_events (job_id, dataset_split, universe_group);
+ALTER TABLE day_trade_diagnostic_events
+    ADD COLUMN IF NOT EXISTS pass_target_path BOOLEAN NOT NULL DEFAULT FALSE;
 """
 
 
@@ -466,6 +469,7 @@ def gate_snapshot(
             "pass_direction": False,
             "pass_quality": False,
             "pass_setup": False,
+            "pass_target_path": False,
             "pass_rr": False,
             "pass_volume_confirmation": False,
             "pass_score_gates": False,
@@ -500,7 +504,8 @@ def gate_snapshot(
     pass_direction = safe_float(candidate.get("side_direction_score")) >= DAY_MIN_DIRECTION_SCORE
     pass_quality = safe_float(candidate.get("quality_score")) >= DAY_MIN_QUALITY_SCORE
     pass_setup = safe_float(candidate.get("setup_score")) >= DAY_MIN_SETUP_SCORE
-    pass_rr = safe_float(candidate.get("expected_rr")) >= DAY_MIN_RR
+    pass_target_path = bool(metrics.get("target_path_valid", False))
+    pass_rr = safe_float(candidate.get("expected_rr")) + 1e-9 >= DAY_MIN_RR
     pass_volume = safe_float(metrics.get("volume_ratio_5m")) >= DAY_TRIGGER_VOLUME_RATIO
     pass_score_gates = pass_expansion and pass_direction and pass_quality and pass_setup
     strict_eligible = (
@@ -508,6 +513,7 @@ def gate_snapshot(
         and execution_model
         and no_conflict
         and pass_score_gates
+        and pass_target_path
         and pass_rr
     )
     strict_trade = strict_eligible and pass_volume
@@ -516,6 +522,7 @@ def gate_snapshot(
         and execution_model
         and no_conflict
         and safe_float(candidate.get("setup_score")) >= 65.0
+        and pass_target_path
         and safe_float(candidate.get("expected_rr")) >= 1.2
     )
 
@@ -527,6 +534,7 @@ def gate_snapshot(
         ("DIRECTION_35", pass_direction),
         ("QUALITY_65", pass_quality),
         ("SETUP_70", pass_setup),
+        ("TARGET_PATH", pass_target_path),
         ("NET_RR_1_8", pass_rr),
         ("VOLUME_1_3X", pass_volume),
     ]
@@ -545,6 +553,7 @@ def gate_snapshot(
         "pass_direction": pass_direction,
         "pass_quality": pass_quality,
         "pass_setup": pass_setup,
+        "pass_target_path": pass_target_path,
         "pass_rr": pass_rr,
         "pass_volume_confirmation": pass_volume,
         "pass_score_gates": pass_score_gates,
@@ -864,7 +873,7 @@ WARNINGS = [
     "Gate diagnostics are research-only and must not be presented as a trade signal.",
     "Historical spread is modelled from rolling 24h turnover; it is not bid/ask history.",
     "Historical short borrowability is unavailable; technical shorts are not execution evidence.",
-    "Coinalyze OI/funding is excluded from v0.7.1 diagnostics.",
+    "Coinalyze OI/funding is excluded from v0.7.2 diagnostics.",
     "The default development/validation split is chronological 60/30 days; validation must remain untouched during rule selection.",
     "Multiple cost/horizon combinations are sensitivity analysis, not permission to cherry-pick the best result.",
     "Same-candle stop and TP2 is treated as stop-first.",
@@ -1074,7 +1083,7 @@ async def insert_events(
                 dataset_split,universe_group,execution_assumption,borrowability_status,
                 included_primary,primary_exclusion_reason,candidate_built,
                 pass_tradeable,pass_side_execution_model,pass_no_timeframe_conflict,
-                pass_expansion,pass_direction,pass_quality,pass_setup,pass_rr,
+                pass_expansion,pass_direction,pass_quality,pass_setup,pass_target_path,pass_rr,
                 pass_volume_confirmation,pass_score_gates,pass_strict_eligible,
                 pass_strict_trade,near_strict,first_failed_gate,setup_type,
                 entry_price,trigger_price,stop_price,tp1,tp2,tp3,expected_rr,
@@ -1099,7 +1108,7 @@ async def insert_events(
             item["candidate_built"],item["pass_tradeable"],
             item["pass_side_execution_model"],item["pass_no_timeframe_conflict"],
             item["pass_expansion"],item["pass_direction"],item["pass_quality"],
-            item["pass_setup"],item["pass_rr"],item["pass_volume_confirmation"],
+            item["pass_setup"],item["pass_target_path"],item["pass_rr"],item["pass_volume_confirmation"],
             item["pass_score_gates"],item["pass_strict_eligible"],
             item["pass_strict_trade"],item["near_strict"],item["first_failed_gate"],
             item["setup_type"],item["entry_price"],item["trigger_price"],
