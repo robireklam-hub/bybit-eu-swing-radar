@@ -49,7 +49,7 @@ class Setup(BaseModel):
     thesis: list[str] = Field(default_factory=list)
     expansion_score: float
     direction_score: float
-    side_direction_score: float
+    side_direction_score: float | None = None
     quality_score: float
     setup_score: float
     trigger: PriceCondition | None = None
