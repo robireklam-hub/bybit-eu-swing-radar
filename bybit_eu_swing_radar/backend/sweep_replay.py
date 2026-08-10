@@ -61,7 +61,8 @@ from sweep_research import (
     DEFAULT_CONFIG,
     FIVE_MIN_MS,
     RESEARCH_VERSION,
-    evaluate_sweep_at_index,
+    _evaluate_sweep_normalized,
+    normalize_bars,
 )
 from worker import Bar, Instrument, safe_float
 
@@ -431,6 +432,9 @@ def replay_symbol_sweeps(
     if len(bars_5m) < 500 or len(btc_bars_5m) < 500:
         return []
 
+    bars_5m = normalize_bars(bars_5m)
+    btc_bars_5m = normalize_bars(btc_bars_5m)
+
     symbol = str(symbol_meta["symbol"]).upper()
     bars15 = aggregate_bars(bars_5m, 15)
     bars1h = aggregate_bars(bars_5m, 60)
@@ -467,7 +471,7 @@ def replay_symbol_sweeps(
             break
 
         for side in ("long", "short"):
-            event = evaluate_sweep_at_index(
+            event = _evaluate_sweep_normalized(
                 bars_5m,
                 sweep_index,
                 side,
@@ -693,6 +697,7 @@ async def run() -> dict[str, Any]:
 
         for meta in selected:
             symbol = str(meta.get("symbol") or "").upper()
+            print(f"[sweep-replay] processing {symbol} ...", flush=True)
             try:
                 bars = btc_bars if symbol == "BTCUSDC" else await _fetch_bars(
                     api, symbol, start_ms, end_ms, semaphore
@@ -712,6 +717,7 @@ async def run() -> dict[str, Any]:
                     "bars": len(bars),
                     "rows": len(rows),
                 })
+                print(f"[sweep-replay] {symbol} OK bars={len(bars)} rows={len(rows)}", flush=True)
             except Exception as exc:
                 symbol_status.append({
                     "symbol": symbol,

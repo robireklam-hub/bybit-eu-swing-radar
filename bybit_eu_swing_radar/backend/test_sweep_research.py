@@ -156,6 +156,15 @@ def test_future_bars_do_not_change_confirmation_values():
         assert before[key] == after[key]
 
 
+def test_scan_performance_smoke():
+    from sweep_research import scan_sweep_setups
+    rows = base_history()
+    for i in range(len(rows), 2024):
+        base = 100.0 + (i % 5) * 0.03
+        rows.append(bar(i, base, base + 0.35, base - 0.35, base + 0.02, 100.0))
+    result = scan_sweep_setups(rows, "long")
+    assert isinstance(result, list)
+
 if __name__ == "__main__":
     tests = [
         test_valid_long_sequence,
@@ -165,6 +174,7 @@ if __name__ == "__main__":
         test_no_structure_shift,
         test_low_volume_is_annotation_failure,
         test_future_bars_do_not_change_confirmation_values,
+        test_scan_performance_smoke,
     ]
     for test in tests:
         test()

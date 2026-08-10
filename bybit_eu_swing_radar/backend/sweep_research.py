@@ -270,8 +270,8 @@ def _empty_result(
     }
 
 
-def evaluate_sweep_at_index(
-    bars_5m: Iterable[Any],
+def _evaluate_sweep_normalized(
+    bars_5m: Sequence[ResearchBar],
     sweep_index: int,
     side: Side,
     *,
@@ -287,7 +287,7 @@ def evaluate_sweep_at_index(
     if side not in ("long", "short"):
         raise ValueError("side must be 'long' or 'short'")
 
-    bars = normalize_bars(bars_5m)
+    bars = bars_5m
     if sweep_index < 0 or sweep_index >= len(bars):
         return _empty_result(side, sweep_index, ["SWEEP_INDEX_OUT_OF_RANGE"])
 
@@ -427,7 +427,7 @@ def evaluate_sweep_at_index(
     if bars_15m is None:
         fifteen = aggregate_5m_to_15m(bars[:confirmation_index + 1])
     else:
-        fifteen = normalize_bars(bars_15m)
+        fifteen = bars_15m
 
     confirmation_close_ms = confirmation_bar.start_ms + FIVE_MIN_MS
     state_15m = classify_15m_structure(
@@ -451,6 +451,26 @@ def evaluate_sweep_at_index(
     return result
 
 
+
+def evaluate_sweep_at_index(
+    bars_5m: Iterable[Any],
+    sweep_index: int,
+    side: Side,
+    *,
+    bars_15m: Iterable[Any] | None = None,
+    config: SweepResearchConfig = DEFAULT_CONFIG,
+) -> dict[str, Any]:
+    """One-off public evaluator. Historical scans should normalize once."""
+    bars = normalize_bars(bars_5m)
+    fifteen = normalize_bars(bars_15m) if bars_15m is not None else None
+    return _evaluate_sweep_normalized(
+        bars,
+        sweep_index,
+        side,
+        bars_15m=fifteen,
+        config=config,
+    )
+
 def scan_sweep_setups(
     bars_5m: Iterable[Any],
     side: Side,
@@ -473,7 +493,7 @@ def scan_sweep_setups(
     )
     output: list[dict[str, Any]] = []
     for index in range(start, len(bars)):
-        event = evaluate_sweep_at_index(
+        event = _evaluate_sweep_normalized(
             bars,
             index,
             side,
@@ -523,6 +543,7 @@ __all__ = [
     "classify_15m_structure",
     "config_dict",
     "evaluate_sweep_at_index",
+    "_evaluate_sweep_normalized",
     "latest_sweep_setup",
     "normalize_bars",
     "scan_sweep_setups",
