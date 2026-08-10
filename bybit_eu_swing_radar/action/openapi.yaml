@@ -1,150 +1,121 @@
 openapi: 3.1.0
 info:
-  title: Bybit EU Swing Radar API
-  version: 0.1.0
-  description: Read-only swing setup scanner using cached Bybit EU and Coinalyze data.
+  title: Bybit EU Trading Radar API
+  version: 0.7.2.2
+  description: Bybit EU Trading Radar v0.7.2 strategy with v0.7.2.1 compact audit
+    and v0.7.2.2 context-only derivatives OI/funding flow enrichment.
 servers:
-  - url: https://YOUR-RADAR-DOMAIN.example.com
+- url: https://bybit-eu-swing-radar-production.up.railway.app
 paths:
   /health:
     get:
       operationId: getHealth
+      security: []
       summary: Check service health and data freshness
       responses:
-        "200":
+        '200':
           description: Health status
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Health"
+                $ref: '#/components/schemas/Health'
   /v1/scan:
     get:
       operationId: getSwingScan
       summary: Return ranked long and short swing candidates
       parameters:
-        - in: query
-          name: direction
-          schema:
-            type: string
-            enum: [long, short, both]
-            default: both
-        - in: query
-          name: limit
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 10
-            default: 3
-        - in: query
-          name: min_score
-          schema:
-            type: number
-            minimum: 0
-            maximum: 100
-            default: 70
+      - in: query
+        name: direction
+        schema:
+          type: string
+          enum:
+          - long
+          - short
+          - both
+          default: both
+      - in: query
+        name: limit
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 10
+          default: 3
+      - in: query
+        name: min_score
+        schema:
+          type: number
+          minimum: 0
+          maximum: 100
+          default: 70
       responses:
-        "200":
+        '200':
           description: Ranked scan
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ScanResponse"
+                $ref: '#/components/schemas/ScanResponse'
+  /v1/top-candidates:
+    get:
+      operationId: getTopCandidates
+      summary: Use this operation to show the strongest long and short candidates.
+        Returns compact strict rankings and separately labelled WATCH_ONLY fallbacks.
+      parameters:
+      - in: query
+        name: limit
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 5
+          default: 3
+      - in: query
+        name: include_watchlist
+        schema:
+          type: boolean
+          default: true
+      responses:
+        '200':
+          description: Compact strict and watch-only rankings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TopCandidatesResponse'
   /v1/market-regime:
     get:
       operationId: getMarketRegime
       summary: Return current BTC and altcoin market regime
       responses:
-        "200":
+        '200':
           description: Market regime
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/MarketRegime"
+                $ref: '#/components/schemas/MarketRegime'
   /v1/setup/{symbol}:
     get:
       operationId: getSymbolSetup
       summary: Return detailed bullish and bearish scenarios for one symbol
       parameters:
-        - in: path
-          name: symbol
-          required: true
-          schema:
-            type: string
-          description: Bybit symbol, for example BTCUSDC
+      - in: path
+        name: symbol
+        required: true
+        schema:
+          type: string
+        description: Bybit symbol, for example BTCUSDC
       responses:
-        "200":
+        '200':
           description: Symbol setup
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Setup"
-        "404":
+                $ref: '#/components/schemas/Setup'
+        '404':
           description: Symbol not found
-  /v1/watchlist:
-    get:
-      operationId: getWatchlist
-      summary: Return setups close to activation
-      parameters:
-        - in: query
-          name: limit
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 20
-            default: 10
-      responses:
-        "200":
-          description: Watchlist
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  data_as_of:
-                    type: string
-                    format: date-time
-                  items:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/Setup"
-  /v1/alerts:
-    get:
-      operationId: getRadarAlerts
-      summary: Return recent setup state changes and anomalies
-      parameters:
-        - in: query
-          name: since
-          schema:
-            type: string
-            format: date-time
-        - in: query
-          name: limit
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 50
-            default: 20
-      responses:
-        "200":
-          description: Alerts
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  data_as_of:
-                    type: string
-                    format: date-time
-                  items:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/Alert"
   /v1/data-status:
     get:
       operationId: getDataStatus
       summary: Return source-level freshness, latency and missing data
       responses:
-        "200":
+        '200':
           description: Data source status
           content:
             application/json:
@@ -157,7 +128,500 @@ paths:
                   sources:
                     type: array
                     items:
-                      $ref: "#/components/schemas/DataSourceStatus"
+                      $ref: '#/components/schemas/DataSourceStatus'
+  /v1/watchlist:
+    get:
+      operationId: getWatchlist
+      summary: Return extended USDC discovery watchlist, including liquidity-blocked
+        ideas
+      parameters:
+      - in: query
+        name: limit
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 20
+          default: 20
+      responses:
+        '200':
+          description: Extended watchlist
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WatchlistResponse'
+  /v1/momentum-radar:
+    get:
+      operationId: getMomentumRadar
+      summary: Scan every eligible Bybit EU USDC spot pair for early explosive momentum
+        and chase risk
+      parameters:
+      - in: query
+        name: direction
+        schema:
+          type: string
+          enum:
+          - long
+          - short
+          - both
+          default: both
+      - in: query
+        name: limit
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 150
+          default: 20
+      - in: query
+        name: min_score
+        schema:
+          type: number
+          minimum: 0
+          maximum: 100
+          default: 50
+      responses:
+        '200':
+          description: Ranked explosive-move radar
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MomentumResponse'
+  /v1/day-trade/top-candidates:
+    get:
+      operationId: getDayTradeTopCandidates
+      summary: Show the strongest strict day-trade long and short candidates, with
+        separate WATCH_ONLY fallbacks.
+      parameters:
+      - in: query
+        name: limit
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 5
+          default: 3
+      - in: query
+        name: include_watchlist
+        schema:
+          type: boolean
+          default: true
+      responses:
+        '200':
+          description: Compact day-trade rankings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DayTradeTopCandidatesResponse'
+  /v1/day-trade/scan:
+    get:
+      operationId: getDayTradeScan
+      summary: Return the cached day-trade scan using 4H/1H context, 15m setup and
+        5m trigger.
+      parameters:
+      - in: query
+        name: direction
+        schema:
+          type: string
+          enum:
+          - long
+          - short
+          - both
+          default: both
+      - in: query
+        name: limit
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 20
+          default: 10
+      - in: query
+        name: min_score
+        schema:
+          type: number
+          minimum: 0
+          maximum: 100
+          default: 0
+      - in: query
+        name: include_watchlist
+        schema:
+          type: boolean
+          default: true
+      responses:
+        '200':
+          description: Day-trade scan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DayTradeScanResponse'
+  /v1/day-trade/setup/{symbol}:
+    get:
+      operationId: getDayTradeSetup
+      summary: Analyze one cached Bybit EU USDC symbol in day-trade mode.
+      parameters:
+      - in: path
+        name: symbol
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Day-trade setup
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DayTradeCandidate'
+  /v1/day-trade/status:
+    get:
+      operationId: getDayTradeStatus
+      summary: Return day-trade worker freshness, coverage and source status.
+      responses:
+        '200':
+          description: Day-trade worker status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DayTradeStatusResponse'
+  /v1/day-trade/journal/summary:
+    get:
+      operationId: getDayTradeJournalSummary
+      summary: Return prospective day-trade outcome statistics. Use for journal, performance,
+        expectancy or edge questions. STRICT and SHADOW samples remain separate.
+      parameters:
+      - in: query
+        name: days
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 365
+          default: 30
+      - in: query
+        name: signal_class
+        schema:
+          type: string
+          enum:
+          - all
+          - STRICT
+          - SHADOW
+          default: all
+      responses:
+        '200':
+          description: Prospective journal summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DayTradeJournalSummaryResponse'
+  /v1/day-trade/journal/signals:
+    get:
+      operationId: getDayTradeJournalSignals
+      summary: List prospective day-trade journal signals and their open or closed
+        outcomes.
+      parameters:
+      - in: query
+        name: status
+        schema:
+          type: string
+          enum:
+          - all
+          - OPEN
+          - CLOSED
+          default: all
+      - in: query
+        name: signal_class
+        schema:
+          type: string
+          enum:
+          - all
+          - STRICT
+          - SHADOW
+          default: all
+      - in: query
+        name: symbol
+        schema:
+          type:
+          - string
+          - 'null'
+      - in: query
+        name: limit
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+      responses:
+        '200':
+          description: Journal signal list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DayTradeJournalSignalsResponse'
+  /v1/day-trade/backtest/status:
+    get:
+      operationId: getDayTradeBacktestStatus
+      summary: Return historical replay job progress, symbol-level status and methodology
+        warnings.
+      responses:
+        '200':
+          description: Backtest progress
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DayTradeBacktestStatusResponse'
+  /v1/day-trade/backtest/summary:
+    get:
+      operationId: getDayTradeBacktestSummary
+      summary: Return historical day-trade replay statistics. Never merge these results
+        with prospective journal statistics.
+      parameters:
+      - in: query
+        name: signal_class
+        schema:
+          type: string
+          enum:
+          - all
+          - STRICT
+          - SHADOW
+          default: all
+      - in: query
+        name: side
+        schema:
+          type: string
+          enum:
+          - both
+          - long
+          - short
+          default: both
+      - in: query
+        name: primary_only
+        schema:
+          type: boolean
+          default: true
+      responses:
+        '200':
+          description: Backtest summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DayTradeBacktestSummaryResponse'
+  /v1/day-trade/backtest/signals:
+    get:
+      operationId: getDayTradeBacktestSignals
+      summary: Return individual historical replay signals and outcomes.
+      parameters:
+      - in: query
+        name: signal_class
+        schema:
+          type: string
+          enum:
+          - all
+          - STRICT
+          - SHADOW
+          default: all
+      - in: query
+        name: side
+        schema:
+          type: string
+          enum:
+          - both
+          - long
+          - short
+          default: both
+      - in: query
+        name: symbol
+        schema:
+          type:
+          - string
+          - 'null'
+      - in: query
+        name: primary_only
+        schema:
+          type: boolean
+          default: true
+      - in: query
+        name: limit
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+      responses:
+        '200':
+          description: Backtest signals
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DayTradeBacktestSignalsResponse'
+  /v1/day-trade/backtest/diagnostics/status:
+    get:
+      operationId: getDayTradeDiagnosticStatus
+      summary: Get v0.7.2 gate diagnostic job status
+      responses:
+        '200':
+          description: Diagnostic job status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DayTradeDiagnosticStatusResponse'
+  /v1/day-trade/backtest/diagnostics/waterfall:
+    get:
+      operationId: getDayTradeGateWaterfall
+      summary: Show sequential strict gate waterfall and first failures
+      parameters:
+      - name: side
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - both
+          - long
+          - short
+          default: both
+      - name: split
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - all
+          - DEVELOPMENT
+          - VALIDATION
+          default: all
+      - name: universe_group
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - all
+          - MAJOR_LIQUID
+          - OTHER
+          default: all
+      - name: primary_only
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: false
+      responses:
+        '200':
+          description: Strict gate waterfall
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DayTradeGateWaterfallResponse'
+  /v1/day-trade/backtest/diagnostics/edge:
+    get:
+      operationId: getDayTradeEdgeDiagnostics
+      summary: Analyze cohort edge, validation split and cost/horizon sensitivity
+      parameters:
+      - name: cohort
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - ALL_VALID_CANDIDATES
+          - LIQUID_EXECUTABLE
+          - SCORE_GATES_PASS
+          - NEAR_STRICT
+          - STRICT_ELIGIBLE
+          - STRICT_TRADE
+          default: NEAR_STRICT
+      - name: side
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - both
+          - long
+          - short
+          default: both
+      - name: split
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - all
+          - DEVELOPMENT
+          - VALIDATION
+          default: all
+      - name: universe_group
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - all
+          - MAJOR_LIQUID
+          - OTHER
+          default: all
+      - name: primary_only
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: true
+      responses:
+        '200':
+          description: Edge diagnostics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DayTradeEdgeDiagnosticsResponse'
+  /v1/day-trade/audit/{symbol}:
+    get:
+      operationId: getDayTradeAudit
+      summary: Return a compact two-sided day-trade calculation audit for one cached
+        USDC symbol.
+      description: Use this endpoint for RR, target-path and structural-barrier audits.
+        It is intentionally compact to avoid ResponseTooLarge errors from the full
+        raw scan.
+      parameters:
+      - in: path
+        name: symbol
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Compact day-trade symbol audit
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DayTradeSymbolAuditResponse'
+  /v1/day-trade/flow/status:
+    get:
+      operationId: getDayTradeFlowStatus
+      summary: Return freshness and coverage status for the context-only derivatives
+        flow worker.
+      responses:
+        '200':
+          description: Flow worker status
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /v1/day-trade/flow/{symbol}:
+    get:
+      operationId: getDayTradeFlowContext
+      summary: Return context-only OI/funding flow data for one cached day-trade symbol.
+      description: Bybit global linear derivatives plus already-cached Coinalyze secondary
+        context. This endpoint does not change v0.7.2 STRICT gates or prove Bybit
+        EU execution conditions.
+      parameters:
+      - in: path
+        name: symbol
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Day-trade derivatives flow context
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DayTradeFlowContextResponse'
 components:
   securitySchemes:
     RadarApiKey:
@@ -167,11 +631,17 @@ components:
   schemas:
     Health:
       type: object
-      required: [status, checked_at, data_as_of]
+      required:
+      - status
+      - checked_at
+      - data_as_of
       properties:
         status:
           type: string
-          enum: [ok, degraded, down]
+          enum:
+          - ok
+          - degraded
+          - down
         checked_at:
           type: string
           format: date-time
@@ -180,16 +650,32 @@ components:
           format: date-time
         message:
           type: string
+        bybit_public_api:
+          type: boolean
+        worker_ready:
+          type: boolean
+        upstream_detail:
+          type:
+          - object
+          - 'null'
+          additionalProperties: true
     MarketRegime:
       type: object
-      required: [data_as_of, btc_regime, alt_breadth, volatility_regime]
+      required:
+      - data_as_of
+      - btc_regime
+      - alt_breadth
+      - volatility_regime
       properties:
         data_as_of:
           type: string
           format: date-time
         data_quality:
           type: string
-          enum: [GOOD, PARTIAL, DEGRADED]
+          enum:
+          - GOOD
+          - PARTIAL
+          - DEGRADED
         btc_regime:
           type: string
         btc_structure_1d:
@@ -202,14 +688,24 @@ components:
           type: string
         preferred_side:
           type: string
-          enum: [long, short, neutral]
+          enum:
+          - long
+          - short
+          - neutral
         notes:
           type: array
           items:
             type: string
+        source_quality:
+          $ref: '#/components/schemas/SourceQuality'
     ScanResponse:
       type: object
-      required: [data_as_of, data_quality, market_regime, longs, shorts]
+      required:
+      - data_as_of
+      - data_quality
+      - market_regime
+      - longs
+      - shorts
       properties:
         data_as_of:
           type: string
@@ -218,17 +714,20 @@ components:
           type: string
         data_quality:
           type: string
-          enum: [GOOD, PARTIAL, DEGRADED]
+          enum:
+          - GOOD
+          - PARTIAL
+          - DEGRADED
         market_regime:
-          $ref: "#/components/schemas/MarketRegime"
+          $ref: '#/components/schemas/MarketRegime'
         longs:
           type: array
           items:
-            $ref: "#/components/schemas/Setup"
+            $ref: '#/components/schemas/Setup'
         shorts:
           type: array
           items:
-            $ref: "#/components/schemas/Setup"
+            $ref: '#/components/schemas/Setup'
         exclusions:
           type: array
           items:
@@ -238,17 +737,81 @@ components:
                 type: string
               reason:
                 type: string
+        extended_watchlist:
+          type: array
+          items:
+            $ref: '#/components/schemas/Setup'
+        liquidity_blocked:
+          type: array
+          items:
+            $ref: '#/components/schemas/Setup'
+        universe_stats:
+          type: object
+          properties:
+            raw_usdc_instrument_records:
+              type: integer
+            unique_usdc_instruments:
+              type: integer
+            duplicate_instrument_records:
+              type: integer
+            duplicate_symbols:
+              type: array
+              items:
+                type: string
+            active_usdc_pairs:
+              type: integer
+            eligible_discovery_pairs:
+              type: integer
+            analysis_universe_size:
+              type: integer
+            tradeable_pairs:
+              type: integer
+            liquidity_blocked_pairs:
+              type: integer
+          additionalProperties: true
+        coverage:
+          type: object
+          properties:
+            analyzed_symbols:
+              type: integer
+            coinalyze_enriched_symbols:
+              type: integer
+            borrowability_checked_symbols:
+              type: integer
+            symbols_missing_history:
+              type: array
+              items:
+                type: string
+            momentum_eligible_pairs:
+              type: integer
+            momentum_scanned_pairs:
+              type: integer
+            momentum_failed_pairs:
+              type: integer
+            momentum_failed_symbols:
+              type: array
+              items:
+                type: string
+            momentum_calculation_failed_pairs:
+              type: integer
+            momentum_no_activity_pairs:
+              type: integer
+          additionalProperties: true
+        momentum_radar:
+          type: array
+          items:
+            $ref: '#/components/schemas/MomentumItem'
     Setup:
       type: object
       required:
-        - symbol
-        - side
-        - state
-        - setup_score
-        - expansion_score
-        - direction_score
-        - quality_score
-        - data_as_of
+      - symbol
+      - side
+      - state
+      - setup_score
+      - expansion_score
+      - direction_score
+      - quality_score
+      - data_as_of
       properties:
         symbol:
           type: string
@@ -258,16 +821,33 @@ components:
           type: string
         side:
           type: string
-          enum: [long, short, neutral]
+          enum:
+          - long
+          - short
+          - neutral
         state:
           type: string
-          enum: [WATCH, ARMED, TRIGGERED, MANAGED, INVALIDATED, EXPIRED]
+          enum:
+          - NO_TRADE
+          - WATCH
+          - ARMED
+          - TRIGGERED
+          - MANAGED
+          - INVALIDATED
+          - EXPIRED
         grade:
           type: string
-          enum: [A, B, WATCH, NO_TRADE]
+          enum:
+          - A
+          - B
+          - WATCH
+          - NO_TRADE
         confidence:
           type: string
-          enum: [LOW, MEDIUM, HIGH]
+          enum:
+          - LOW
+          - MEDIUM
+          - HIGH
         last_price:
           type: number
         shortable:
@@ -291,9 +871,9 @@ components:
         setup_score:
           type: number
         trigger:
-          $ref: "#/components/schemas/PriceCondition"
+          $ref: '#/components/schemas/PriceCondition'
         entry_zone:
-          $ref: "#/components/schemas/PriceZone"
+          $ref: '#/components/schemas/PriceZone'
         stop:
           type: number
         invalidation:
@@ -307,8 +887,7 @@ components:
         expected_holding_days:
           type: string
         metrics:
-          type: object
-          additionalProperties: true
+          $ref: '#/components/schemas/SwingMetrics'
         bullish_scenario:
           type: string
         bearish_scenario:
@@ -321,7 +900,10 @@ components:
             type: string
         data_quality:
           type: string
-          enum: [GOOD, PARTIAL, DEGRADED]
+          enum:
+          - GOOD
+          - PARTIAL
+          - DEGRADED
         missing_data:
           type: array
           items:
@@ -369,7 +951,10 @@ components:
           type: string
         severity:
           type: string
-          enum: [info, warning, critical]
+          enum:
+          - info
+          - warning
+          - critical
     DataSourceStatus:
       type: object
       properties:
@@ -377,15 +962,2564 @@ components:
           type: string
         status:
           type: string
-          enum: [ok, delayed, partial, down]
         data_as_of:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-        latency_seconds:
-          type: integer
+        coverage:
+          type: string
         missing_fields:
           type: array
           items:
             type: string
+      additionalProperties: true
+    WatchlistResponse:
+      type: object
+      required:
+      - data_as_of
+      - items
+      properties:
+        data_as_of:
+          type: string
+          format: date-time
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Setup'
+    MomentumItem:
+      type: object
+      required:
+      - symbol
+      - side
+      - state
+      - stage
+      - momentum_score
+      - last_price
+      - execution_status
+      - data_as_of
+      properties:
+        symbol:
+          type: string
+        base_asset:
+          type: string
+        quote_asset:
+          type: string
+        side:
+          type: string
+          enum:
+          - long
+          - short
+          - neutral
+        state:
+          type: string
+          enum:
+          - NO_TRADE
+          - WATCH
+          - TRIGGERED
+        stage:
+          type: string
+          enum:
+          - EARLY_ACCELERATION
+          - BREAKOUT_CONFIRMED
+          - EXTENDED_CHASE_RISK
+          - MOMENTUM_WATCH
+          - LOW_SIGNAL
+          - NO_ACTIVITY
+        momentum_score:
+          type: number
+        last_price:
+          type: number
+        price_change_24h_pct:
+          type: number
+        return_15m_pct:
+          type: number
+        return_1h_pct:
+          type: number
+        return_4h_pct:
+          type: number
+        acceleration_pct:
+          type: number
+        volume_ratio_5m:
+          type: number
+        turnover_acceleration_1h:
+          type: number
+        extension_atr_15m:
+          type: number
+        breakout_confirmed:
+          type: boolean
+        chase_risk:
+          type: boolean
+        tradeable:
+          type: boolean
+        execution_status:
+          type: string
+        turnover_24h_usdc:
+          type: number
+        spread_bps:
+          type: number
+        trigger:
+          $ref: '#/components/schemas/MomentumTrigger'
+        invalidation_price:
+          type:
+          - number
+          - 'null'
+        bullish_scenario:
+          type: string
+        bearish_scenario:
+          type: string
+        why_now:
+          type: array
+          items:
+            type: string
+        decision:
+          type: string
+        data_as_of:
+          type: string
+          format: date-time
+    MomentumResponse:
+      type: object
+      required:
+      - data_as_of
+      - scanned_pairs
+      - minimum_score
+      - items
+      properties:
+        data_as_of:
+          type: string
+          format: date-time
+        raw_usdc_instrument_records:
+          type:
+          - integer
+          - 'null'
+        unique_usdc_instruments:
+          type:
+          - integer
+          - 'null'
+        duplicate_instrument_records:
+          type: integer
+          default: 0
+        duplicate_symbols:
+          type: array
+          items:
+            type: string
+        eligible_pairs:
+          type:
+          - integer
+          - 'null'
+        scanned_pairs:
+          type: integer
+        failed_pairs:
+          type: integer
+          default: 0
+        failed_symbols:
+          type: array
+          items:
+            type: string
+        calculation_failed_pairs:
+          type: integer
+          default: 0
+        calculation_failures:
+          type: array
+          items:
+            type: object
+            properties:
+              symbol:
+                type: string
+              reason:
+                type: string
+        no_activity_pairs:
+          type: integer
+          default: 0
+        minimum_score:
+          type: number
+        promotion_minimum_score:
+          type:
+          - number
+          - 'null'
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/MomentumItem'
+    CompactCandidate:
+      type: object
+      required:
+      - symbol
+      - side
+      - category
+      - state
+      - grade
+      - decision
+      - setup_score
+      - expansion_score
+      - direction_score
+      - quality_score
+      - tradeable
+      - execution_status
+      - data_quality
+      properties:
+        symbol:
+          type: string
+        side:
+          type: string
+          enum:
+          - long
+          - short
+          - neutral
+        category:
+          type: string
+          enum:
+          - STRICT
+          - WATCH_ONLY
+        state:
+          type: string
+          enum:
+          - NO_TRADE
+          - WATCH
+          - ARMED
+          - TRIGGERED
+          - MANAGED
+          - INVALIDATED
+          - EXPIRED
+        grade:
+          type: string
+          enum:
+          - A
+          - B
+          - WATCH
+          - NO_TRADE
+        decision:
+          type: string
+          enum:
+          - TRADE
+          - WAIT
+          - NO_TRADE
+        last_price:
+          type:
+          - number
+          - 'null'
+        setup_score:
+          type: number
+        expansion_score:
+          type: number
+        direction_score:
+          type: number
+        quality_score:
+          type: number
+        shortable:
+          type: boolean
+        tradeable:
+          type: boolean
+        execution_status:
+          type: string
+        execution_modes:
+          type: array
+          items:
+            type: string
+        trigger:
+          oneOf:
+          - $ref: '#/components/schemas/PriceCondition'
+          - type: 'null'
+        entry_zone:
+          oneOf:
+          - $ref: '#/components/schemas/PriceZone'
+          - type: 'null'
+        stop:
+          type:
+          - number
+          - 'null'
+        invalidation:
+          type:
+          - string
+          - 'null'
+        targets:
+          type: array
+          items:
+            type: number
+        expected_rr:
+          type:
+          - number
+          - 'null'
+        turnover_24h_usdc:
+          type:
+          - number
+          - 'null'
+        spread_bps:
+          type:
+          - number
+          - 'null'
+        volume_ratio_4h:
+          type:
+          - number
+          - 'null'
+        liquidity_reasons:
+          type: array
+          items:
+            type: string
+        weakest_point:
+          type:
+          - string
+          - 'null'
+        data_quality:
+          type: string
+          enum:
+          - GOOD
+          - PARTIAL
+          - DEGRADED
+        missing_data:
+          type: array
+          items:
+            type: string
+    TopCandidatesResponse:
+      type: object
+      required:
+      - data_as_of
+      - data_as_of_budapest
+      - data_quality
+      - requested_limit
+      - strict_long_count
+      - strict_short_count
+      - strict_longs
+      - strict_shorts
+      - watch_only_longs
+      - watch_only_shorts
+      properties:
+        data_as_of:
+          type: string
+          format: date-time
+        data_as_of_budapest:
+          type: string
+        data_quality:
+          type: string
+          enum:
+          - GOOD
+          - PARTIAL
+          - DEGRADED
+        market_regime:
+          $ref: '#/components/schemas/CompactMarketRegime'
+        requested_limit:
+          type: integer
+        strict_long_count:
+          type: integer
+        strict_short_count:
+          type: integer
+        strict_longs:
+          type: array
+          items:
+            $ref: '#/components/schemas/CompactCandidate'
+        strict_shorts:
+          type: array
+          items:
+            $ref: '#/components/schemas/CompactCandidate'
+        watch_only_longs:
+          type: array
+          items:
+            $ref: '#/components/schemas/CompactCandidate'
+        watch_only_shorts:
+          type: array
+          items:
+            $ref: '#/components/schemas/CompactCandidate'
+        notes:
+          type: array
+          items:
+            type: string
+    DayTradeCandidate:
+      type: object
+      required:
+      - symbol
+      - base_asset
+      - strategy_mode
+      - side
+      - category
+      - state
+      - grade
+      - decision
+      - setup_type
+      - last_price
+      - tradeable
+      - shortable
+      - execution_status
+      - expansion_score
+      - direction_score
+      - quality_score
+      - setup_score
+      - context_4h
+      - structure_1h
+      - structure_15m
+      - trigger
+      - entry_zone
+      - stop
+      - invalidation
+      - expected_rr
+      - expected_holding_time
+      - data_quality
+      - data_as_of
+      - technical_grade
+      - watch_bucket
+      - side_direction_score
+      properties:
+        symbol:
+          type: string
+        base_asset:
+          type: string
+        quote_asset:
+          type: string
+          default: USDC
+        strategy_mode:
+          type: string
+          enum:
+          - DAY_TRADE
+        side:
+          type: string
+          enum:
+          - long
+          - short
+        category:
+          type: string
+          enum:
+          - STRICT
+          - WATCH_ONLY
+        state:
+          type: string
+          enum:
+          - NO_TRADE
+          - WATCH
+          - ARMED
+          - TRIGGERED
+        grade:
+          type: string
+          enum:
+          - A
+          - B
+          - WATCH
+          - NO_TRADE
+        decision:
+          type: string
+          enum:
+          - TRADE
+          - WAIT
+          - NO_TRADE
+        setup_type:
+          type: string
+        last_price:
+          type: number
+        tradeable:
+          type: boolean
+        shortable:
+          type: boolean
+        execution_status:
+          type: string
+        execution_modes:
+          type: array
+          items:
+            type: string
+        expansion_score:
+          type: number
+        direction_score:
+          type: number
+          description: 'Raw signed market direction: negative is bearish, positive
+            is bullish.'
+        quality_score:
+          type: number
+        setup_score:
+          type: number
+        context_4h:
+          type: string
+        structure_1h:
+          type: string
+        structure_15m:
+          type: string
+        timeframe_conflict:
+          type: boolean
+        trigger:
+          $ref: '#/components/schemas/DayTradeTrigger'
+        entry_zone:
+          $ref: '#/components/schemas/PriceZone'
+        stop:
+          type: number
+        invalidation:
+          type: string
+        targets:
+          type: array
+          items:
+            type: number
+        expected_rr:
+          type: number
+        expected_holding_time:
+          type: string
+        metrics:
+          $ref: '#/components/schemas/DayTradeMetrics'
+        derivatives:
+          $ref: '#/components/schemas/DerivativesContext'
+        why_now:
+          type: array
+          items:
+            type: string
+        bullish_scenario:
+          type: string
+        bearish_scenario:
+          type: string
+        weakest_point:
+          type: string
+        risks:
+          type: array
+          items:
+            type: string
+        data_quality:
+          type: string
+          enum:
+          - GOOD
+          - PARTIAL
+          - DEGRADED
+        missing_data:
+          type: array
+          items:
+            type: string
+        data_as_of:
+          type: string
+          format: date-time
+        technical_grade:
+          type:
+          - string
+          - 'null'
+          enum:
+          - A
+          - B
+          - WATCH
+          - NO_TRADE
+          - null
+        watch_bucket:
+          type:
+          - string
+          - 'null'
+        side_direction_score:
+          type: number
+          description: Positive alignment score for the proposed side; used by strict
+            day-trade filtering.
+    DayTradeScanResponse:
+      type: object
+      required:
+      - strategy_mode
+      - data_as_of
+      - data_as_of_budapest
+      - data_quality
+      - market_regime
+      - strict_longs
+      - strict_shorts
+      - watch_only_longs
+      - watch_only_shorts
+      - coverage
+      - assumptions
+      properties:
+        strategy_mode:
+          type: string
+          enum:
+          - DAY_TRADE
+        data_as_of:
+          type: string
+          format: date-time
+        data_as_of_budapest:
+          type: string
+        data_quality:
+          type: string
+          enum:
+          - GOOD
+          - PARTIAL
+          - DEGRADED
+        market_regime:
+          $ref: '#/components/schemas/DayTradeMarketRegime'
+        strict_longs:
+          type: array
+          items:
+            $ref: '#/components/schemas/DayTradeCandidate'
+        strict_shorts:
+          type: array
+          items:
+            $ref: '#/components/schemas/DayTradeCandidate'
+        watch_only_longs:
+          type: array
+          items:
+            $ref: '#/components/schemas/DayTradeCandidate'
+        watch_only_shorts:
+          type: array
+          items:
+            $ref: '#/components/schemas/DayTradeCandidate'
+        coverage:
+          $ref: '#/components/schemas/DayTradeCoverage'
+        assumptions:
+          $ref: '#/components/schemas/DayTradeAssumptions'
+        exclusions:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExclusionItem'
+        notes:
+          type: array
+          items:
+            type: string
+        journal:
+          type: object
+          properties:
+            enabled:
+              type: boolean
+            strategy_version:
+              type: string
+            horizon_hours:
+              type: integer
+            cost_bps:
+              type: number
+            strict_triggered:
+              type: integer
+            shadow_triggered:
+              type: integer
+            new_signals:
+              type: integer
+            evaluated_signals:
+              type: integer
+            closed_signals:
+              type: integer
+            active_signals:
+              type: integer
+            evaluation_policy:
+              type: string
+          additionalProperties: true
+    DayTradeTopCandidatesResponse:
+      allOf:
+      - $ref: '#/components/schemas/DayTradeScanResponse'
+      - type: object
+        required:
+        - requested_limit
+        - strict_long_count
+        - strict_short_count
+        properties:
+          requested_limit:
+            type: integer
+          strict_long_count:
+            type: integer
+          strict_short_count:
+            type: integer
+    SourceQuality:
+      type: object
+      properties:
+        Bybit EU:
+          type: string
+        Bybit EU market data:
+          type: string
+        Bybit EU Spot Margin:
+          type: string
+        Coinalyze:
+          type: string
+        Coinalyze derivatives:
+          type: string
+      additionalProperties:
+        type: string
+    ExclusionItem:
+      type: object
+      properties:
+        symbol:
+          type: string
+        reason:
+          type: string
+      additionalProperties: true
+    CalculationFailure:
+      type: object
+      properties:
+        symbol:
+          type: string
+        reason:
+          type: string
+      additionalProperties: true
+    SwingMetrics:
+      type: object
+      properties:
+        turnover_24h_usdc:
+          type: number
+        spread_bps:
+          type: number
+        atr_4h:
+          type: number
+        atr_percent_of_price:
+          type: number
+        atr_ratio_to_50bar_average:
+          type: number
+        bb_width_percentile:
+          type: number
+        volume_ratio_4h:
+          type: number
+        relative_strength_vs_btc_20x4h_pct:
+          type: number
+        margin_trading_flag:
+          type: string
+        max_borrowing_amount_base:
+          type: number
+        tradeable:
+          type: boolean
+        execution_status:
+          type: string
+        liquidity_reasons:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    MomentumTrigger:
+      type: object
+      properties:
+        timeframe:
+          type: string
+        condition:
+          type: string
+        price:
+          type:
+          - number
+          - 'null'
+        requires_close:
+          type: boolean
+        volume_confirmation:
+          type:
+          - string
+          - 'null'
+      additionalProperties: true
+    CompactMarketRegime:
+      type: object
+      properties:
+        btc_regime:
+          type: string
+        btc_structure_1d:
+          type: string
+        btc_structure_4h:
+          type: string
+        alt_breadth:
+          type: number
+        volatility_regime:
+          type: string
+        preferred_side:
+          type: string
+          enum:
+          - long
+          - short
+          - neutral
+        source_quality:
+          $ref: '#/components/schemas/SourceQuality'
+      additionalProperties: true
+    DayTradeTrigger:
+      type: object
+      properties:
+        timeframe:
+          type: string
+        condition:
+          type: string
+        price:
+          type: number
+        requires_close:
+          type: boolean
+        volume_confirmation:
+          type: string
+        triggered:
+          type: boolean
+      additionalProperties: true
+    DayTradeMetrics:
+      type: object
+      properties:
+        turnover_24h_usdc:
+          type: number
+        spread_bps:
+          type: number
+        volume_ratio_5m:
+          type: number
+        volume_ratio_15m:
+          type: number
+        return_15m_pct:
+          type: number
+        return_1h_pct:
+          type: number
+        return_4h_pct:
+          type: number
+        relative_strength_1h_pct:
+          type: number
+        relative_strength_4h_pct:
+          type: number
+        rolling_vwap_24h:
+          type: number
+        atr_5m:
+          type: number
+        atr_15m:
+          type: number
+        atr_ratio_15m:
+          type: number
+        distance_to_trigger_atr_5m:
+          type: number
+        assumed_round_trip_cost_bps:
+          type: number
+        liquidity_reasons:
+          type: array
+          items:
+            type: string
+        max_borrowing_amount:
+          type: number
+        nearest_structural_barrier:
+          type:
+          - number
+          - 'null'
+        barrier_rr_gross:
+          type:
+          - number
+          - 'null'
+        target_path_valid:
+          type: boolean
+        barrier_rr_net:
+          type:
+          - number
+          - 'null'
+        expected_rr_without_barrier:
+          type: number
+        expected_rr_with_barrier:
+          type: number
+        barrier_before_tp2:
+          type: boolean
+        rr_denominator:
+          type: string
+        target_definition:
+          type: string
+        barrier_source:
+          type:
+          - object
+          - 'null'
+          properties:
+            price:
+              type: number
+            timeframe:
+              type: string
+            swing_type:
+              type: string
+            pivot_start_ms:
+              type: integer
+            pivot_time:
+              type: string
+              format: date-time
+            confirmed_at:
+              type: string
+              format: date-time
+            prominence:
+              type: number
+            prominence_atr:
+              type:
+              - number
+              - 'null'
+            search_window_start:
+              type: string
+              format: date-time
+            search_window_end:
+              type: string
+              format: date-time
+            trigger_window_start:
+              type: string
+              format: date-time
+            trigger_window_excluded:
+              type: boolean
+            same_structure_as_trigger:
+              type: boolean
+          additionalProperties: true
+      additionalProperties: true
+    DerivativesContext:
+      type: object
+      properties:
+        source:
+          type: string
+        market_symbol:
+          type: string
+        exchange:
+          type:
+          - string
+          - 'null'
+        quote_asset:
+          type:
+          - string
+          - 'null'
+        open_interest_usd:
+          type: number
+        oi_change_1h_pct:
+          type:
+          - number
+          - 'null'
+        oi_change_4h_pct:
+          type:
+          - number
+          - 'null'
+        oi_change_24h_pct:
+          type:
+          - number
+          - 'null'
+        funding_rate:
+          type: number
+        long_liquidations_24h_usd:
+          type: number
+        short_liquidations_24h_usd:
+          type: number
+        is_bybit_specific:
+          type: boolean
+      additionalProperties: true
+    DayTradeMarketRegime:
+      type: object
+      properties:
+        strategy_mode:
+          type: string
+          enum:
+          - DAY_TRADE
+        data_as_of:
+          type: string
+          format: date-time
+        data_quality:
+          type: string
+          enum:
+          - GOOD
+          - PARTIAL
+          - DEGRADED
+        btc_structure_4h:
+          type:
+          - string
+          - 'null'
+        btc_structure_1h:
+          type:
+          - string
+          - 'null'
+        btc_structure_15m:
+          type:
+          - string
+          - 'null'
+        alt_breadth:
+          type: number
+        bullish_symbols:
+          type: integer
+        bearish_symbols:
+          type: integer
+        volatility_regime:
+          type: string
+        preferred_side:
+          type: string
+          enum:
+          - long
+          - short
+          - neutral
+        source_quality:
+          $ref: '#/components/schemas/SourceQuality'
+        notes:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    DayTradeCoverage:
+      type: object
+      properties:
+        raw_usdc_instrument_records:
+          type: integer
+        unique_usdc_instruments:
+          type: integer
+        duplicate_instrument_records:
+          type: integer
+        duplicate_symbols:
+          type: array
+          items:
+            type: string
+        active_usdc_pairs:
+          type: integer
+        eligible_day_discovery_pairs:
+          type: integer
+        day_tradeable_pairs:
+          type: integer
+        day_liquidity_blocked_pairs:
+          type: integer
+        minimum_turnover_usdc:
+          type: number
+        max_executable_spread_bps:
+          type: number
+        max_discovery_spread_bps:
+          type: number
+        fast_eligible_pairs:
+          type: integer
+        fast_scanned_pairs:
+          type: integer
+        fast_failed_pairs:
+          type: integer
+        fast_failed_symbols:
+          type: array
+          items:
+            type: string
+        fast_calculation_failed_pairs:
+          type: integer
+        fast_calculation_failures:
+          type: array
+          items:
+            $ref: '#/components/schemas/CalculationFailure'
+        deep_requested_pairs:
+          type: integer
+        deep_analyzed_pairs:
+          type: integer
+        deep_context_failed_pairs:
+          type: integer
+        deep_context_failed_symbols:
+          type: array
+          items:
+            type: string
+        deep_calculation_failed_pairs:
+          type: integer
+        deep_calculation_failures:
+          type: array
+          items:
+            $ref: '#/components/schemas/CalculationFailure'
+        coinalyze_enriched_symbols:
+          type: integer
+        borrowability_checked_symbols:
+          type: integer
+      additionalProperties: true
+    DayTradeAssumptions:
+      type: object
+      properties:
+        holding_time:
+          type: string
+        context_timeframes:
+          type: array
+          items:
+            type: string
+        setup_timeframe:
+          type: string
+        trigger_timeframe:
+          type: string
+        minimum_expected_rr_after_assumed_cost:
+          type: number
+        assumed_round_trip_cost_bps:
+          type: number
+        minimum_turnover_usdc:
+          type: number
+        max_spread_bps:
+          type: number
+      additionalProperties: true
+    DayTradeStatusWorker:
+      type: object
+      properties:
+        status:
+          type: string
+        strategy_mode:
+          type: string
+          enum:
+          - DAY_TRADE
+        duration_seconds:
+          type: number
+        strict_long_candidates:
+          type: integer
+        strict_short_candidates:
+          type: integer
+        raw_usdc_instrument_records:
+          type: integer
+        unique_usdc_instruments:
+          type: integer
+        duplicate_instrument_records:
+          type: integer
+        duplicate_symbols:
+          type: array
+          items:
+            type: string
+        active_usdc_pairs:
+          type: integer
+        eligible_day_discovery_pairs:
+          type: integer
+        day_tradeable_pairs:
+          type: integer
+        day_liquidity_blocked_pairs:
+          type: integer
+        minimum_turnover_usdc:
+          type: number
+        max_executable_spread_bps:
+          type: number
+        max_discovery_spread_bps:
+          type: number
+        fast_eligible_pairs:
+          type: integer
+        fast_scanned_pairs:
+          type: integer
+        fast_failed_pairs:
+          type: integer
+        fast_failed_symbols:
+          type: array
+          items:
+            type: string
+        fast_calculation_failed_pairs:
+          type: integer
+        fast_calculation_failures:
+          type: array
+          items:
+            $ref: '#/components/schemas/CalculationFailure'
+        deep_requested_pairs:
+          type: integer
+        deep_analyzed_pairs:
+          type: integer
+        deep_context_failed_pairs:
+          type: integer
+        deep_context_failed_symbols:
+          type: array
+          items:
+            type: string
+        deep_calculation_failed_pairs:
+          type: integer
+        deep_calculation_failures:
+          type: array
+          items:
+            $ref: '#/components/schemas/CalculationFailure'
+        coinalyze_enriched_symbols:
+          type: integer
+        borrowability_checked_symbols:
+          type: integer
+      additionalProperties: true
+    DayTradeStatusResponse:
+      type: object
+      required:
+      - checked_at
+      - worker
+      - sources
+      properties:
+        checked_at:
+          type: string
+          format: date-time
+        worker:
+          $ref: '#/components/schemas/DayTradeStatusWorker'
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/DataSourceStatus'
+      additionalProperties: true
+    JournalAggregate:
+      type: object
+      required:
+      - sample_size
+      - open_count
+      - closed_count
+      - tp2_count
+      - stop_count
+      - ambiguous_stop_count
+      - time_exit_count
+      - positive_net_count
+      properties:
+        sample_size:
+          type: integer
+        open_count:
+          type: integer
+        closed_count:
+          type: integer
+        tp2_count:
+          type: integer
+        stop_count:
+          type: integer
+        ambiguous_stop_count:
+          type: integer
+        time_exit_count:
+          type: integer
+        positive_net_count:
+          type: integer
+        target_hit_rate_pct:
+          type:
+          - number
+          - 'null'
+        positive_net_rate_pct:
+          type:
+          - number
+          - 'null'
+        average_net_r:
+          type:
+          - number
+          - 'null'
+        median_net_r:
+          type:
+          - number
+          - 'null'
+        profit_factor:
+          type:
+          - number
+          - 'null'
+        average_mfe_r:
+          type:
+          - number
+          - 'null'
+        average_mae_r:
+          type:
+          - number
+          - 'null'
+      additionalProperties: false
+    JournalGroupStats:
+      type: object
+      required:
+      - key
+      - stats
+      properties:
+        key:
+          type: string
+        stats:
+          $ref: '#/components/schemas/JournalAggregate'
+      additionalProperties: false
+    JournalLatestRun:
+      type: object
+      properties:
+        run_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        strategy_version:
+          type:
+          - string
+          - 'null'
+        data_quality:
+          type:
+          - string
+          - 'null'
+        coverage:
+          type: object
+          properties: {}
+          additionalProperties: true
+        strict_long_count:
+          type:
+          - integer
+          - 'null'
+        strict_short_count:
+          type:
+          - integer
+          - 'null'
+        triggered_trade_count:
+          type:
+          - integer
+          - 'null'
+        shadow_trigger_count:
+          type:
+          - integer
+          - 'null'
+        new_signal_count:
+          type:
+          - integer
+          - 'null'
+        evaluated_signal_count:
+          type:
+          - integer
+          - 'null'
+        closed_signal_count:
+          type:
+          - integer
+          - 'null'
+        active_signal_count:
+          type:
+          - integer
+          - 'null'
+      additionalProperties: true
+    DayTradeJournalSummaryResponse:
+      type: object
+      required:
+      - strategy_version
+      - generated_at
+      - window_days
+      - requested_signal_class
+      - evidence_status
+      - strict_closed_sample
+      - overall
+      - methodology
+      - warnings
+      properties:
+        strategy_version:
+          type: string
+        generated_at:
+          type: string
+          format: date-time
+        window_days:
+          type: integer
+        requested_signal_class:
+          type: string
+          enum:
+          - all
+          - STRICT
+          - SHADOW
+        evidence_status:
+          type: string
+          enum:
+          - INSUFFICIENT_SAMPLE
+          - EARLY_SAMPLE
+          - EVALUABLE_SAMPLE
+        strict_closed_sample:
+          type: integer
+        overall:
+          $ref: '#/components/schemas/JournalAggregate'
+        by_signal_class:
+          type: array
+          items:
+            $ref: '#/components/schemas/JournalGroupStats'
+        by_side:
+          type: array
+          items:
+            $ref: '#/components/schemas/JournalGroupStats'
+        by_setup_type:
+          type: array
+          items:
+            $ref: '#/components/schemas/JournalGroupStats'
+        latest_run:
+          $ref: '#/components/schemas/JournalLatestRun'
+        methodology:
+          type: array
+          items:
+            type: string
+        warnings:
+          type: array
+          items:
+            type: string
+      additionalProperties: false
+    DayTradeJournalSignal:
+      type: object
+      required:
+      - id
+      - signal_key
+      - strategy_version
+      - signal_class
+      - symbol
+      - side
+      - status
+      - opened_at
+      - expires_at
+      - setup_type
+      - entry_price
+      - trigger_price
+      - stop_price
+      - tp1
+      - tp2
+      - tp3
+      - expected_rr
+      - setup_score
+      - expansion_score
+      - direction_score
+      - side_direction_score
+      - quality_score
+      - bars_observed
+      - mfe_r
+      - mae_r
+      - cost_bps
+      - modeled_tp2_r
+      - entry_deviation_bps
+      - entry_within_zone
+      properties:
+        id:
+          type: integer
+        signal_key:
+          type: string
+        strategy_version:
+          type: string
+        signal_class:
+          type: string
+          enum:
+          - STRICT
+          - SHADOW
+        symbol:
+          type: string
+        side:
+          type: string
+          enum:
+          - long
+          - short
+        status:
+          type: string
+          enum:
+          - OPEN
+          - CLOSED
+        opened_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        closed_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        setup_type:
+          type: string
+        entry_price:
+          type: number
+        trigger_price:
+          type: number
+        stop_price:
+          type: number
+        tp1:
+          type: number
+        tp2:
+          type: number
+        tp3:
+          type: number
+        expected_rr:
+          type: number
+        setup_score:
+          type: number
+        expansion_score:
+          type: number
+        direction_score:
+          type: number
+        side_direction_score:
+          type: number
+        quality_score:
+          type: number
+        bars_observed:
+          type: integer
+        mfe_r:
+          type: number
+        mae_r:
+          type: number
+        exit_price:
+          type:
+          - number
+          - 'null'
+        exit_reason:
+          type:
+          - string
+          - 'null'
+        gross_r:
+          type:
+          - number
+          - 'null'
+        net_r:
+          type:
+          - number
+          - 'null'
+        cost_bps:
+          type: number
+        modeled_tp2_r:
+          type: number
+        entry_deviation_bps:
+          type: number
+        entry_within_zone:
+          type: boolean
+      additionalProperties: false
+    DayTradeJournalSignalsResponse:
+      type: object
+      required:
+      - generated_at
+      - count
+      - items
+      properties:
+        generated_at:
+          type: string
+          format: date-time
+        count:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/DayTradeJournalSignal'
+      additionalProperties: false
+    BacktestAggregate:
+      type: object
+      required:
+      - sample_size
+      - tp2_count
+      - stop_count
+      - ambiguous_stop_count
+      - time_exit_count
+      - positive_net_count
+      properties:
+        sample_size:
+          type: integer
+        tp2_count:
+          type: integer
+        stop_count:
+          type: integer
+        ambiguous_stop_count:
+          type: integer
+        time_exit_count:
+          type: integer
+        positive_net_count:
+          type: integer
+        target_hit_rate_pct:
+          type:
+          - number
+          - 'null'
+        positive_net_rate_pct:
+          type:
+          - number
+          - 'null'
+        average_net_r:
+          type:
+          - number
+          - 'null'
+        median_net_r:
+          type:
+          - number
+          - 'null'
+        profit_factor:
+          type:
+          - number
+          - 'null'
+        average_mfe_r:
+          type:
+          - number
+          - 'null'
+        average_mae_r:
+          type:
+          - number
+          - 'null'
+      additionalProperties: true
+    BacktestGroupStats:
+      type: object
+      required:
+      - key
+      - stats
+      properties:
+        key:
+          type: string
+        stats:
+          $ref: '#/components/schemas/BacktestAggregate'
+      additionalProperties: true
+    BacktestJob:
+      type: object
+      properties:
+        id:
+          type: integer
+        job_name:
+          type: string
+        strategy_version:
+          type: string
+        status:
+          type: string
+        start_at:
+          type: string
+          format: date-time
+        end_at:
+          type: string
+          format: date-time
+        warmup_start_at:
+          type: string
+          format: date-time
+        total_symbols:
+          type: integer
+        completed_symbols:
+          type: integer
+        failed_symbols:
+          type: integer
+        total_signals:
+          type: integer
+        primary_signals:
+          type: integer
+        parameters:
+          type: object
+          properties:
+            lookback_days:
+              type: integer
+            warmup_days:
+              type: integer
+            symbol_limit:
+              type: integer
+            horizon_hours:
+              type: integer
+            cost_bps:
+              type: number
+            minimum_turnover_usdc:
+              type: number
+            short_mode:
+              type: string
+            primary_no_overlap:
+              type: boolean
+            universe_mode:
+              type: string
+          additionalProperties: true
+        universe:
+          type: array
+          items:
+            type: object
+            properties:
+              symbol:
+                type: string
+              base:
+                type: string
+              tick_size:
+                type: number
+              selection_turnover_24h:
+                type: number
+              current_shortable_proxy:
+                type: boolean
+            additionalProperties: true
+        warnings:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    BacktestSymbolStatus:
+      type: object
+      properties:
+        symbol:
+          type: string
+        status:
+          type: string
+        bars_fetched:
+          type: integer
+        evaluation_bars:
+          type: integer
+        signal_count:
+          type: integer
+        primary_signal_count:
+          type: integer
+        last_error:
+          type:
+          - string
+          - 'null'
+      additionalProperties: true
+    DayTradeBacktestStatusResponse:
+      type: object
+      required:
+      - generated_at
+      - exists
+      - job
+      - progress_pct
+      - symbol_status
+      - warnings
+      properties:
+        generated_at:
+          type: string
+          format: date-time
+        exists:
+          type: boolean
+        job:
+          $ref: '#/components/schemas/BacktestJob'
+        progress_pct:
+          type: number
+        symbol_status:
+          type: array
+          items:
+            $ref: '#/components/schemas/BacktestSymbolStatus'
+        warnings:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    DayTradeBacktestSignal:
+      type: object
+      properties:
+        id:
+          type: integer
+        job_id:
+          type: integer
+        signal_key:
+          type: string
+        strategy_version:
+          type: string
+        signal_class:
+          type: string
+          enum:
+          - STRICT
+          - SHADOW
+        execution_assumption:
+          type: string
+        included_primary:
+          type: boolean
+        primary_exclusion_reason:
+          type:
+          - string
+          - 'null'
+        symbol:
+          type: string
+        side:
+          type: string
+          enum:
+          - long
+          - short
+        opened_at:
+          type: string
+          format: date-time
+        closed_at:
+          type: string
+          format: date-time
+        setup_type:
+          type: string
+        entry_price:
+          type: number
+        trigger_price:
+          type: number
+        stop_price:
+          type: number
+        tp1:
+          type: number
+        tp2:
+          type: number
+        tp3:
+          type: number
+        expected_rr:
+          type: number
+        modeled_tp2_r:
+          type: number
+        expansion_score:
+          type: number
+        direction_score:
+          type: number
+        side_direction_score:
+          type: number
+        quality_score:
+          type: number
+        setup_score:
+          type: number
+        turnover_24h_usdc:
+          type: number
+        modeled_spread_bps:
+          type: number
+        cost_bps:
+          type: number
+        bars_observed:
+          type: integer
+        mfe_r:
+          type: number
+        mae_r:
+          type: number
+        exit_price:
+          type: number
+        exit_reason:
+          type: string
+        gross_r:
+          type: number
+        net_r:
+          type: number
+        btc_structure_1h:
+          type:
+          - string
+          - 'null'
+        btc_structure_4h:
+          type:
+          - string
+          - 'null'
+        btc_volatility_regime:
+          type:
+          - string
+          - 'null'
+      additionalProperties: true
+    DayTradeBacktestSummaryResponse:
+      type: object
+      required:
+      - strategy_version
+      - generated_at
+      - job
+      - requested_signal_class
+      - requested_side
+      - primary_only
+      - evidence_status
+      - strict_primary_sample
+      - overall
+      properties:
+        strategy_version:
+          type: string
+        generated_at:
+          type: string
+          format: date-time
+        job:
+          $ref: '#/components/schemas/BacktestJob'
+        requested_signal_class:
+          type: string
+          enum:
+          - all
+          - STRICT
+          - SHADOW
+        requested_side:
+          type: string
+          enum:
+          - both
+          - long
+          - short
+        primary_only:
+          type: boolean
+        evidence_status:
+          type: string
+          enum:
+          - INSUFFICIENT_SAMPLE
+          - EARLY_SAMPLE
+          - EVALUABLE_SAMPLE
+        strict_primary_sample:
+          type: integer
+        overall:
+          $ref: '#/components/schemas/BacktestAggregate'
+        by_signal_class:
+          type: array
+          items:
+            $ref: '#/components/schemas/BacktestGroupStats'
+        by_side:
+          type: array
+          items:
+            $ref: '#/components/schemas/BacktestGroupStats'
+        by_setup_type:
+          type: array
+          items:
+            $ref: '#/components/schemas/BacktestGroupStats'
+        by_execution_assumption:
+          type: array
+          items:
+            $ref: '#/components/schemas/BacktestGroupStats'
+        by_month:
+          type: array
+          items:
+            $ref: '#/components/schemas/BacktestGroupStats'
+        by_setup_score_band:
+          type: array
+          items:
+            $ref: '#/components/schemas/BacktestGroupStats'
+        methodology:
+          type: array
+          items:
+            type: string
+        warnings:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    DayTradeBacktestSignalsResponse:
+      type: object
+      required:
+      - generated_at
+      - count
+      - items
+      properties:
+        generated_at:
+          type: string
+          format: date-time
+        count:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/DayTradeBacktestSignal'
+      additionalProperties: true
+    DiagnosticJob:
+      type: object
+      properties:
+        id:
+          type: integer
+        job_name:
+          type: string
+        strategy_version:
+          type: string
+        source_backtest_job_id:
+          type:
+          - integer
+          - 'null'
+        status:
+          type: string
+        start_at:
+          type: string
+          format: date-time
+        end_at:
+          type: string
+          format: date-time
+        warmup_start_at:
+          type: string
+          format: date-time
+        development_end_at:
+          type: string
+          format: date-time
+        total_symbols:
+          type: integer
+        completed_symbols:
+          type: integer
+        failed_symbols:
+          type: integer
+        total_events:
+          type: integer
+        primary_events:
+          type: integer
+        strict_eligible_events:
+          type: integer
+        strict_trade_events:
+          type: integer
+        parameters:
+          type: object
+          properties:
+            lookback_days:
+              type: integer
+            actual_lookback_days:
+              type: integer
+            development_days:
+              type: integer
+            actual_development_days:
+              type: integer
+            horizon_hours:
+              type: array
+              items:
+                type: integer
+            cost_bps:
+              type: array
+              items:
+                type: number
+            base_horizon_hours:
+              type: integer
+            base_cost_bps:
+              type: number
+            strict_setup_min:
+              type: number
+            strict_expansion_min:
+              type: number
+            strict_side_direction_min:
+              type: number
+            strict_quality_min:
+              type: number
+            strict_net_rr_min:
+              type: number
+            strict_volume_ratio_min:
+              type: number
+            short_mode:
+              type: string
+            primary_no_overlap:
+              type: boolean
+          additionalProperties: true
+        universe:
+          type: array
+          items:
+            type: object
+            properties:
+              symbol:
+                type: string
+              base:
+                type: string
+              tick_size:
+                type: number
+              selection_turnover_24h:
+                type: number
+              current_shortable_proxy:
+                type: boolean
+            additionalProperties: true
+        warnings:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    DiagnosticSymbolStatus:
+      type: object
+      properties:
+        symbol:
+          type: string
+        status:
+          type: string
+        bars_fetched:
+          type: integer
+        evaluation_bars:
+          type: integer
+        event_count:
+          type: integer
+        primary_event_count:
+          type: integer
+        strict_eligible_count:
+          type: integer
+        strict_trade_count:
+          type: integer
+        last_error:
+          type:
+          - string
+          - 'null'
+      additionalProperties: true
+    DayTradeDiagnosticStatusResponse:
+      type: object
+      required:
+      - generated_at
+      - exists
+      - job
+      - progress_pct
+      - symbol_status
+      - warnings
+      properties:
+        generated_at:
+          type: string
+          format: date-time
+        exists:
+          type: boolean
+        job:
+          $ref: '#/components/schemas/DiagnosticJob'
+        progress_pct:
+          type: number
+        symbol_status:
+          type: array
+          items:
+            $ref: '#/components/schemas/DiagnosticSymbolStatus'
+        warnings:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    DiagnosticGateStep:
+      type: object
+      required:
+      - gate
+      - reached_count
+      - passed_count
+      - failed_count
+      properties:
+        gate:
+          type: string
+        reached_count:
+          type: integer
+        passed_count:
+          type: integer
+        failed_count:
+          type: integer
+        pass_rate_from_reached_pct:
+          type:
+          - number
+          - 'null'
+        pass_rate_from_trigger_pct:
+          type:
+          - number
+          - 'null'
+      additionalProperties: false
+    DiagnosticCountGroup:
+      type: object
+      required:
+      - key
+      - count
+      properties:
+        key:
+          type: string
+        count:
+          type: integer
+        pct_of_trigger:
+          type:
+          - number
+          - 'null'
+      additionalProperties: false
+    DiagnosticSegment:
+      type: object
+      required:
+      - key
+      - trigger_count
+      - candidate_count
+      - near_strict_count
+      - strict_eligible_count
+      - strict_trade_count
+      properties:
+        key:
+          type: string
+        trigger_count:
+          type: integer
+        candidate_count:
+          type: integer
+        near_strict_count:
+          type: integer
+        strict_eligible_count:
+          type: integer
+        strict_trade_count:
+          type: integer
+      additionalProperties: false
+    DayTradeGateWaterfallResponse:
+      type: object
+      required:
+      - strategy_version
+      - generated_at
+      - job
+      - requested_side
+      - requested_split
+      - requested_universe_group
+      - primary_only
+      - trigger_count
+      - primary_count
+      - strict_eligible_count
+      - strict_trade_count
+      - waterfall
+      properties:
+        strategy_version:
+          type: string
+        generated_at:
+          type: string
+          format: date-time
+        job:
+          $ref: '#/components/schemas/DiagnosticJob'
+        requested_side:
+          type: string
+          enum:
+          - both
+          - long
+          - short
+        requested_split:
+          type: string
+          enum:
+          - all
+          - DEVELOPMENT
+          - VALIDATION
+        requested_universe_group:
+          type: string
+          enum:
+          - all
+          - MAJOR_LIQUID
+          - OTHER
+        primary_only:
+          type: boolean
+        trigger_count:
+          type: integer
+        primary_count:
+          type: integer
+        strict_eligible_count:
+          type: integer
+        strict_trade_count:
+          type: integer
+        waterfall:
+          type: array
+          items:
+            $ref: '#/components/schemas/DiagnosticGateStep'
+        first_failures:
+          type: array
+          items:
+            $ref: '#/components/schemas/DiagnosticCountGroup'
+        by_side:
+          type: array
+          items:
+            $ref: '#/components/schemas/DiagnosticSegment'
+        by_split:
+          type: array
+          items:
+            $ref: '#/components/schemas/DiagnosticSegment'
+        by_universe_group:
+          type: array
+          items:
+            $ref: '#/components/schemas/DiagnosticSegment'
+        methodology:
+          type: array
+          items:
+            type: string
+        warnings:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    DiagnosticSensitivityStats:
+      type: object
+      required:
+      - horizon_hours
+      - cost_bps
+      - stats
+      properties:
+        horizon_hours:
+          type: integer
+        cost_bps:
+          type: number
+        stats:
+          $ref: '#/components/schemas/BacktestAggregate'
+      additionalProperties: false
+    DiagnosticCohortStats:
+      type: object
+      required:
+      - key
+      - count
+      - stats
+      properties:
+        key:
+          type: string
+          enum:
+          - ALL_VALID_CANDIDATES
+          - LIQUID_EXECUTABLE
+          - SCORE_GATES_PASS
+          - NEAR_STRICT
+          - STRICT_ELIGIBLE
+          - STRICT_TRADE
+        count:
+          type: integer
+        stats:
+          $ref: '#/components/schemas/BacktestAggregate'
+      additionalProperties: false
+    ExcursionThreshold:
+      type: object
+      required:
+      - threshold_r
+      - reached_count
+      properties:
+        threshold_r:
+          type: number
+        reached_count:
+          type: integer
+        reached_pct:
+          type:
+          - number
+          - 'null'
+      additionalProperties: false
+    DayTradeEdgeDiagnosticsResponse:
+      type: object
+      required:
+      - strategy_version
+      - generated_at
+      - job
+      - selected_cohort
+      - requested_side
+      - requested_split
+      - requested_universe_group
+      - primary_only
+      - base_horizon_hours
+      - base_cost_bps
+      - selected_sample
+      - selected_performance
+      properties:
+        strategy_version:
+          type: string
+        generated_at:
+          type: string
+          format: date-time
+        job:
+          $ref: '#/components/schemas/DiagnosticJob'
+        selected_cohort:
+          type: string
+          enum:
+          - ALL_VALID_CANDIDATES
+          - LIQUID_EXECUTABLE
+          - SCORE_GATES_PASS
+          - NEAR_STRICT
+          - STRICT_ELIGIBLE
+          - STRICT_TRADE
+        requested_side:
+          type: string
+          enum:
+          - both
+          - long
+          - short
+        requested_split:
+          type: string
+          enum:
+          - all
+          - DEVELOPMENT
+          - VALIDATION
+        requested_universe_group:
+          type: string
+          enum:
+          - all
+          - MAJOR_LIQUID
+          - OTHER
+        primary_only:
+          type: boolean
+        base_horizon_hours:
+          type: integer
+        base_cost_bps:
+          type: number
+        selected_sample:
+          type: integer
+        selected_performance:
+          $ref: '#/components/schemas/BacktestAggregate'
+        cohort_performance:
+          type: array
+          items:
+            $ref: '#/components/schemas/DiagnosticCohortStats'
+        sensitivity:
+          type: array
+          items:
+            $ref: '#/components/schemas/DiagnosticSensitivityStats'
+        by_side:
+          type: array
+          items:
+            $ref: '#/components/schemas/BacktestGroupStats'
+        by_split:
+          type: array
+          items:
+            $ref: '#/components/schemas/BacktestGroupStats'
+        by_universe_group:
+          type: array
+          items:
+            $ref: '#/components/schemas/BacktestGroupStats'
+        by_btc_regime:
+          type: array
+          items:
+            $ref: '#/components/schemas/BacktestGroupStats'
+        by_setup_score_band:
+          type: array
+          items:
+            $ref: '#/components/schemas/BacktestGroupStats'
+        by_expansion_score_band:
+          type: array
+          items:
+            $ref: '#/components/schemas/BacktestGroupStats'
+        by_direction_score_band:
+          type: array
+          items:
+            $ref: '#/components/schemas/BacktestGroupStats'
+        by_quality_score_band:
+          type: array
+          items:
+            $ref: '#/components/schemas/BacktestGroupStats'
+        mfe_thresholds:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExcursionThreshold'
+        mae_thresholds:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExcursionThreshold'
+        methodology:
+          type: array
+          items:
+            type: string
+        warnings:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    DayTradeAuditTrigger:
+      type: object
+      properties:
+        timeframe:
+          type: string
+        condition:
+          type: string
+        price:
+          type: number
+        requires_close:
+          type: boolean
+        volume_confirmation:
+          type: string
+        triggered:
+          type: boolean
+      required:
+      - timeframe
+      - condition
+      - price
+      - requires_close
+      - volume_confirmation
+      - triggered
+    DayTradeBarrierSource:
+      type: object
+      properties:
+        price:
+          type: number
+        timeframe:
+          type: string
+        swing_type:
+          type: string
+          enum:
+          - SWING_HIGH
+          - SWING_LOW
+        pivot_start_ms:
+          type: integer
+        pivot_time:
+          type: string
+        confirmed_at:
+          type: string
+        prominence:
+          type: number
+        prominence_atr:
+          type:
+          - number
+          - 'null'
+        search_window_start:
+          type: string
+        search_window_end:
+          type: string
+        trigger_window_start:
+          type: string
+        trigger_window_excluded:
+          type: boolean
+        same_structure_as_trigger:
+          type: boolean
+      required:
+      - price
+      - timeframe
+      - swing_type
+      - pivot_start_ms
+      - pivot_time
+      - confirmed_at
+      - prominence
+      - search_window_start
+      - search_window_end
+      - trigger_window_start
+      - trigger_window_excluded
+      - same_structure_as_trigger
+    DayTradeAuditSide:
+      type: object
+      properties:
+        symbol:
+          type: string
+        side:
+          type: string
+          enum:
+          - long
+          - short
+        category:
+          type: string
+          enum:
+          - STRICT
+          - WATCH_ONLY
+        state:
+          type: string
+        decision:
+          type: string
+          enum:
+          - TRADE
+          - WAIT
+          - NO_TRADE
+        watch_bucket:
+          type:
+          - string
+          - 'null'
+        tradeable:
+          type: boolean
+        shortable:
+          type: boolean
+        execution_status:
+          type: string
+        timeframe_conflict:
+          type: boolean
+        side_direction_score:
+          type: number
+        setup_score:
+          type: number
+        trigger:
+          $ref: '#/components/schemas/DayTradeAuditTrigger'
+        entry:
+          type: number
+        entry_zone:
+          $ref: '#/components/schemas/PriceZone'
+        stop:
+          type: number
+        tp1:
+          type: number
+        tp2:
+          type: number
+        tp3:
+          type: number
+        expected_rr:
+          type: number
+        expected_rr_without_barrier:
+          type: number
+        expected_rr_with_barrier:
+          type: number
+        target_path_valid:
+          type: boolean
+        nearest_structural_barrier:
+          type:
+          - number
+          - 'null'
+        barrier_rr_gross:
+          type:
+          - number
+          - 'null'
+        barrier_rr_net:
+          type:
+          - number
+          - 'null'
+        barrier_before_tp2:
+          type: boolean
+        barrier_source:
+          anyOf:
+          - $ref: '#/components/schemas/DayTradeBarrierSource'
+          - type: 'null'
+        volume_ratio_5m:
+          type: number
+      required:
+      - symbol
+      - side
+      - category
+      - state
+      - decision
+      - tradeable
+      - shortable
+      - execution_status
+      - timeframe_conflict
+      - side_direction_score
+      - setup_score
+      - trigger
+      - entry
+      - entry_zone
+      - stop
+      - tp1
+      - tp2
+      - tp3
+      - expected_rr
+      - expected_rr_without_barrier
+      - expected_rr_with_barrier
+      - target_path_valid
+      - barrier_before_tp2
+      - volume_ratio_5m
+    DayTradeSymbolAuditResponse:
+      type: object
+      properties:
+        strategy_mode:
+          type: string
+          enum:
+          - DAY_TRADE
+        strategy_version:
+          type: string
+        data_as_of:
+          type: string
+          format: date-time
+        data_as_of_budapest:
+          type: string
+        symbol:
+          type: string
+        long:
+          anyOf:
+          - $ref: '#/components/schemas/DayTradeAuditSide'
+          - type: 'null'
+        short:
+          anyOf:
+          - $ref: '#/components/schemas/DayTradeAuditSide'
+          - type: 'null'
+        notes:
+          type: array
+          items:
+            type: string
+      required:
+      - strategy_mode
+      - strategy_version
+      - data_as_of
+      - data_as_of_budapest
+      - symbol
+      - notes
+    DayTradeFlowContextResponse:
+      type: object
+      properties:
+        strategy_mode:
+          type: string
+          enum:
+          - DAY_TRADE
+        strategy_version:
+          type: string
+        feature_version:
+          type: string
+        symbol:
+          type: string
+        data_as_of:
+          type: string
+          format: date-time
+        spot_snapshot_as_of:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+        coverage_status:
+          type: string
+        bybit_global_derivatives:
+          type: object
+          additionalProperties: true
+        spot_context:
+          type: object
+          additionalProperties: true
+        coinalyze_existing:
+          type: object
+          additionalProperties: true
+        interpretation:
+          type: object
+          additionalProperties: true
+        notes:
+          type: array
+          items:
+            type: string
+        data_as_of_budapest:
+          type: string
+        data_quality:
+          type: string
+          enum:
+          - GOOD
+          - PARTIAL
+          - DEGRADED
+        spot_snapshot_age_seconds:
+          anyOf:
+          - type: number
+          - type: 'null'
+      required:
+      - strategy_mode
+      - strategy_version
+      - feature_version
+      - symbol
+      - data_as_of
+      - data_as_of_budapest
+      - data_quality
+      - coverage_status
+      - bybit_global_derivatives
+      - spot_context
+      - coinalyze_existing
+      - interpretation
+      - notes
+      additionalProperties: true
 security:
-  - RadarApiKey: []
+- RadarApiKey: []
