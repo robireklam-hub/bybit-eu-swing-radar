@@ -8,8 +8,8 @@ from app.repository import RadarRepository
 
 app = FastAPI(
     title="Bybit EU Trading Radar API",
-    version="0.7.2",
-    description="Read-only cached USDC swing/day scanner with journaling, replay and strict-gate diagnostics.",
+    version="0.7.2.2",
+    description="Read-only cached USDC swing/day scanner with journaling, replay, diagnostics and context-only derivatives flow enrichment.",
 )
 
 repo = RadarRepository()
@@ -167,6 +167,28 @@ async def day_trade_status():
         raise HTTPException(
             status_code=503,
             detail="No cached day-trade status. Run the day-trade worker first.",
+        )
+    return result
+
+
+@app.get("/v1/day-trade/flow/status", dependencies=[Depends(require_api_key)])
+async def day_trade_flow_status():
+    result = await repo.get_day_trade_flow_status()
+    if result is None:
+        raise HTTPException(
+            status_code=503,
+            detail="No cached day-trade flow status. Run the flow worker first.",
+        )
+    return result
+
+
+@app.get("/v1/day-trade/flow/{symbol}", dependencies=[Depends(require_api_key)])
+async def day_trade_flow(symbol: str):
+    result = await repo.get_day_trade_flow(symbol)
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Day-trade flow context not found for this symbol. Wait for a fresh day setup and flow-worker run.",
         )
     return result
 

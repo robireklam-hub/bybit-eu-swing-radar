@@ -18,6 +18,7 @@ from app.models import (
     DayTradeDiagnosticStatusResponse,
     DayTradeEdgeDiagnosticsResponse,
     DayTradeGateWaterfallResponse,
+    DayTradeFlowContextResponse,
     DiagnosticCohortStats,
     DiagnosticCountGroup,
     DiagnosticGateStep,
@@ -477,11 +478,31 @@ async def _get_day_trade_status(
     return await repository.get_cache("day_trade_status")
 
 
+async def _get_day_trade_flow(
+    repository: RadarRepository,
+    symbol: str,
+) -> DayTradeFlowContextResponse | None:
+    payload = await repository.get_cache(f"day_trade_flow:{symbol.upper()}")
+    return (
+        DayTradeFlowContextResponse.model_validate(payload)
+        if payload is not None
+        else None
+    )
+
+
+async def _get_day_trade_flow_status(
+    repository: RadarRepository,
+) -> dict | None:
+    return await repository.get_cache("day_trade_flow_status")
+
+
 RadarRepository.get_day_trade_scan = _get_day_trade_scan
 RadarRepository.get_day_trade_top_candidates = _get_day_trade_top_candidates
 RadarRepository.get_day_trade_setup = _get_day_trade_setup
 RadarRepository.get_day_trade_audit = _get_day_trade_audit
 RadarRepository.get_day_trade_status = _get_day_trade_status
+RadarRepository.get_day_trade_flow = _get_day_trade_flow
+RadarRepository.get_day_trade_flow_status = _get_day_trade_flow_status
 
 
 

@@ -341,6 +341,24 @@ class DayTradeSymbolAuditResponse(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class DayTradeFlowContextResponse(BaseModel):
+    strategy_mode: Literal["DAY_TRADE"] = "DAY_TRADE"
+    strategy_version: str
+    feature_version: str
+    symbol: str
+    data_as_of: datetime
+    data_as_of_budapest: str
+    spot_snapshot_as_of: datetime | None = None
+    spot_snapshot_age_seconds: float | None = None
+    data_quality: DataQuality
+    coverage_status: str
+    bybit_global_derivatives: dict[str, Any] = Field(default_factory=dict)
+    spot_context: dict[str, Any] = Field(default_factory=dict)
+    coinalyze_existing: dict[str, Any] = Field(default_factory=dict)
+    interpretation: dict[str, Any] = Field(default_factory=dict)
+    notes: list[str] = Field(default_factory=list)
+
+
 JournalSignalClass = Literal["STRICT", "SHADOW"]
 JournalSignalStatus = Literal["OPEN", "CLOSED"]
 
