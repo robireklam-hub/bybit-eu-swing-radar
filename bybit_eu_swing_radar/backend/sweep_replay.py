@@ -801,6 +801,99 @@ async def run() -> dict[str, Any]:
     }
 
 
+def _print_compact_report(result: dict[str, Any]) -> None:
+    """Railway-safe compact output.
+
+    The full in-memory result is unchanged. We deliberately avoid pretty-printing
+    the deeply nested summary because Railway rate-limits high line-rate logs.
+    """
+    primary = result.get("summary_primary") or {}
+    by_cohort = primary.get("by_cohort") or {}
+    cps = primary.get("cohort_period_side") or {}
+
+    print(
+        "[sweep-replay] META "
+        + json.dumps(
+            {
+                "script_version": result.get("script_version"),
+                "detector_version": result.get("detector_version"),
+                "baseline_job": result.get("baseline_job"),
+                "research_window": result.get("research_window"),
+                "selected_symbols": result.get("selected_symbols"),
+                "primary_no_overlap": result.get("primary_no_overlap"),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        ),
+        flush=True,
+    )
+
+    print(
+        "[sweep-replay] SYMBOL_STATUS "
+        + json.dumps(
+            result.get("symbol_status") or [],
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        ),
+        flush=True,
+    )
+
+    for cohort in (RAW_COHORT, COHORT_4H_VETO, COHORT_4H_CONTEXT):
+        print(
+            f"[sweep-replay] PRIMARY_OVERALL {cohort} "
+            + json.dumps(
+                by_cohort.get(cohort) or {},
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            ),
+            flush=True,
+        )
+
+    for cohort in (COHORT_4H_VETO, COHORT_4H_CONTEXT):
+        for period in ("DEVELOPMENT", "VALIDATION"):
+            for side in ("long", "short"):
+                metrics = (
+                    ((cps.get(cohort) or {}).get(period) or {}).get(side)
+                    or {}
+                )
+                print(
+                    f"[sweep-replay] PRIMARY {cohort} {period} {side} "
+                    + json.dumps(
+                        metrics,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        default=str,
+                    ),
+                    flush=True,
+                )
+
+    print(
+        "[sweep-replay] AB_DELTA_PRIMARY "
+        + json.dumps(
+            result.get("ab_delta_primary") or {},
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        ),
+        flush=True,
+    )
+
+    print(
+        "[sweep-replay] WARNINGS "
+        + json.dumps(
+            result.get("warnings") or [],
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        ),
+        flush=True,
+    )
+    print("[sweep-replay] COMPLETE", flush=True)
+
+
 if __name__ == "__main__":
     result = asyncio.run(run())
-    print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+    _print_compact_report(result)
