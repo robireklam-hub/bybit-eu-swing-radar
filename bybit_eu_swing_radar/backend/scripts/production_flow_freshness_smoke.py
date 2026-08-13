@@ -94,6 +94,7 @@ def run_smoke(
     api_key: str,
     *,
     timeout: float = 15.0,
+    min_flow_status_time: datetime | None = None,
     fetch: Callable[[str, str, float], dict[str, Any]] = fetch_json,
 ) -> int:
     failures = []
@@ -121,6 +122,13 @@ def run_smoke(
         f"result={'FAIL' if status_errors else 'PASS'}"
     )
     failures.extend(f"FlowStatus: {error}" for error in status_errors)
+    if min_flow_status_time is not None:
+        if reference_time < min_flow_status_time:
+            failures.append("FlowStatus: WORKER EXECUTION NOT VERIFIED")
+        elif not responses["FlowStatus"].get("flow_batch_id"):
+            failures.append("FlowStatus: WORKER EXECUTION NOT VERIFIED; flow_batch_id missing")
+        else:
+            print("DEPLOYMENT VERIFIED, WORKER EXECUTION VERIFIED.")
 
     for name, _ in PATHS[1:]:
         payload = responses[name]
@@ -151,7 +159,13 @@ def main() -> int:
     if not base_url or not api_key:
         print("FAIL required production smoke configuration is missing")
         return 1
-    return run_smoke(base_url, api_key)
+    minimum = os.getenv("MIN_FLOW_STATUS_TIME", "").strip()
+    try:
+        min_flow_status_time = parse_timestamp(minimum) if minimum else None
+    except ValueError:
+        print("FAIL invalid deployment reference timestamp")
+        return 1
+    return run_smoke(base_url, api_key, min_flow_status_time=min_flow_status_time)
 
 
 if __name__ == "__main__":
