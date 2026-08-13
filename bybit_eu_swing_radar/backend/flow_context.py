@@ -110,7 +110,10 @@ def build_flow_payload(
     price_4h = _nullable_float(metrics.get("return_4h_pct"))
     existing_coinalyze = setup_payload.get("derivatives") or {}
     spot_age_seconds = _snapshot_age_seconds(setup_payload.get("data_as_of"), now)
-    spot_is_stale = spot_age_seconds is not None and spot_age_seconds > 300
+    # An absent or malformed source timestamp cannot prove freshness. Treat it as
+    # stale rather than allowing otherwise complete derivatives data to be
+    # reported as GOOD.
+    spot_is_stale = spot_age_seconds is None or spot_age_seconds > 300
 
     if not derivative_instrument or not derivative_ticker:
         return {

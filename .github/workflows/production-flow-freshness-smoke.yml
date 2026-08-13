@@ -1,0 +1,102 @@
+name: Production Flow freshness smoke
+
+# workflow_run avoids making this deployment smoke a prerequisite of the CI
+# workflow that triggers it, preventing a "Wait for CI" dependency deadlock.
+on:
+  pull_request:
+    branches: [main]
+  workflow_run:
+    workflows: ["Backend tests"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Main commit SHA deployed by Railway (defaults to main HEAD)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-flow-freshness-smoke
+  cancel-in-progress: false
+
+jobs:
+  railway-deployment-schema-validation:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+      RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_ENVIRONMENT_ID }}
+      RAILWAY_API_SERVICE_ID: ${{ vars.RAILWAY_API_SERVICE_ID }}
+      RAILWAY_FLOW_WORKER_SERVICE_ID: ${{ vars.RAILWAY_FLOW_WORKER_SERVICE_ID }}
+      EXPECTED_SHA: ${{ github.event.pull_request.base.sha }}
+      RAILWAY_GATE_MODE: validate-once
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate Railway deployment query against deployed PR base
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/railway_deployment_gate.py
+
+  production-smoke:
+    if: >-
+      github.event_name != 'pull_request' &&
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.name == 'Backend tests' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+      RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_ENVIRONMENT_ID }}
+      RAILWAY_API_SERVICE_ID: ${{ vars.RAILWAY_API_SERVICE_ID }}
+      RAILWAY_FLOW_WORKER_SERVICE_ID: ${{ vars.RAILWAY_FLOW_WORKER_SERVICE_ID }}
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+
+    steps:
+      - name: Check out tested main commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.expected_sha || 'main' }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve expected commit
+        id: commit
+        env:
+          DISPATCH_SHA: ${{ inputs.expected_sha }}
+          TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            expected_sha="$TESTED_SHA"
+          elif [ -n "$DISPATCH_SHA" ]; then
+            expected_sha="$DISPATCH_SHA"
+          else
+            expected_sha="$(git rev-parse HEAD)"
+          fi
+          echo "expected_sha=$expected_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for matching Railway deployments
+        env:
+          EXPECTED_SHA: ${{ steps.commit.outputs.expected_sha }}
+        working-directory: bybit_eu_swing_radar/backend
+        # This verifies deployment only; a successful worker cron execution is
+        # not proven. DEPLOYMENT VERIFIED, WORKER EXECUTION NOT VERIFIED.
+        run: python scripts/railway_deployment_gate.py
+
+      - name: Run read-only production Flow freshness smoke
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_flow_freshness_smoke.py
