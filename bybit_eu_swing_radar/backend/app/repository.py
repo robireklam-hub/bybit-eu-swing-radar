@@ -8,6 +8,7 @@ import asyncpg
 from asyncpg.exceptions import UndefinedTableError
 
 from app.config import settings
+from app.flow_freshness import apply_flow_freshness, summarize_flow_payloads
 from app.models import (
     BacktestAggregate,
     BacktestGroupStats,
@@ -484,7 +485,7 @@ async def _get_day_trade_flow(
 ) -> DayTradeFlowContextResponse | None:
     payload = await repository.get_cache(f"day_trade_flow:{symbol.upper()}")
     return (
-        DayTradeFlowContextResponse.model_validate(payload)
+        DayTradeFlowContextResponse.model_validate(apply_flow_freshness(payload))
         if payload is not None
         else None
     )
@@ -493,7 +494,30 @@ async def _get_day_trade_flow(
 async def _get_day_trade_flow_status(
     repository: RadarRepository,
 ) -> dict | None:
-    return await repository.get_cache("day_trade_flow_status")
+    status = await repository.get_cache("day_trade_flow_status")
+    if status is None:
+        return None
+    result = dict(status)
+    symbols = result.get("symbols")
+    flow_batch_id = result.get("flow_batch_id")
+    if not isinstance(symbols, list) or not isinstance(flow_batch_id, str) or not flow_batch_id:
+        # Legacy records cannot identify their batch reliably. Never retain a
+        # legacy GOOD count, regardless of the aggregate timestamp.
+        result["partial"] = int(result.get("partial", 0)) + int(result.get("good", 0))
+        result["good"] = 0
+        result["processed"] = (
+            result["good"]
+            + result["partial"]
+            + int(result.get("no_derivative_match", 0))
+        )
+        return result
+
+    payloads = []
+    for symbol in symbols:
+        payloads.append(await repository.get_cache(f"day_trade_flow:{str(symbol).upper()}"))
+    counts = summarize_flow_payloads(payloads, flow_batch_id=flow_batch_id)
+    result.update(processed=len(symbols), **counts)
+    return result
 
 
 RadarRepository.get_day_trade_scan = _get_day_trade_scan
