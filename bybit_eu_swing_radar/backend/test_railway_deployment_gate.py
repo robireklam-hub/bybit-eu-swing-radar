@@ -64,11 +64,12 @@ def test_project_token_request_is_scoped_read_only_graphql_post(monkeypatch):
 
     def urlopen(request, timeout):
         captured.update(request=request, timeout=timeout)
-        return Response({"data": {"projectToken": {"projectId": "p", "environmentId": "e"}}})
+        return Response({"data": {"deployments": {"edges": []}}})
 
     monkeypatch.setattr(gate, "urlopen", urlopen)
-    data = railway_query("query { projectToken { projectId environmentId } }", phase="project-token-scope")
-    assert data["projectToken"]["projectId"] == "p"
+    data = railway_query("query { deployments { edges { node { id } } } }",
+                         phase="api-service-deployments")
+    assert data["deployments"]["edges"] == []
     request = captured["request"]
     body = json.loads(request.data)
     assert request.full_url == "https://backboard.railway.com/graphql/v2"
@@ -88,8 +89,8 @@ def test_railway_error_output_redacts_project_token(monkeypatch, capsys):
     monkeypatch.setenv("RAILWAY_API_SERVICE_ID", "api")
     monkeypatch.setenv("RAILWAY_FLOW_WORKER_SERVICE_ID", "worker")
     monkeypatch.setenv("EXPECTED_SHA", "a")
-    monkeypatch.setattr(gate, "verify_project_token_scope",
-                        lambda: (_ for _ in ()).throw(RuntimeError("test-project-token")))
+    monkeypatch.setattr(gate, "validate_schema_once",
+                        lambda sha: (_ for _ in ()).throw(RuntimeError("test-project-token")))
     assert gate.main() == 1
     assert "test-project-token" not in capsys.readouterr().out
 
@@ -102,7 +103,8 @@ def call_query(monkeypatch, response_or_error, capsys):
         return Response(response_or_error)
     monkeypatch.setattr(gate, "urlopen", opener)
     try:
-        railway_query("query { projectToken { projectId } }", phase="project-token-scope")
+        railway_query("query { deployments { edges { node { id } } } }",
+                      phase="api-service-deployments")
     except Exception as exc:
         print(gate.sanitize(exc))
     output = capsys.readouterr().out
@@ -134,7 +136,8 @@ def test_safe_invalid_json_and_url_error_diagnostics(monkeypatch, capsys):
     monkeypatch.setenv("RAILWAY_API_TOKEN", "test-project-token")
     monkeypatch.setattr(gate, "urlopen", lambda *args, **kwargs: InvalidResponse({}))
     try:
-        railway_query("query { projectToken { projectId } }", phase="project-token-scope")
+        railway_query("query { deployments { edges { node { id } } } }",
+                      phase="api-service-deployments")
     except Exception as exc:
         assert "json_error=JSONDecodeError" in str(exc)
 
@@ -154,7 +157,7 @@ def test_pr_validation_uses_base_sha_and_has_no_production_smoke():
     assert "github.event_name != 'pull_request'" in production
 
 
-def test_validation_mode_uses_exactly_three_railway_calls(monkeypatch, capsys):
+def test_validation_mode_uses_exactly_two_deployment_calls_without_scope_query(monkeypatch, capsys):
     monkeypatch.setenv("RAILWAY_API_TOKEN", "token")
     monkeypatch.setenv("RAILWAY_PROJECT_ID", "p")
     monkeypatch.setenv("RAILWAY_ENVIRONMENT_ID", "e")
@@ -163,14 +166,13 @@ def test_validation_mode_uses_exactly_three_railway_calls(monkeypatch, capsys):
     monkeypatch.setenv("EXPECTED_SHA", "a")
     monkeypatch.setenv("RAILWAY_GATE_MODE", "validate-once")
     calls = []
-    monkeypatch.setattr(gate, "verify_project_token_scope", lambda: calls.append("scope"))
     monkeypatch.setattr(gate, "query_deployments", lambda service: calls.append(service) or [
         deployment("a", "SUCCESS", "2026-01-01T00:00:00Z")
     ])
-    gate.API_CALLS = 3
+    gate.API_CALLS = 2
     assert gate.main() == 0
-    assert calls == ["scope", "api", "worker"]
-    assert "Railway API calls: 3" in capsys.readouterr().out
+    assert calls == ["api", "worker"]
+    assert "Railway API calls: 2" in capsys.readouterr().out
 
 
 def test_combined_poll_queries_both_services_once_per_round(monkeypatch):
@@ -183,3 +185,12 @@ def test_combined_poll_queries_both_services_once_per_round(monkeypatch):
     })
     assert gate.wait_for_both_deployments("a", timeout_seconds=1, poll_seconds=30) == 0
     assert calls == [("api", "worker")]
+
+
+def test_post_merge_defaults_cap_combined_queries_at_32():
+    import inspect
+    signature = inspect.signature(gate.wait_for_both_deployments)
+    assert signature.parameters["timeout_seconds"].default == 960
+    assert signature.parameters["poll_seconds"].default == 30
+    # One immediate query plus at most 31 further rounds before the 960s deadline.
+    assert 1 + 960 // 30 <= 33

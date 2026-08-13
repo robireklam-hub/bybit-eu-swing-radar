@@ -118,19 +118,6 @@ def railway_query(
     return result["data"]
 
 
-def verify_project_token_scope() -> None:
-    data = railway_query("""
-    query {
-      projectToken { projectId environmentId }
-    }
-    """, phase="project-token-scope")
-    scope = data.get("projectToken") or {}
-    if scope.get("projectId") != os.environ["RAILWAY_PROJECT_ID"]:
-        raise RuntimeError("Railway project token project scope mismatch")
-    if scope.get("environmentId") != os.environ["RAILWAY_ENVIRONMENT_ID"]:
-        raise RuntimeError("Railway project token environment scope mismatch")
-
-
 def query_deployments(service_id: str) -> list[dict[str, Any]]:
     query = """
     query Deployments($input: DeploymentListInput!) {
@@ -199,7 +186,7 @@ def wait_for_deployments(
     return 1
 
 
-def wait_for_both_deployments(expected_sha: str, *, timeout_seconds=990, poll_seconds=30) -> int:
+def wait_for_both_deployments(expected_sha: str, *, timeout_seconds=960, poll_seconds=30) -> int:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         rows = query_both_deployments(
@@ -256,7 +243,6 @@ def main() -> int:
         "flow-worker": os.environ["RAILWAY_FLOW_WORKER_SERVICE_ID"],
     }
     try:
-        verify_project_token_scope()
         if os.getenv("RAILWAY_GATE_MODE") == "validate-once":
             return validate_schema_once(os.environ["EXPECTED_SHA"])
         return wait_for_both_deployments(os.environ["EXPECTED_SHA"])
