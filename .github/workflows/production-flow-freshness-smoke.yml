@@ -1,0 +1,45 @@
+name: Production Flow freshness smoke
+
+# Pull requests are covered by Backend tests. This workflow never calls Railway's
+# API; it reacts only to deployment_status events published by the integration.
+on:
+  deployment_status:
+
+permissions:
+  contents: read
+  deployments: read
+
+concurrency:
+  group: production-flow-freshness-smoke-production
+  cancel-in-progress: true
+
+jobs:
+  production-smoke:
+    if: >-
+      github.event.deployment_status.state == 'success' &&
+      github.event.deployment.environment == 'production' &&
+      github.event.deployment.ref == 'main' &&
+      github.event.deployment_status.environment_url != '' &&
+      (github.event.deployment_status.environment_url == vars.PRODUCTION_RADAR_API_BASE_URL ||
+       format('{0}/', github.event.deployment_status.environment_url) == vars.PRODUCTION_RADAR_API_BASE_URL ||
+       github.event.deployment_status.environment_url == format('{0}/', vars.PRODUCTION_RADAR_API_BASE_URL))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+
+    steps:
+      - name: Check out deployed main commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.deployment.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run read-only production Flow freshness smoke
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_flow_freshness_smoke.py
