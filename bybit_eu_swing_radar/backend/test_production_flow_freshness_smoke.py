@@ -93,20 +93,12 @@ def test_timestamp_priority_uses_generated_at_first():
     assert result == 1
 
 
-def test_worker_execution_requires_new_status_batch_after_deployment():
+def test_success_reports_worker_execution_not_verified(capsys):
     result, calls = run([status(), context(1), context(2), context(3)])
     assert result == 0 and len(calls) == 4
-
-    calls = []
-    responses = [status(), context(1), context(2), context(3)]
-    def fetch(url, api_key, timeout):
-        calls.append(url)
-        return responses[len(calls) - 1]
-    result = run_smoke(
-        "https://production.example", "secret", fetch=fetch,
-        min_flow_status_time=NOW + timedelta(seconds=1),
-    )
-    assert result == 1 and len(calls) == 4
+    output = capsys.readouterr().out
+    assert "DEPLOYMENT VERIFIED, WORKER EXECUTION NOT VERIFIED." in output
+    assert "WORKER EXECUTION VERIFIED" not in output
 
 
 def test_request_exception_continues_without_retry_and_redacts_secret(capsys):
