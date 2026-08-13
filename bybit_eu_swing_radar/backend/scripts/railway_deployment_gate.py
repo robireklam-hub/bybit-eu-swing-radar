@@ -10,12 +10,26 @@ import time
 from datetime import datetime
 from typing import Any, Callable
 from urllib.error import HTTPError
+from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 
 RAILWAY_GRAPHQL_URL = "https://backboard.railway.com/graphql/v2"
 TERMINAL_FAILURES = {"FAILED", "CRASHED", "REMOVED", "SKIPPED"}
 API_CALLS = 0
+
+
+class RailwayQueryError(RuntimeError):
+    pass
+
+
+def sanitize(value: Any) -> str:
+    text = str(value).replace("\r", " ").replace("\n", " ")
+    for secret_name in ("RAILWAY_API_TOKEN", "PRODUCTION_RADAR_API_KEY"):
+        secret = os.getenv(secret_name, "")
+        if secret:
+            text = text.replace(secret, "[REDACTED]")
+    return text[:500]
 
 
 def parse_created_at(value: Any) -> datetime:
@@ -50,7 +64,12 @@ def deployment_result(deployments: list[dict[str, Any]], expected_sha: str) -> s
     return "WAIT"
 
 
-def railway_query(query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
+def railway_query(
+    query: str,
+    variables: dict[str, Any] | None = None,
+    *,
+    phase: str,
+) -> dict[str, Any]:
     global API_CALLS
     API_CALLS += 1
     body = json.dumps({"query": query, "variables": variables or {}}).encode()
@@ -65,13 +84,37 @@ def railway_query(query: str, variables: dict[str, Any] | None = None) -> dict[s
     )
     try:
         with urlopen(request, timeout=20) as response:
-            result = json.load(response)
+            try:
+                result = json.load(response)
+            except json.JSONDecodeError as exc:
+                raise RailwayQueryError(
+                    f"phase={phase} json_error={type(exc).__name__}"
+                ) from None
     except HTTPError as exc:
-        if exc.code == 429:
-            raise RuntimeError("Railway API rate limit reached") from None
+        raise RailwayQueryError(
+            f"phase={phase} http_status={exc.code} http_reason={sanitize(exc.reason)}"
+        ) from None
+    except URLError as exc:
+        raise RailwayQueryError(
+            f"phase={phase} network_error={type(exc.reason).__name__}"
+        ) from None
+    except RailwayQueryError:
         raise
+    except Exception as exc:
+        raise RailwayQueryError(
+            f"phase={phase} network_error={type(exc).__name__}"
+        ) from None
+    if not isinstance(result, dict):
+        raise RailwayQueryError(f"phase={phase} response_keys=[] error=non-object-response")
+    keys = sorted(str(key) for key in result)
     if result.get("errors"):
-        raise RuntimeError("Railway GraphQL query failed")
+        messages = [sanitize(item.get("message", "GraphQL error"))
+                    for item in result["errors"] if isinstance(item, dict)]
+        raise RailwayQueryError(
+            f"phase={phase} graphql_errors={messages} response_keys={keys}"
+        )
+    if "data" not in result:
+        raise RailwayQueryError(f"phase={phase} response_keys={keys} error=missing-data")
     return result["data"]
 
 
@@ -80,7 +123,7 @@ def verify_project_token_scope() -> None:
     query {
       projectToken { projectId environmentId }
     }
-    """)
+    """, phase="project-token-scope")
     scope = data.get("projectToken") or {}
     if scope.get("projectId") != os.environ["RAILWAY_PROJECT_ID"]:
         raise RuntimeError("Railway project token project scope mismatch")
@@ -96,11 +139,13 @@ def query_deployments(service_id: str) -> list[dict[str, Any]]:
       }
     }
     """
+    phase = ("api-service-deployments" if service_id == os.environ["RAILWAY_API_SERVICE_ID"]
+             else "flow-worker-deployments")
     data = railway_query(query, {"input": {
         "projectId": os.environ["RAILWAY_PROJECT_ID"],
         "environmentId": os.environ["RAILWAY_ENVIRONMENT_ID"],
         "serviceId": service_id,
-    }})
+    }}, phase=phase)
     return [edge["node"] for edge in data["deployments"]["edges"]]
 
 
@@ -122,7 +167,7 @@ def query_both_deployments(api_service_id: str, worker_service_id: str):
     data = railway_query(query, {
         "api": {**common, "serviceId": api_service_id},
         "worker": {**common, "serviceId": worker_service_id},
-    })
+    }, phase="combined-deployment-poll")
     return {
         "api": [edge["node"] for edge in data["api"]["edges"]],
         "flow-worker": [edge["node"] for edge in data["worker"]["edges"]],
@@ -215,8 +260,8 @@ def main() -> int:
         if os.getenv("RAILWAY_GATE_MODE") == "validate-once":
             return validate_schema_once(os.environ["EXPECTED_SHA"])
         return wait_for_both_deployments(os.environ["EXPECTED_SHA"])
-    except Exception:
-        print("FAIL Railway deployment query failed; credentials and response are redacted")
+    except Exception as exc:
+        print(f"FAIL Railway deployment query failed: {sanitize(exc)}")
         return 1
     finally:
         print(f"Railway API calls: {API_CALLS}")

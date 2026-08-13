@@ -1,6 +1,7 @@
 import io
 import json
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 
 import scripts.railway_deployment_gate as gate
 from scripts.railway_deployment_gate import deployment_result, railway_query, wait_for_deployments
@@ -66,7 +67,7 @@ def test_project_token_request_is_scoped_read_only_graphql_post(monkeypatch):
         return Response({"data": {"projectToken": {"projectId": "p", "environmentId": "e"}}})
 
     monkeypatch.setattr(gate, "urlopen", urlopen)
-    data = railway_query("query { projectToken { projectId environmentId } }")
+    data = railway_query("query { projectToken { projectId environmentId } }", phase="project-token-scope")
     assert data["projectToken"]["projectId"] == "p"
     request = captured["request"]
     body = json.loads(request.data)
@@ -91,6 +92,54 @@ def test_railway_error_output_redacts_project_token(monkeypatch, capsys):
                         lambda: (_ for _ in ()).throw(RuntimeError("test-project-token")))
     assert gate.main() == 1
     assert "test-project-token" not in capsys.readouterr().out
+
+
+def call_query(monkeypatch, response_or_error, capsys):
+    monkeypatch.setenv("RAILWAY_API_TOKEN", "test-project-token")
+    def opener(*args, **kwargs):
+        if isinstance(response_or_error, Exception):
+            raise response_or_error
+        return Response(response_or_error)
+    monkeypatch.setattr(gate, "urlopen", opener)
+    try:
+        railway_query("query { projectToken { projectId } }", phase="project-token-scope")
+    except Exception as exc:
+        print(gate.sanitize(exc))
+    output = capsys.readouterr().out
+    assert "test-project-token" not in output
+    return output
+
+
+def test_safe_http_diagnostics_401_403_429(monkeypatch, capsys):
+    for code, reason in ((401, "Unauthorized"), (403, "Forbidden"), (429, "Too Many Requests")):
+        error = HTTPError("https://railway", code, reason, {}, None)
+        output = call_query(monkeypatch, error, capsys)
+        assert f"http_status={code}" in output
+        assert f"http_reason={reason}" in output
+
+
+def test_safe_graphql_schema_error_redacts_token(monkeypatch, capsys):
+    output = call_query(monkeypatch, {
+        "errors": [{"message": "Unknown field test-project-token"}], "data": None
+    }, capsys)
+    assert "graphql_errors=" in output
+    assert "[REDACTED]" in output
+    assert "response_keys=['data', 'errors']" in output
+
+
+def test_safe_invalid_json_and_url_error_diagnostics(monkeypatch, capsys):
+    class InvalidResponse(Response):
+        def read(self, size=-1):
+            return b"not-json"
+    monkeypatch.setenv("RAILWAY_API_TOKEN", "test-project-token")
+    monkeypatch.setattr(gate, "urlopen", lambda *args, **kwargs: InvalidResponse({}))
+    try:
+        railway_query("query { projectToken { projectId } }", phase="project-token-scope")
+    except Exception as exc:
+        assert "json_error=JSONDecodeError" in str(exc)
+
+    output = call_query(monkeypatch, URLError(RuntimeError("test-project-token")), capsys)
+    assert "network_error=RuntimeError" in output
 
 
 def test_pr_validation_uses_base_sha_and_has_no_production_smoke():
