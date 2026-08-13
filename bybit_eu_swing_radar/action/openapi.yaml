@@ -7,6 +7,22 @@ info:
 servers:
 - url: https://bybit-eu-swing-radar-production.up.railway.app
 paths:
+  /version:
+    get:
+      operationId: getVersion
+      security: []
+      summary: Return the deployed source commit identifier
+      responses:
+        '200':
+          description: Build identity
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [commit_sha]
+                properties:
+                  commit_sha:
+                    type: [string, 'null']
   /health:
     get:
       operationId: getHealth

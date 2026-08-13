@@ -350,6 +350,8 @@ class DayTradeFlowContextResponse(BaseModel):
     data_as_of_budapest: str
     spot_snapshot_as_of: datetime | None = None
     spot_snapshot_age_seconds: float | None = None
+    flow_batch_id: str | None = None
+    source_commit_sha: str | None = None
     data_quality: DataQuality
     coverage_status: str
     bybit_global_derivatives: dict[str, Any] = Field(default_factory=dict)

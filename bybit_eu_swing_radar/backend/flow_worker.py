@@ -13,6 +13,7 @@ import json
 import os
 from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import asyncpg
@@ -51,6 +52,7 @@ def env_float(name: str, default: float) -> float:
 BUDAPEST = ZoneInfo("Europe/Budapest")
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
+SOURCE_COMMIT_SHA = os.getenv("RAILWAY_GIT_COMMIT_SHA") or None
 DERIVATIVES_BYBIT_BASE_URL = os.getenv(
     "DERIVATIVES_BYBIT_BASE_URL", "https://api.bybit.com"
 ).rstrip("/")
@@ -200,10 +202,24 @@ async def upsert_cache(
 
 
 async def run_flow_worker() -> dict[str, Any]:
+    flow_batch_id = str(uuid4())
     if not FLOW_CONTEXT_ENABLED:
-        return {"enabled": False, "status": "DISABLED"}
+        return {
+            "enabled": False,
+            "status": "DISABLED",
+            "flow_batch_id": flow_batch_id,
+            "source_commit_sha": SOURCE_COMMIT_SHA,
+            "symbols": [],
+            "processed": 0,
+            "good": 0,
+            "partial": 0,
+            "no_derivative_match": 0,
+            "errors": [],
+        }
     if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL is not configured")
+        raise RuntimeError(
+            f"DATABASE_URL is not configured (flow_batch_id={flow_batch_id})"
+        )
 
     started = datetime.now(timezone.utc)
     timeout = httpx.Timeout(30.0, connect=10.0)
@@ -221,6 +237,9 @@ async def run_flow_worker() -> dict[str, Any]:
                     "data_as_of": started.isoformat(),
                     "data_as_of_budapest": started.astimezone(BUDAPEST).isoformat(),
                     "processed": 0,
+                    "symbols": [],
+                    "flow_batch_id": flow_batch_id,
+                    "source_commit_sha": SOURCE_COMMIT_SHA,
                     "errors": [],
                 }
                 await upsert_cache(connection, "day_trade_flow_status", status)
@@ -284,6 +303,8 @@ async def run_flow_worker() -> dict[str, Any]:
             no_match = 0
             async with connection.transaction():
                 for symbol, payload, error in processed:
+                    payload["flow_batch_id"] = flow_batch_id
+                    payload["source_commit_sha"] = SOURCE_COMMIT_SHA
                     await upsert_cache(connection, f"day_trade_flow:{symbol}", payload)
                     coverage = str(payload.get("coverage_status"))
                     if coverage == "GOOD":
@@ -304,6 +325,9 @@ async def run_flow_worker() -> dict[str, Any]:
                     "data_as_of_budapest": finished.astimezone(BUDAPEST).isoformat(),
                     "source": "Bybit global public linear derivatives + cached Coinalyze secondary context",
                     "processed": len(processed),
+                    "symbols": [symbol for symbol, _, _ in processed],
+                    "flow_batch_id": flow_batch_id,
+                    "source_commit_sha": SOURCE_COMMIT_SHA,
                     "good": good,
                     "partial": partial,
                     "no_derivative_match": no_match,
