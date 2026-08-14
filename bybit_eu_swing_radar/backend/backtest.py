@@ -35,15 +35,17 @@ from day_worker import (
     DAY_MAX_SPREAD_BPS,
     DAY_MIN_RR,
     DAY_MIN_TURNOVER_USDC,
+    DAY_TRIGGER_VOLUME_RATIO,
     DayAnalysis,
     analyze_day_market,
     build_day_candidate,
     calculate_fast_result,
     normalize_usdc_universe,
 )
+from sweep_research import SweepResearchConfig, latest_bar_sweep_setup
 from worker import Bar, BybitAPI, Instrument, safe_float
 
-STRATEGY_VERSION = "0.7.2"
+STRATEGY_VERSION = "0.7.3"
 FIVE_MIN_MS = 5 * 60 * 1000
 
 
@@ -372,7 +374,6 @@ def _signal_class(candidate: dict[str, Any]) -> str | None:
         candidate.get("category") == "WATCH_ONLY"
         and candidate.get("watch_bucket") == "NEAR_STRICT"
         and executable_side
-        and not bool(candidate.get("timeframe_conflict"))
         and safe_float(candidate.get("setup_score")) >= BACKTEST_SHADOW_MIN_SETUP
         and safe_float(candidate.get("expected_rr")) >= BACKTEST_SHADOW_MIN_RR
     ):
@@ -515,20 +516,21 @@ def replay_symbol(
         # replay endpoint are excluded rather than force-closed early.
         if index + horizon_bars >= len(bars_5m):
             break
-        previous_window = bars_5m[index - 12:index]
-        if len(previous_window) < 12:
-            continue
-        previous_close = bars_5m[index - 1].close
-        prior_high = max(bar.high for bar in previous_window)
-        prior_low = min(bar.low for bar in previous_window)
-        trigger_sides: list[str] = []
-        if current_bar.close > prior_high and previous_close <= prior_high:
-            trigger_sides.append("long")
-        if current_bar.close < prior_low and previous_close >= prior_low:
-            trigger_sides.append("short")
+        bars5_slice = bars_5m[max(0, index - 219):index + 1]
+        sweep_config = SweepResearchConfig(
+            volume_confirmation_ratio=DAY_TRIGGER_VOLUME_RATIO
+        )
+        trigger_sides = [
+            side
+            for side in ("long", "short")
+            if latest_bar_sweep_setup(
+                bars5_slice,
+                side,
+                config=sweep_config,
+            ) is not None
+        ]
         if not trigger_sides:
             continue
-        bars5_slice = bars_5m[max(0, index - 219):index + 1]
         symbol15 = _higher_prefix(bars15, closes15, evaluation_time_ms, 220)
         symbol1h = _higher_prefix(bars1h, closes1h, evaluation_time_ms, 140)
         symbol4h = _higher_prefix(bars4h, closes4h, evaluation_time_ms, 100)

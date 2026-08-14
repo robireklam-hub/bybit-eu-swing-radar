@@ -527,6 +527,46 @@ def latest_sweep_setup(
     return events[-1] if events else None
 
 
+def latest_bar_sweep_setup(
+    bars_5m: Iterable[Any],
+    side: Side,
+    *,
+    bars_15m: Iterable[Any] | None = None,
+    config: SweepResearchConfig = DEFAULT_CONFIG,
+) -> dict[str, Any] | None:
+    """Return an entry-ready sweep whose 5m confirmation is the latest closed bar.
+
+    Only sweep starts inside the bounded confirmation window are evaluated, so live
+    and historical replay can call this on every closed 5m bar without rescanning
+    the full history.
+    """
+    bars = normalize_bars(bars_5m)
+    if not bars:
+        return None
+    fifteen = normalize_bars(bars_15m) if bars_15m is not None else None
+    required_history = max(
+        config.liquidity_lookback,
+        config.structure_lookback_5m,
+        config.atr_period,
+    )
+    first_sweep = max(required_history, len(bars) - 1 - config.max_confirmation_bars)
+    latest_time = iso_from_ms(bars[-1].start_ms)
+    for sweep_index in range(first_sweep, len(bars)):
+        event = _evaluate_sweep_normalized(
+            bars,
+            sweep_index,
+            side,
+            bars_15m=fifteen,
+            config=config,
+        )
+        if (
+            event.get("entry_ready")
+            and event.get("structure_shift_time_5m") == latest_time
+        ):
+            return event
+    return None
+
+
 def config_dict(config: SweepResearchConfig = DEFAULT_CONFIG) -> dict[str, Any]:
     return asdict(config)
 
@@ -545,6 +585,7 @@ __all__ = [
     "evaluate_sweep_at_index",
     "_evaluate_sweep_normalized",
     "latest_sweep_setup",
+    "latest_bar_sweep_setup",
     "normalize_bars",
     "scan_sweep_setups",
     "volume_ratio_at_index",
