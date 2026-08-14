@@ -298,7 +298,10 @@ class CoinalyzeAPI:
             f"{COINALYZE_BASE_URL}{path}", params=params, headers=self.headers
         )
         if response.status_code == 429:
-            wait_seconds = int(response.headers.get("Retry-After", "60"))
+            try:
+                wait_seconds = math.ceil(float(response.headers.get("Retry-After", "60")))
+            except (TypeError, ValueError):
+                wait_seconds = 60
             await asyncio.sleep(max(wait_seconds, 1))
             response = await self.client.get(
                 f"{COINALYZE_BASE_URL}{path}", params=params, headers=self.headers
