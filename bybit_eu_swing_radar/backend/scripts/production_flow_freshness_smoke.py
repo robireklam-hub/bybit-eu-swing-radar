@@ -62,6 +62,20 @@ def valid_batch_id(payload: dict[str, Any]) -> str | None:
     return value if isinstance(value, str) and bool(value.strip()) else None
 
 
+def valid_status_symbols(payload: dict[str, Any]) -> set[str] | None:
+    value = payload.get("symbols")
+    if not isinstance(value, list):
+        return None
+    symbols: set[str] = set()
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            return None
+        symbols.add(item.strip().upper())
+    if len(symbols) != len(value):
+        return None
+    return symbols
+
+
 def evaluate_status(payload: dict[str, Any]) -> tuple[datetime, list[str]]:
     _, reference_time = select_timestamp(payload)
     errors = []
@@ -74,6 +88,11 @@ def evaluate_status(payload: dict[str, Any]) -> tuple[datetime, list[str]]:
         errors.append("FlowStatus counters must be non-negative")
     if processed != good + partial + no_match:
         errors.append("processed != good + partial + no_derivative_match")
+    symbols = valid_status_symbols(payload)
+    if symbols is None:
+        errors.append("FlowStatus symbols must be a unique list of non-empty strings")
+    elif processed != len(symbols):
+        errors.append("processed != len(symbols)")
     return reference_time, errors
 
 
@@ -182,22 +201,28 @@ def run_smoke(base_url: str, api_key: str, expected_sha: str, *, timeout: float 
     failures = []
     status_payload = responses["FlowStatus"]
     final_batch_id = valid_batch_id(status_payload)
+    current_symbols = valid_status_symbols(status_payload)
     try:
         reference_time, status_errors = evaluate_status(status_payload)
         failures.extend(status_errors)
     except ValueError as exc:
         failures.append(f"FlowStatus: {exc}")
         reference_time = None
+    if status_payload.get("source_commit_sha") != expected_sha:
+        failures.append("FlowStatus: source_commit_sha mismatch")
     if final_batch_id is None:
         failures.append("FlowStatus flow_batch_id is missing or invalid")
 
     for name, _ in PATHS:
+        if name == "FlowStatus":
+            continue
         payload = responses[name]
-        if payload.get("source_commit_sha") != expected_sha:
-            failures.append(f"{name}: source_commit_sha mismatch")
-        if valid_batch_id(payload) != final_batch_id:
-            failures.append(f"{name}: flow_batch_id mismatch")
-        if name != "FlowStatus" and reference_time is not None:
+        if current_symbols is not None and name in current_symbols:
+            if payload.get("source_commit_sha") != expected_sha:
+                failures.append(f"{name}: source_commit_sha mismatch for current batch symbol")
+            if valid_batch_id(payload) != final_batch_id:
+                failures.append(f"{name}: flow_batch_id mismatch for current batch symbol")
+        if reference_time is not None:
             try:
                 failures.extend(f"{name}: {error}" for error in evaluate_context(payload, reference_time))
             except ValueError as exc:

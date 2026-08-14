@@ -7,11 +7,14 @@ import scripts.production_flow_freshness_smoke as smoke
 
 SHA = "a" * 40
 NOW = datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc)
+SYMBOLS = ("PENGUUSDC", "WIFUSDC", "BONKUSDC")
 
 
-def status(batch="batch-a", sha="old", **overrides):
+def status(batch="batch-a", sha="old", symbols=None, **overrides):
+    current_symbols = list(SYMBOLS if symbols is None else symbols)
     value = {"data_as_of": NOW.isoformat(), "flow_batch_id": batch, "source_commit_sha": sha,
-             "processed": 3, "good": 1, "partial": 1, "no_derivative_match": 1}
+             "symbols": current_symbols, "processed": len(current_symbols),
+             "good": len(current_symbols), "partial": 0, "no_derivative_match": 0}
     value.update(overrides)
     return value
 
@@ -21,6 +24,11 @@ def context(batch="batch-b", sha=SHA, age=1, **overrides):
              "source_commit_sha": sha, "data_quality": "GOOD", "coverage_status": "GOOD"}
     value.update(overrides)
     return value
+
+
+def degraded_old_context(symbol_suffix="old"):
+    return context(f"batch-{symbol_suffix}", sha=f"sha-{symbol_suffix}", age=301,
+                   data_quality="DEGRADED", coverage_status="STALE_FLOW_CONTEXT")
 
 
 def final_payloads(batch="batch-b"):
@@ -115,7 +123,7 @@ def test_missing_baseline_batch_fails_closed_after_deployment_verification():
     assert len(calls) == 2
 
 
-def test_final_payloads_require_same_commit_batch_and_invariants():
+def test_final_payloads_require_current_symbols_to_match_commit_batch_and_invariants():
     bad = final_payloads()
     bad[0] = status("batch-b", SHA, processed=4)
     bad[1] = context("other")
@@ -124,10 +132,35 @@ def test_final_payloads_require_same_commit_batch_and_invariants():
     assert smoke.run_smoke("https://prod", "secret", SHA, fetch=fetch, sleep=lambda _: None) == 1
 
 
-def test_stale_good_context_fails():
-    bad = final_payloads()
-    bad[1] = context("batch-b", age=301)
-    fetch, _ = scripted_fetch([{"commit_sha": SHA}, status("batch-b", SHA), *bad])
+def test_non_batch_symbols_may_keep_old_identity_when_freshness_is_degraded():
+    current_status = status("batch-b", SHA, symbols=["WIFUSDC"])
+    final = [
+        current_status,
+        degraded_old_context("pengu"),
+        context("batch-b"),
+        degraded_old_context("bonk"),
+    ]
+    fetch, calls = scripted_fetch([{"commit_sha": SHA}, current_status, *final])
+    assert smoke.run_smoke("https://prod", "secret", SHA, fetch=fetch, sleep=lambda _: None) == 0
+    assert len(calls) == 6
+
+
+def test_current_batch_symbol_still_requires_current_commit_and_batch():
+    current_status = status("batch-b", SHA, symbols=["PENGUUSDC", "WIFUSDC"])
+    final = [
+        current_status,
+        degraded_old_context("pengu"),
+        context("batch-b"),
+        degraded_old_context("bonk"),
+    ]
+    fetch, _ = scripted_fetch([{"commit_sha": SHA}, current_status, *final])
+    assert smoke.run_smoke("https://prod", "secret", SHA, fetch=fetch, sleep=lambda _: None) == 1
+
+
+def test_stale_good_context_fails_even_when_symbol_is_not_in_current_batch():
+    current_status = status("batch-b", SHA, symbols=["WIFUSDC"])
+    final = [current_status, context("old", sha="old", age=301), context("batch-b"), degraded_old_context("bonk")]
+    fetch, _ = scripted_fetch([{"commit_sha": SHA}, current_status, *final])
     assert smoke.run_smoke("https://prod", "secret", SHA, fetch=fetch, sleep=lambda _: None) == 1
 
 
