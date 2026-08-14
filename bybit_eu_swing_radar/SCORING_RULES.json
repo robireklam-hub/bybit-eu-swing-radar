@@ -1,5 +1,5 @@
 {
-  "version": "0.1.0",
+  "version": "0.2.0",
   "thresholds": {
     "minimum_rr": 2.0,
     "expansion_min": 55,
@@ -10,34 +10,46 @@
     "grade_a_score": 80,
     "max_fast_data_age_minutes": 15
   },
+  "strict_gate_policy": {
+    "core_scores_are_authoritative": true,
+    "coinalyze_derivatives_are_context_only": true,
+    "missing_or_degraded_derivatives_are_not_a_hard_gate": true,
+    "derivatives_may_change_conviction_but_not_strict_eligibility": true
+  },
   "setup_score_formula": {
     "expansion_weight": 0.35,
     "absolute_direction_weight": 0.35,
     "quality_weight": 0.3
   },
-  "expansion_score": {
-    "volatility_compression": 30,
-    "volume_acceleration": 15,
-    "oi_acceleration": 15,
-    "range_maturity_breakout_proximity": 15,
-    "orderbook_spread_improvement": 10,
-    "liquidation_crowding_tension": 10,
-    "data_freshness": 5
+  "core_expansion_score": {
+    "atr_compression_weight": 0.25,
+    "bollinger_compression_weight": 0.25,
+    "range_boundary_proximity_weight": 0.2,
+    "volume_weight": 0.15,
+    "range_maturity_weight": 0.15
   },
-  "direction_score": {
-    "market_structure": 25,
-    "relative_strength": 15,
-    "price_oi_relationship": 15,
-    "breakout_reclaim_sweep": 15,
-    "buy_sell_flow": 10,
-    "funding_crowding": 10,
-    "btc_regime": 10
+  "core_direction_score": {
+    "four_hour_structure": true,
+    "daily_structure": true,
+    "relative_strength_vs_btc": true,
+    "range_position": true,
+    "latest_closed_4h_candle_volume_context": true
   },
-  "quality_score": {
-    "liquidity_slippage": 20,
-    "realistic_rr": 25,
-    "confluence": 25,
-    "trigger_clarity": 15,
-    "data_quality": 15
+  "core_quality_score": {
+    "turnover_and_spread": true,
+    "directional_confluence": true,
+    "trigger_proximity": true,
+    "core_data_component": true,
+    "rr_component": true
+  },
+  "derivatives_context": {
+    "open_interest_current_and_1h_4h_24h_change": true,
+    "funding_rate": true,
+    "liquidation_flow": true,
+    "venue_provenance": true,
+    "may_modify_core_expansion_score": false,
+    "may_modify_core_direction_score": false,
+    "may_modify_core_quality_score": false,
+    "may_be_used_as_trade_gate": false
   }
 }
