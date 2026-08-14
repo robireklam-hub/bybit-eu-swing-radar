@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from pathlib import Path
+
+# app.main constructs Settings at import time. Match the normal Backend CI test env.
+os.environ.setdefault("DATABASE_URL", "postgresql://test:test@localhost:5432/test")
+os.environ.setdefault("RADAR_API_KEY", "test-radar-key")
+os.environ.setdefault("COINALYZE_API_KEY", "test-coinalyze-key")
 
 import app.main
 from flow_context import build_flow_payload
