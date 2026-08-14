@@ -57,6 +57,7 @@ jobs:
         run: |
           rm bybit_eu_swing_radar/backend/scripts/apply_v073_contract_alignment.py
           rm .github/workflows/align-v073-contract.yml
+          sed -i '${/^$/d;}' bybit_eu_swing_radar/BACKEND_SPEC_HU.md
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -- \
