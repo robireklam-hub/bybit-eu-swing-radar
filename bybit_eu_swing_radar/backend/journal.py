@@ -20,7 +20,7 @@ from typing import Any
 import asyncpg
 
 
-STRATEGY_VERSION = "0.7.2"
+STRATEGY_VERSION = "0.7.3"
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -184,7 +184,6 @@ def _signal_class(candidate: dict[str, Any]) -> str | None:
         candidate.get("category") == "WATCH_ONLY"
         and candidate.get("watch_bucket") == "NEAR_STRICT"
         and executable_side
-        and not bool(candidate.get("timeframe_conflict"))
         and _as_float(candidate.get("setup_score")) >= JOURNAL_SHADOW_MIN_SETUP
         and _as_float(candidate.get("expected_rr")) >= JOURNAL_SHADOW_MIN_RR
     ):

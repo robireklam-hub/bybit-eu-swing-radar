@@ -1,4 +1,4 @@
-"""Bybit EU Trading Radar — day-trade worker v0.7.2.
+"""Bybit EU Trading Radar — day-trade worker v0.7.3.
 
 Separate engine from the swing worker:
 - universe: active Bybit EU USDC spot pairs
@@ -31,6 +31,7 @@ import asyncpg
 import httpx
 
 from journal import persist_day_journal
+from sweep_research import SweepResearchConfig, latest_bar_sweep_setup
 
 from worker import (
     BUDAPEST,
@@ -73,6 +74,7 @@ def env_int(name: str, default: int) -> int:
 
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
+DAY_STRATEGY_VERSION = "0.7.3"
 DAY_MIN_TURNOVER_USDC = env_float("DAY_MIN_TURNOVER_USDC", 250_000.0)
 DAY_MAX_SPREAD_BPS = env_float("DAY_MAX_SPREAD_BPS", 25.0)
 DAY_DISCOVERY_MAX_SPREAD_BPS = env_float("DAY_DISCOVERY_MAX_SPREAD_BPS", 150.0)
@@ -696,8 +698,6 @@ def watch_bucket(
 ) -> str:
     if not tradeable or (side == "short" and not shortable):
         return "LIQUIDITY_OR_BORROW_BLOCKED"
-    if conflict_4h:
-        return "TIMEFRAME_CONFLICT"
     if expected_rr < 1.0:
         return "POOR_RR"
     if score >= 65 and expected_rr >= 1.2:
@@ -715,7 +715,6 @@ def watch_rank(item: dict[str, Any]) -> tuple:
     }
     executable_side = (
         item["tradeable"]
-        and not item["timeframe_conflict"]
         and (item["side"] == "long" or item["shortable"])
     )
     return (
@@ -778,6 +777,19 @@ def build_day_candidate(
         else "bullish" in analysis.structure_4h
     )
 
+    sweep_config = SweepResearchConfig(
+        volume_confirmation_ratio=DAY_TRIGGER_VOLUME_RATIO
+    )
+    sweep_trigger = latest_bar_sweep_setup(
+        analysis.bars_5m,
+        side,
+        bars_15m=analysis.bars_15m,
+        config=sweep_config,
+    )
+    # v0.7.3: a live trigger requires the complete closed-bar sequence:
+    # sweep -> reclaim -> 5m structure shift -> non-opposing 15m structure -> volume.
+    triggered = sweep_trigger is not None
+
     previous_above_vwap = previous_close > analysis.rolling_vwap_24h
     current_above_vwap = current > analysis.rolling_vwap_24h
     vwap_reclaim = (
@@ -787,8 +799,8 @@ def build_day_candidate(
     )
     near_ema = abs(current - analysis.ema20_15m) <= 0.5 * analysis.atr_15m
 
-    if triggered and aligned_15m:
-        setup_type = "INTRADAY_BREAKOUT"
+    if triggered:
+        setup_type = "LIQUIDITY_SWEEP_RECLAIM"
     elif vwap_reclaim and aligned_1h:
         setup_type = "VWAP_RECLAIM" if side == "long" else "VWAP_REJECTION"
     elif near_ema and aligned_15m and aligned_1h:
@@ -822,6 +834,16 @@ def build_day_candidate(
             "or reclaim of the 15m lower-high structure"
         )
 
+    if sweep_trigger is not None:
+        trigger_price = float(sweep_trigger["candidate_entry"])
+        stop = float(sweep_trigger["candidate_invalidation"])
+        entry_low = trigger_price
+        entry_high = trigger_price
+        distance_atr = abs(trigger_price - current) / max(analysis.atr_5m, 1e-12)
+        invalidation = (
+            f"Sweep extreme {round_to_tick(stop, analysis.instrument.tick_size)} is invalidated"
+        )
+
     entry = trigger_price
     risk = abs(entry - stop)
     if risk <= max(analysis.instrument.tick_size * 3.0, entry * 0.0002):
@@ -844,6 +866,10 @@ def build_day_candidate(
     gross_tp3 = target_for_net_r(2.5)
 
     trigger_window_start_ms = previous_5m[0].start_ms
+    if sweep_trigger is not None and sweep_trigger.get("sweep_index") is not None:
+        sweep_index = int(sweep_trigger["sweep_index"])
+        if 0 <= sweep_index < len(analysis.bars_5m):
+            trigger_window_start_ms = analysis.bars_5m[sweep_index].start_ms
     barrier_info = nearest_structural_barrier(
         analysis, side, entry, trigger_window_start_ms
     )
@@ -888,9 +914,9 @@ def build_day_candidate(
         and analysis.quality_score >= DAY_MIN_QUALITY_SCORE
         and expected_rr + 1e-9 >= DAY_MIN_RR
     )
-    strict = strict_execution and strict_scores and not conflict_4h
+    strict = strict_execution and strict_scores
 
-    if strict and triggered and analysis.volume_ratio_5m >= DAY_TRIGGER_VOLUME_RATIO:
+    if strict and triggered:
         state = "TRIGGERED"
         decision = "TRADE"
     elif strict and distance_atr <= 0.35:
@@ -909,12 +935,10 @@ def build_day_candidate(
     liquidity_reasons = list(analysis.instrument.liquidity_reasons)
     if side == "short" and not analysis.shortable:
         liquidity_reasons.append("Bybit EU USDC spot-margin borrowability not confirmed")
-    if conflict_4h:
-        liquidity_reasons.append("4H timeframe conflicts with the proposed day-trade direction")
 
     execution_status = (
         "DAY_TRADE_EXECUTABLE"
-        if strict_execution and not conflict_4h
+        if strict_execution
         else "DAY_TRADE_BLOCKED"
     )
     category = "STRICT" if strict else "WATCH_ONLY"
@@ -938,9 +962,13 @@ def build_day_candidate(
         decision = "NO_TRADE"
 
     trigger_condition = (
-        f"Closed 5m candle above {round_to_tick(trigger_price, analysis.instrument.tick_size)}"
+        "Closed 5m liquidity sweep below prior liquidity -> reclaim -> bullish 5m "
+        f"structure shift confirmation near {round_to_tick(trigger_price, analysis.instrument.tick_size)}, "
+        "with non-opposing closed 15m structure"
         if side == "long"
-        else f"Closed 5m candle below {round_to_tick(trigger_price, analysis.instrument.tick_size)}"
+        else "Closed 5m liquidity sweep above prior liquidity -> reclaim -> bearish 5m "
+        f"structure shift confirmation near {round_to_tick(trigger_price, analysis.instrument.tick_size)}, "
+        "with non-opposing closed 15m structure"
     )
 
     derivatives = analysis.derivatives or {}
@@ -965,7 +993,9 @@ def build_day_candidate(
         f"Relative strength vs BTC: 1H {analysis.relative_strength_1h:+.2f}%, 4H {analysis.relative_strength_4h:+.2f}%",
     ]
     if triggered:
-        why_now.append("The latest closed 5m candle crossed the trigger level")
+        why_now.append("Latest closed 5m bar completed the sweep/reclaim/structure confirmation sequence")
+    if conflict_4h:
+        why_now.append("4H structure conflicts with the side but is context-only in v0.7.3")
     if vwap_reclaim:
         why_now.append("Rolling 24H VWAP reclaim/rejection detected")
 
@@ -1005,8 +1035,10 @@ def build_day_candidate(
             "condition": trigger_condition,
             "price": round_to_tick(trigger_price, analysis.instrument.tick_size),
             "requires_close": True,
-            "volume_confirmation": f">={DAY_TRIGGER_VOLUME_RATIO:.1f}x recent 5m average volume",
+            "volume_confirmation": f">={DAY_TRIGGER_VOLUME_RATIO:.1f}x prior 20-bar mean volume on confirmation",
             "triggered": triggered,
+            "model": "LIQUIDITY_SWEEP_RECLAIM_5M_STRUCTURE_15M_CONFIRMATION",
+            "sweep_confirmation": sweep_trigger,
         },
         "entry_zone": {
             "low": round_to_tick(min(entry_low, entry_high), analysis.instrument.tick_size),
@@ -1038,6 +1070,8 @@ def build_day_candidate(
             "atr_15m": round_to_tick(analysis.atr_15m, analysis.instrument.tick_size),
             "atr_ratio_15m": round(analysis.atr_ratio_15m, 3),
             "distance_to_trigger_atr_5m": round(distance_atr, 3),
+            "sweep_confirmation": sweep_trigger,
+            "four_hour_conflict_context_only": conflict_4h,
             "nearest_structural_barrier": (
                 None
                 if barrier is None
@@ -1073,7 +1107,7 @@ def build_day_candidate(
             "5m signals are vulnerable to false breakouts",
             "A 2–3% BTC move against the trade can invalidate intraday structure",
             "Model RR uses a configurable cost assumption, not the account's exact fee tier",
-            "Only backtests and journal records matching strategy v0.7.2 are comparable with this live engine",
+            "Only backtests and journal records matching strategy v0.7.3 are comparable with this live engine",
         ],
         "data_quality": "GOOD" if analysis.instrument.tradeable else "PARTIAL",
         "missing_data": sorted(set(missing)),
@@ -1139,7 +1173,8 @@ def build_day_regime(
             "Coinalyze derivatives": coinalyze_quality,
         },
         "notes": [
-            "Day-trade context uses 4H/1H, setup 15m and closed 5m trigger.",
+            "Day-trade v0.7.3 uses 4H/1H as context; live trigger is closed 5m sweep/reclaim/structure confirmation with non-opposing closed 15m structure.",
+            "4H conflict is context-only and does not veto strict eligibility or execution.",
             "Coinalyze data is aggregated and not Bybit EU-specific unless explicitly marked.",
         ],
     }
@@ -1205,7 +1240,7 @@ async def persist_day_results(
                     setup["symbol"],
                     {
                         "strategy_mode": "DAY_TRADE",
-                        "strategy_version": "0.7.2",
+                        "strategy_version": DAY_STRATEGY_VERSION,
                         "data_as_of": scan["data_as_of"],
                         "data_as_of_budapest": scan["data_as_of_budapest"],
                         "symbol": setup["symbol"],
@@ -1242,7 +1277,7 @@ async def run() -> None:
     async with httpx.AsyncClient(
         timeout=timeout,
         limits=limits,
-        headers={"User-Agent": "Bybit-EU-Trading-Radar-Day/0.7.2"},
+        headers={"User-Agent": f"Bybit-EU-Trading-Radar-Day/{DAY_STRATEGY_VERSION}"},
     ) as client:
         bybit = BybitAPI(client)
         coinalyze = CoinalyzeAPI(client)
@@ -1429,8 +1464,10 @@ async def run() -> None:
                 "holding_time": "30 minutes to 8 hours",
                 "context_timeframes": ["4H", "1H"],
                 "setup_timeframe": "15m",
-                "trigger_timeframe": "5m closed candle",
-                "strategy_version": "0.7.2",
+                "trigger_timeframe": "5m closed sweep/reclaim/structure confirmation",
+                "confirmation_timeframe": "15m closed non-opposing structure",
+                "four_hour_role": "CONTEXT_ONLY",
+                "strategy_version": DAY_STRATEGY_VERSION,
                 "minimum_expected_rr_after_assumed_cost": DAY_MIN_RR,
                 "assumed_round_trip_cost_bps": DAY_ASSUMED_ROUND_TRIP_COST_BPS,
                 "minimum_turnover_usdc": DAY_MIN_TURNOVER_USDC,
@@ -1441,7 +1478,7 @@ async def run() -> None:
             },
             "exclusions": exclusions[:100],
             "notes": [
-                "Prospective journal records are version-separated; v0.7.2 creates no historical backfill.",
+                "Prospective journal records are version-separated; v0.7.3 creates no historical backfill.",
                 "Fast coverage scans all eligible USDC pairs on 5m/15m; 1H/4H deep context is limited to promoted symbols.",
                 "WATCH_ONLY items are not entries.",
             ],
