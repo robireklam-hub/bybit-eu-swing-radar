@@ -4,12 +4,20 @@
 Folyamatosan gyűjtött Bybit EU és Coinalyze adatokból:
 1. felépíteni a kereskedhető univerzumot;
 2. előszűrni a likvid piacokat;
-3. technikai és derivatív feature-öket számítani;
+3. technikai core feature-öket és külön derivatíva-contextet számítani;
 4. long/short jelölteket rangsorolni;
 5. állapotváltozáskor riasztást létrehozni;
 6. a GPT-nek rövid, időbélyegzett, auditálható JSON-t adni.
 
-## 2. Források
+## 2. Végrehajtási invariánsok
+- Kizárólag Bybit EU, kizárólag USDC jegyzésű spot instrumentum.
+- Long végrehajtás: kizárólag USDC spot.
+- Short végrehajtás: kizárólag USDC spot-margin short, ha az exact USDC instrumentum margin-képes, a base asset publikus borrowability ellenőrzése pozitív és `shortable=true`.
+- Perpetual/futures/egyéb derivatíva nem végrehajtási piac.
+- Coinalyze/derivatíva-adat kizárólag context/conviction enrichment. Nem bizonyít spot végrehajthatóságot és nem lehet hard gate.
+- Hiányzó vagy degradált OI/funding/liquidation adat önmagában nem változtathat strict TRADE setupot NO-TRADE-re, és nem emelhet NO-TRADE setupot strict TRADE-re.
+
+## 3. Források
 
 ### Bybit EU
 Base URL: `https://api.bybit.eu`
@@ -21,166 +29,163 @@ Nyilvános V5 végpontok:
 - `/v5/market/kline`
 - `/v5/market/orderbook`
 - `/v5/market/recent-trade`
-- ahol elérhető: `/v5/market/open-interest`
-- `/v5/market/funding/history`
-- `/v5/market/account-ratio`
 
-Felhasználói/végrehajtási ellenőrzéshez csak read-only kulcs:
-- instrumentum és margin/short elérhetőség;
-- saját díjszint és kölcsönözhetőség, ha az EU API ezt engedi.
+Végrehajtási ellenőrzés:
+- exact USDC spot instrumentum;
+- pair-level margin flag;
+- publikus Spot Margin borrowability és max borrowing amount;
+- a tényleges inventory/borrow cost belépéskor újraellenőrzendő.
 
 ### Coinalyze
 Base URL: `https://api.coinalyze.net/v1`
 Auth header: `api_key`
-Rate limit: 40 symbol-call/perc. Egy kérés legfeljebb 20 szimbólumot tartalmazhat, de minden szimbólum külön hívásnak számít.
+Rate limit: 40 symbol-call/perc/API-key. Egy kérés legfeljebb 20 szimbólumot tartalmazhat, és minden szimbólum külön symbol-callnak számít.
 
-Használt végpontok:
+A jelenlegi swing enrichment által használt végpontok:
 - `/future-markets`
 - `/open-interest`
 - `/funding-rate`
-- `/predicted-funding-rate`
 - `/open-interest-history`
+- `/liquidation-history`
+
+További, későbbi context-forrásként használható:
+- `/predicted-funding-rate`
 - `/funding-rate-history`
 - `/predicted-funding-rate-history`
-- `/liquidation-history`
 - `/long-short-ratio-history`
 - `/ohlcv-history`
 
-## 3. Adatgyűjtési ütemezés
+## 4. Adatgyűjtési ütemezés
 - Bybit tickers: 1 perc.
 - Bybit 1H kline frissítés: 5 perc; csak lezárt gyertyát használj.
 - Bybit 4H kline: óránként és 4H zárás után.
 - Bybit 1D kline: óránként és napi zárás után.
-- Order book snapshot: top előszűrt 30 coinra 5 perc.
-- Coinalyze current OI/funding: top 30 coinra 15 perc, rate-limit queue-val.
-- Coinalyze history: top 20 coinra óránként.
-- Teljes score: óránként.
+- Coinalyze enrichment: csak a top, konfigurált számú jelöltre; rate-limit aware módon.
+- Teljes core score: óránként.
 - Mély scan: minden lezárt 4H gyertyánál.
 - Universe refresh: naponta és listázási változáskor.
 
-## 4. Kétlépcsős szűrés
+## 5. Kétlépcsős szűrés
 
-### Stage A — olcsó Bybit előszűrés
-Kizárás:
+### Stage A — Bybit EU core scan
+A strict döntéshez szükséges core score-ok kizárólag ebből a rétegből származnak.
+
+Kizárás/execution gate:
 - nem Trading státusz;
-- stablecoin/stablecoin;
-- 24h turnover < konfigurált minimum;
-- spread > konfigurált maximum;
-- < 60 nap adat;
-- extrém gap vagy hibás feed;
-- túl nagy becsült slippage.
+- nem USDC quote;
+- stable/fiat base;
+- konfigurált minimum alatti turnover;
+- konfigurált maximum feletti spread;
+- elégtelen történeti adat;
+- short oldalon nem ellenőrzött USDC spot-margin borrowability;
+- RR < 2,0.
 
-Rangsor:
-- turnover;
+Core rangsor/feature-ek:
+- turnover és spread;
 - ATR/BB kompresszió;
 - relatív volumen;
-- 1H/4H breakout közelség;
+- 4H range/breakout közelség;
 - BTC relatív erő;
-- trendstruktúra.
+- 1D/4H trendstruktúra.
 
-A Stage A maximum 30 jelöltet ad át.
+### Stage B — Coinalyze context enrichment
+Csak context/conviction, nem strict gate.
 
-### Stage B — Coinalyze enrichment
 A top jelöltekre:
+- current OI;
 - OI változás 1H/4H/24H;
-- funding aktuális, percentilis és trend;
-- predicted funding;
-- buy/sell flow, ha elérhető;
+- current funding;
 - liquidation flow;
-- long/short ratio;
-- adatminőség és coverage.
+- venue/quote provenance;
+- adatminőség és endpointonkénti coverage.
 
-## 5. Feature-k
+Egy Coinalyze endpoint hibája nem nullázhatja le automatikusan a többi sikeres context-adatot. A részleges eredményt meg kell tartani, az exact upstream hibát pedig a data-statusban ki kell írni.
 
-### Market structure
-- 1D és 4H swing high/low;
-- HH/HL, LH/LL;
-- BOS/CHOCH;
-- range high/low;
-- breakout, failed breakout, reclaim;
-- távolság kulcsszintektől ATR-ben.
+## 6. Core feature-k és pontozás
 
-### Volatilitás
-- ATR(14) és ATR percentilis 90 napra;
-- Bollinger width és percentilis;
-- realized volatility 10/20;
-- NR4/NR7;
-- range compression;
-- gap/impulse flag.
+### Core Expansion Score 0–100
+A jelenlegi worker core számítása:
+- ATR-kompresszió: 25%;
+- Bollinger-width kompresszió: 25%;
+- range-boundary közelség: 20%;
+- 4H volume komponens: 15%;
+- range maturity: 15%.
 
-### Volume/order flow
-- relative volume 20;
-- volume z-score;
-- taker buy/sell arány, ha elérhető;
-- order-book imbalance 0.5%, 1%, 2%;
-- spread bps;
-- slippage becslés konfigurált pozícióméretre.
+OI, funding és liquidation **nem módosíthatja ezt a strict gate score-t**.
 
-### Derivatívák
-- OI delta 1H/4H/24H;
-- price–OI quadrant;
-- funding z-score/percentilis;
-- predicted funding változás;
-- long/short crowding;
-- long és short liquidation flow;
-- liquidation spike z-score.
+### Core Direction Score -100…+100
+A jelenlegi worker core elemei:
+- 4H trendstruktúra;
+- 1D trendstruktúra;
+- BTC-relative 20x4H erő/gyengeség;
+- pozíció a 20-bar range-ben;
+- legutóbbi lezárt 4H gyertya iránya és volume-contextje.
 
-### Relatív erő
-- coin/BTC 4H és 1D momentum;
-- coin/ETH momentum;
-- beta-adjusted excess return;
-- BTC emelkedő/eső rezsim alatti viselkedés.
+OI/funding/crowding értelmezhető külön contextként, de nem módosíthatja a strict direction score-t.
 
-## 6. Pontozás
+### Core Quality Score 0–100
+A jelenlegi worker core elemei:
+- turnover;
+- spread;
+- directional confluence;
+- trigger proximity/clarity;
+- core adatkomponens;
+- RR komponens.
 
-### Expansion Score 0–100
-- ATR/BB/RV kompresszió: 30
-- volume gyorsulás: 15
-- OI gyorsulás/anomália: 15
-- range érettség és breakout közelség: 15
-- order-book/spread javulás: 10
-- liquidation/crowding feszültség: 10
-- adatfrissesség: 5
-
-### Direction Score -100…+100
-- 1D/4H market structure: ±25
-- relatív erő/gyengeség: ±15
-- price–OI kapcsolat: ±15
-- breakout/reclaim/sweep: ±15
-- buy/sell flow: ±10
-- funding/crowding: ±10
-- BTC rezsim: ±10
-
-### Quality Score 0–100
-- likviditás és slippage: 20
-- reális RR: 25
-- konfluencia: 25
-- trigger tisztasága: 15
-- adatminőség: 15
+Coinalyze availability nem adhat vagy vehet el strict quality pontot.
 
 ### Setup Score
 `0.35 * expansion_score + 0.35 * abs(direction_score) + 0.30 * quality_score`
 
-Penalties:
-- már megfutott mozgás: -5…-20;
-- extrém spread/slippage: kizárás;
-- funding crowding: -5…-15;
-- hiányzó Coinalyze coverage: -5…-15;
-- nem ellenőrzött shortolhatóság: short kizárás;
-- RR < 2: kizárás;
-- adat késés: -5…-30.
+A setup score kizárólag a fenti core score-okból készül.
 
-## 7. Setup állapotgép
-- WATCH: score >= 60, trigger még távol.
-- ARMED: score >= 70, trigger 1 ATR-en belül.
-- TRIGGERED: lezárt 1H vagy 4H gyertya teljesítette a feltételt.
+### Strict minimumok
+- setup score >= 70 az ARMED/TRIGGERED prioritáshoz;
+- expansion >= 55;
+- abs(direction) >= 35;
+- quality >= 60;
+- RR >= 2,0;
+- execution/liquidity gate-ek teljesülnek.
+
+A Coinalyze context hiánya **nem** szerepel a strict gate-ek között.
+
+## 7. Derivatíva-context értelmezés
+Ha rendelkezésre áll:
+- OI delta 1H/4H/24H;
+- price–OI quadrant;
+- funding/crowding;
+- long és short liquidation flow;
+- venue provenance (`is_bybit_specific`, exchange, quote).
+
+Ezek használhatók:
+- conviction növelésére/csökkentésére;
+- crowding/squeeze kockázat leírására;
+- stresszteszt kiegészítésére;
+- későbbi kutatáshoz/backtesthez.
+
+Nem használhatók:
+- strict score közvetlen módosítására;
+- spot execution bizonyítására;
+- önálló TRADE/NO-TRADE gate-ként.
+
+## 8. Setup állapotgép és trigger
+- WATCH: core setup még nem strict/armed vagy trigger nincs megerősítve.
+- ARMED: core score és gate-ek megfelelőek, trigger közel van.
+- TRIGGERED: az API által szolgáltatott lezárt gyertyás trigger teljesült.
 - MANAGED: nyitott setup követése, ha később pozíciókövetés készül.
-- INVALIDATED: invalidation szintet lezárt gyertya vagy előírt árérintés megsértette.
-- EXPIRED: trigger nélkül lejárt vagy score < 55.
+- INVALIDATED: invalidation feltétel teljesült.
+- EXPIRED: trigger nélkül lejárt vagy core score a szükséges szint alá esett.
 
-Minden állapotváltást naplózni kell.
+A jelenlegi swing worker authoritative triggerje 4H lezárt gyertya a 20-bar range boundary felett/alatt. 1H csak későbbi/opcionális trigger-refinement lehet; a GPT nem találhat ki kötelező 1H gate-et, ha azt az API nem adja.
 
-## 8. Public API a GPT Action számára
+## 9. Coinalyze coverage és diagnosztika
+- Coverage nevezője a ténylegesen enrichmentre kiválasztott `targeted` szimbólumok száma, nem a teljes deep-scan universe.
+- A teljes analyzed universe méretét külön mezőben kell közölni.
+- `GOOD` Coinalyze source-quality csak akkor adható, ha a targetált kör teljes és nincs endpoint-hiba.
+- Részleges endpoint-hiba esetén a sikeres symbol/context payload maradjon elérhető, source-quality legyen PARTIAL.
+- Az exact upstream hiba kerüljön a data-status `missing_fields`/diagnostic mezőjébe.
+
+## 10. Public API a GPT Action számára
 - `GET /health`
 - `GET /v1/scan?direction=both&limit=3&min_score=70`
 - `GET /v1/market-regime`
@@ -191,7 +196,7 @@ Minden állapotváltást naplózni kell.
 
 Az endpointok gyorsítótárból olvassanak. A GPT kérésére ne induljon teljes piaci scan.
 
-## 9. Biztonság
+## 11. Biztonság
 - Bybit kulcs kizárólag read-only.
 - Nincs order-create, order-amend, order-cancel vagy withdrawal endpoint.
 - Kulcsok csak szerveroldali secret store-ban.
@@ -200,11 +205,12 @@ Az endpointok gyorsítótárból olvassanak. A GPT kérésére ne induljon telje
 - JSON válaszban soha nincs upstream API-kulcs.
 - Minden adat UTC-ben tárolódik, válaszban UTC és Europe/Budapest idő is szerepel.
 
-## 10. Backtest és audit
+## 12. Backtest és audit
 Mentsd:
 - scan időpont;
-- feature snapshot;
-- score-ok;
+- core feature snapshot;
+- core score-ok;
+- külön derivatives-context snapshot és availability;
 - trigger/invalidation/target;
 - későbbi MFE/MAE;
 - TP/SL/expired eredmény;
@@ -220,4 +226,4 @@ Kötelező riport setup-típusonként:
 - MFE/MAE;
 - rezsim szerinti bontás.
 
-Score-súly csak legalább 100 lezárt, adatminőségileg megfelelő setup után módosítható.
+Core score-súly csak legalább 100 lezárt, adatminőségileg megfelelő setup után módosítható. Derivatíva-context súly vagy gate csak külön kutatás/backtest és explicit verzióváltás után vezethető be.

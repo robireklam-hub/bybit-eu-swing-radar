@@ -1027,7 +1027,21 @@ def select_coinalyze_markets(
     return selected
 
 
-async def enrich_coinalyze(analyses: list[Analysis], api: CoinalyzeAPI) -> tuple[bool, str | None]:
+async def enrich_coinalyze(
+    analyses: list[Analysis],
+    api: CoinalyzeAPI,
+    *,
+    mutate_scores: bool = True,
+    partial_safe: bool = False,
+) -> tuple[bool, str | None]:
+    """Attach Coinalyze derivatives context.
+
+    Day-trade keeps the legacy all-or-nothing score-enrichment path by
+    default. Swing opts into ``partial_safe=True`` and
+    ``mutate_scores=False`` so upstream context can never change swing
+    strict eligibility and one failed endpoint cannot erase successful
+    context from the other endpoints.
+    """
     if not COINALYZE_API_KEY or not analyses:
         for analysis in analyses:
             analysis.missing_data.append("Coinalyze derivatives data")
@@ -1036,104 +1050,320 @@ async def enrich_coinalyze(analyses: list[Analysis], api: CoinalyzeAPI) -> tuple
     selected_analyses = sorted(
         analyses,
         key=lambda item: (
-            setup_score(item.expansion_score, abs(item.direction_score), item.quality_score)
+            setup_score(
+                item.expansion_score,
+                abs(item.direction_score),
+                item.quality_score,
+            )
             + (5.0 if item.instrument.symbol in DISCOVERY_SYMBOLS else 0.0)
         ),
         reverse=True,
     )[:COINALYZE_ENRICH_LIMIT]
+    targeted_count = len(selected_analyses)
+    selected_symbols = {
+        item.instrument.symbol for item in selected_analyses
+    }
+
     try:
         markets = await api.future_markets()
-        market_map = select_coinalyze_markets(markets, [item.instrument.base for item in selected_analyses])
-        symbols = [str(market_map[item.instrument.base]["symbol"]) for item in selected_analyses if item.instrument.base in market_map]
-        if not symbols:
-            for analysis in analyses:
-                analysis.missing_data.append("No matching Coinalyze perpetual market")
-            return False, "No matching Coinalyze markets"
-
-        now_ts = int(time.time())
-        from_ts = now_ts - 3 * 24 * 60 * 60
-        current_oi, current_funding, oi_history, liquidation_history = await asyncio.gather(
-            api.batch_current("/open-interest", symbols, convert_to_usd=True),
-            api.batch_current("/funding-rate", symbols),
-            api.batch_history("/open-interest-history", symbols, from_ts, now_ts, convert_to_usd=True, interval="1hour"),
-            api.batch_history("/liquidation-history", symbols, from_ts, now_ts, convert_to_usd=True, interval="4hour"),
-        )
-        oi_map = {item["symbol"]: item for item in current_oi}
-        funding_map = {item["symbol"]: item for item in current_funding}
-        oi_hist_map = {item["symbol"]: item.get("history", []) for item in oi_history}
-        liq_map = {item["symbol"]: item.get("history", []) for item in liquidation_history}
-
-        for analysis in analyses:
-            market = market_map.get(analysis.instrument.base)
-            if not market:
-                analysis.missing_data.append("No matching Coinalyze perpetual market")
-                continue
-            symbol = str(market["symbol"])
-            oi_rows = oi_hist_map.get(symbol, [])
-
-            def oi_change(periods: int) -> float | None:
-                if len(oi_rows) < periods + 1:
-                    return None
-                latest = safe_float(oi_rows[-1].get("c"))
-                prior = safe_float(oi_rows[-periods - 1].get("c"))
-                if latest <= 0 or prior <= 0:
-                    return None
-                return (latest / prior - 1.0) * 100.0
-
-            oi_change_1h_pct = oi_change(1)
-            oi_change_4h_pct = oi_change(4)
-            oi_change_24h_pct = oi_change(24)
-            liq_rows = liq_map.get(symbol, [])[-6:]
-            long_liq = sum(safe_float(row.get("l")) for row in liq_rows)
-            short_liq = sum(safe_float(row.get("s")) for row in liq_rows)
-            funding = safe_float(funding_map.get(symbol, {}).get("value"), 0.0)
-            current_oi_value = safe_float(oi_map.get(symbol, {}).get("value"), 0.0)
-
-            analysis.derivatives = {
-                "source": "Coinalyze",
-                "market_symbol": symbol,
-                "exchange": market.get("exchange"),
-                "quote_asset": market.get("quote_asset"),
-                "open_interest_usd": current_oi_value,
-                "oi_change_1h_pct": oi_change_1h_pct,
-                "oi_change_4h_pct": oi_change_4h_pct,
-                "oi_change_24h_pct": oi_change_24h_pct,
-                "funding_rate": funding,
-                "long_liquidations_24h_usd": long_liq,
-                "short_liquidations_24h_usd": short_liq,
-                "is_bybit_specific": "bybit" in str(market.get("exchange", "")).lower(),
-            }
-
-            price_direction = 1.0 if analysis.direction_score >= 0 else -1.0
-            if oi_change_24h_pct is not None:
-                oi_effect = clamp(abs(oi_change_24h_pct) * 0.8, 0.0, 10.0)
-                if oi_change_24h_pct > 0:
-                    analysis.direction_score += price_direction * oi_effect
-                    analysis.expansion_score += clamp(abs(oi_change_24h_pct) * 0.5, 0.0, 8.0)
-                else:
-                    analysis.quality_score -= clamp(abs(oi_change_24h_pct) * 0.3, 0.0, 5.0)
-
-            if funding > 0.001:
-                analysis.direction_score -= 8.0
-            elif funding < -0.001:
-                analysis.direction_score += 8.0
-            elif 0 < funding <= 0.0005 and analysis.direction_score > 0:
-                analysis.direction_score += 2.0
-            elif -0.0005 <= funding < 0 and analysis.direction_score < 0:
-                analysis.direction_score -= 2.0
-
-            liquidation_ratio = (long_liq + short_liq) / max(analysis.instrument.turnover_24h, 1.0)
-            analysis.expansion_score += clamp(liquidation_ratio * 300.0, 0.0, 5.0)
-            analysis.quality_score += 5.0
-            analysis.direction_score = clamp(analysis.direction_score, -100.0, 100.0)
-            analysis.expansion_score = clamp(analysis.expansion_score)
-            analysis.quality_score = clamp(analysis.quality_score)
-
-        return True, None
     except Exception as exc:
         for analysis in analyses:
-            analysis.missing_data.append("Coinalyze enrichment failed")
-        return False, str(exc)
+            analysis.missing_data.append("Coinalyze future-markets failed")
+        return False, f"future-markets: {type(exc).__name__}: {exc}"
+
+    market_map = select_coinalyze_markets(
+        markets,
+        [item.instrument.base for item in selected_analyses],
+    )
+    symbols = [
+        str(market_map[item.instrument.base]["symbol"])
+        for item in selected_analyses
+        if item.instrument.base in market_map
+    ]
+    if not symbols:
+        for analysis in analyses:
+            analysis.missing_data.append(
+                "No matching Coinalyze perpetual market"
+            )
+        return False, "No matching Coinalyze markets"
+
+    now_ts = int(time.time())
+    from_ts = now_ts - 3 * 24 * 60 * 60
+    endpoint_errors: list[str] = []
+
+    if partial_safe:
+        async def optional(label: str, awaitable: Any) -> Any:
+            try:
+                return await awaitable
+            except Exception as exc:
+                endpoint_errors.append(
+                    f"{label}: {type(exc).__name__}: {exc}"
+                )
+                return []
+
+        # Sequential batches avoid a four-request burst. With the
+        # default nine-symbol target, the four symbol endpoints consume
+        # 36 symbol-calls, leaving limited headroom below Coinalyze's
+        # documented 40 symbol-call/minute API-key limit.
+        current_oi = await optional(
+            "open-interest",
+            api.batch_current(
+                "/open-interest", symbols, convert_to_usd=True
+            ),
+        )
+        current_funding = await optional(
+            "funding-rate",
+            api.batch_current("/funding-rate", symbols),
+        )
+        oi_history = await optional(
+            "open-interest-history",
+            api.batch_history(
+                "/open-interest-history",
+                symbols,
+                from_ts,
+                now_ts,
+                convert_to_usd=True,
+                interval="1hour",
+            ),
+        )
+        liquidation_history = await optional(
+            "liquidation-history",
+            api.batch_history(
+                "/liquidation-history",
+                symbols,
+                from_ts,
+                now_ts,
+                convert_to_usd=True,
+                interval="4hour",
+            ),
+        )
+    else:
+        # Backward-compatible day-trade behavior: any endpoint failure
+        # aborts the enrichment and leaves scores untouched.
+        try:
+            (
+                current_oi,
+                current_funding,
+                oi_history,
+                liquidation_history,
+            ) = await asyncio.gather(
+                api.batch_current(
+                    "/open-interest", symbols, convert_to_usd=True
+                ),
+                api.batch_current("/funding-rate", symbols),
+                api.batch_history(
+                    "/open-interest-history",
+                    symbols,
+                    from_ts,
+                    now_ts,
+                    convert_to_usd=True,
+                    interval="1hour",
+                ),
+                api.batch_history(
+                    "/liquidation-history",
+                    symbols,
+                    from_ts,
+                    now_ts,
+                    convert_to_usd=True,
+                    interval="4hour",
+                ),
+            )
+        except Exception as exc:
+            for analysis in analyses:
+                analysis.missing_data.append(
+                    "Coinalyze enrichment failed"
+                )
+            return False, str(exc)
+
+    oi_map = {
+        item["symbol"]: item
+        for item in current_oi
+        if isinstance(item, dict) and item.get("symbol")
+    }
+    funding_map = {
+        item["symbol"]: item
+        for item in current_funding
+        if isinstance(item, dict) and item.get("symbol")
+    }
+    oi_hist_map = {
+        item["symbol"]: item.get("history", [])
+        for item in oi_history
+        if isinstance(item, dict) and item.get("symbol")
+    }
+    liq_map = {
+        item["symbol"]: item.get("history", [])
+        for item in liquidation_history
+        if isinstance(item, dict) and item.get("symbol")
+    }
+
+    enriched_count = 0
+    for analysis in analyses:
+        market = market_map.get(analysis.instrument.base)
+        if not market:
+            if analysis.instrument.symbol in selected_symbols:
+                analysis.missing_data.append(
+                    "No matching Coinalyze perpetual market"
+                )
+            continue
+
+        symbol = str(market["symbol"])
+        has_current_oi = symbol in oi_map
+        has_funding = symbol in funding_map
+        has_oi_history = symbol in oi_hist_map
+        has_liquidations = symbol in liq_map
+        if not (
+            has_current_oi
+            or has_funding
+            or has_oi_history
+            or has_liquidations
+        ):
+            analysis.missing_data.append(
+                "Coinalyze data unavailable for matched market"
+            )
+            continue
+
+        oi_rows = oi_hist_map.get(symbol, [])
+
+        def oi_change(periods: int) -> float | None:
+            if len(oi_rows) < periods + 1:
+                return None
+            latest = safe_float(oi_rows[-1].get("c"))
+            prior = safe_float(oi_rows[-periods - 1].get("c"))
+            if latest <= 0 or prior <= 0:
+                return None
+            return (latest / prior - 1.0) * 100.0
+
+        oi_change_1h_pct = oi_change(1)
+        oi_change_4h_pct = oi_change(4)
+        oi_change_24h_pct = oi_change(24)
+        liq_rows = (
+            liq_map.get(symbol, [])[-6:] if has_liquidations else []
+        )
+        long_liq = (
+            sum(safe_float(row.get("l")) for row in liq_rows)
+            if has_liquidations
+            else None
+        )
+        short_liq = (
+            sum(safe_float(row.get("s")) for row in liq_rows)
+            if has_liquidations
+            else None
+        )
+        funding = (
+            safe_float(funding_map[symbol].get("value"), 0.0)
+            if has_funding
+            else None
+        )
+        current_oi_value = (
+            safe_float(oi_map[symbol].get("value"), 0.0)
+            if has_current_oi
+            else None
+        )
+
+        direction_delta = 0.0
+        expansion_delta = 0.0
+        quality_delta = 5.0
+        price_direction = (
+            1.0 if analysis.direction_score >= 0 else -1.0
+        )
+        if oi_change_24h_pct is not None:
+            oi_effect = clamp(
+                abs(oi_change_24h_pct) * 0.8, 0.0, 10.0
+            )
+            if oi_change_24h_pct > 0:
+                direction_delta += price_direction * oi_effect
+                expansion_delta += clamp(
+                    abs(oi_change_24h_pct) * 0.5, 0.0, 8.0
+                )
+            else:
+                quality_delta -= clamp(
+                    abs(oi_change_24h_pct) * 0.3, 0.0, 5.0
+                )
+
+        if funding is not None:
+            if funding > 0.001:
+                direction_delta -= 8.0
+            elif funding < -0.001:
+                direction_delta += 8.0
+            elif (
+                0 < funding <= 0.0005
+                and analysis.direction_score > 0
+            ):
+                direction_delta += 2.0
+            elif (
+                -0.0005 <= funding < 0
+                and analysis.direction_score < 0
+            ):
+                direction_delta -= 2.0
+
+        if has_liquidations:
+            liquidation_ratio = (
+                (long_liq or 0.0) + (short_liq or 0.0)
+            ) / max(analysis.instrument.turnover_24h, 1.0)
+            expansion_delta += clamp(
+                liquidation_ratio * 300.0, 0.0, 5.0
+            )
+
+        analysis.derivatives = {
+            "source": "Coinalyze",
+            "market_symbol": symbol,
+            "exchange": market.get("exchange"),
+            "quote_asset": market.get("quote_asset"),
+            "open_interest_usd": current_oi_value,
+            "oi_change_1h_pct": oi_change_1h_pct,
+            "oi_change_4h_pct": oi_change_4h_pct,
+            "oi_change_24h_pct": oi_change_24h_pct,
+            "funding_rate": funding,
+            "long_liquidations_24h_usd": long_liq,
+            "short_liquidations_24h_usd": short_liq,
+            "is_bybit_specific": "bybit"
+            in str(market.get("exchange", "")).lower(),
+            "availability": {
+                "current_oi": has_current_oi,
+                "funding": has_funding,
+                "oi_history": has_oi_history,
+                "liquidations": has_liquidations,
+            },
+            "context_score_adjustments": {
+                "expansion": round(expansion_delta, 6),
+                "direction": round(direction_delta, 6),
+                "quality": round(quality_delta, 6),
+            },
+            "strict_score_mutation_applied": mutate_scores,
+            "endpoint_errors": list(endpoint_errors),
+        }
+        enriched_count += 1
+
+        if endpoint_errors:
+            analysis.missing_data.append(
+                "Coinalyze derivatives context partial"
+            )
+
+        if mutate_scores:
+            analysis.expansion_score = clamp(
+                analysis.expansion_score + expansion_delta
+            )
+            analysis.direction_score = clamp(
+                analysis.direction_score + direction_delta,
+                -100.0,
+                100.0,
+            )
+            analysis.quality_score = clamp(
+                analysis.quality_score + quality_delta
+            )
+
+    error_parts = list(endpoint_errors)
+    if len(symbols) < targeted_count:
+        error_parts.append(
+            f"market-match coverage {len(symbols)}/{targeted_count}"
+        )
+    if enriched_count < targeted_count:
+        error_parts.append(
+            f"enrichment coverage {enriched_count}/{targeted_count}"
+        )
+
+    complete = enriched_count == targeted_count and not error_parts
+    return complete, "; ".join(error_parts) if error_parts else None
 
 
 async def apply_shortability(analyses: list[Analysis], bybit: BybitAPI) -> tuple[bool, str | None]:
@@ -1441,7 +1671,10 @@ def build_market_regime(
     coinalyze_ok: bool,
     borrow_ok: bool,
 ) -> dict[str, Any]:
-    btc = next((item for item in analyses if item.instrument.symbol == "BTCUSDC"), None)
+    btc = next(
+        (item for item in analyses if item.instrument.symbol == "BTCUSDC"),
+        None,
+    )
     if btc:
         if btc.direction_score >= 35:
             btc_regime = "bullish"
@@ -1463,10 +1696,26 @@ def build_market_regime(
         structure_1d = None
         structure_4h = None
 
-    alt_analyses = [item for item in analyses if item.instrument.symbol != "BTCUSDC"]
+    alt_analyses = [
+        item
+        for item in analyses
+        if item.instrument.symbol != "BTCUSDC"
+    ]
     directional = [item.direction_score for item in alt_analyses]
-    alt_breadth = 100.0 * sum(1 for value in directional if value > 20) / len(directional) if directional else 0.0
-    bearish_breadth = 100.0 * sum(1 for value in directional if value < -20) / len(directional) if directional else 0.0
+    alt_breadth = (
+        100.0
+        * sum(1 for value in directional if value > 20)
+        / len(directional)
+        if directional
+        else 0.0
+    )
+    bearish_breadth = (
+        100.0
+        * sum(1 for value in directional if value < -20)
+        / len(directional)
+        if directional
+        else 0.0
+    )
     if btc_regime == "bullish" and alt_breadth >= 55:
         preferred = "long"
     elif btc_regime == "bearish" and bearish_breadth >= 55:
@@ -1474,10 +1723,24 @@ def build_market_regime(
     else:
         preferred = "neutral"
 
-    enriched_count = sum(1 for item in analyses if item.derivatives)
+    enriched_count = sum(
+        1 for item in analyses if item.derivatives
+    )
+    target_count = min(len(analyses), COINALYZE_ENRICH_LIMIT)
+    if (
+        target_count > 0
+        and enriched_count >= target_count
+        and coinalyze_ok
+    ):
+        coinalyze_quality = "GOOD"
+    elif enriched_count > 0:
+        coinalyze_quality = "PARTIAL"
+    else:
+        coinalyze_quality = "DEGRADED"
+
     quality = "GOOD" if (
         len(analyses) >= 10
-        and enriched_count == len(analyses)
+        and coinalyze_quality == "GOOD"
         and borrow_ok
     ) else "PARTIAL"
     notes = [
@@ -1485,13 +1748,18 @@ def build_market_regime(
         "Breadth is calculated from the broad discovery universe, excluding BTC.",
         "Executable setups and low-liquidity WATCH_ONLY ideas are separated.",
         "Short candidates are strictly USDC spot-margin shorts; derivatives are contextual only.",
-        f"Coinalyze enrichment coverage: {enriched_count}/{len(analyses)} analyzed symbols.",
+        "Swing strict scores are core technical/execution scores; Coinalyze context cannot modify strict eligibility.",
+        f"Coinalyze enrichment coverage: {enriched_count}/{target_count} targeted symbols ({len(analyses)} analyzed total).",
         "Shortability uses public Bybit margin eligibility and maximum borrowing data; final inventory must be rechecked before entry.",
     ]
     if not coinalyze_ok:
-        notes.append("Coinalyze enrichment is partial or unavailable.")
+        notes.append(
+            "Coinalyze enrichment is partial or unavailable; available endpoint data is retained."
+        )
     if not borrow_ok:
-        notes.append("Public Bybit Spot Margin borrowability data is unavailable; executable short list is suppressed.")
+        notes.append(
+            "Public Bybit Spot Margin borrowability data is unavailable; executable short list is suppressed."
+        )
     return {
         "data_as_of": now.isoformat(),
         "data_quality": quality,
@@ -1504,7 +1772,7 @@ def build_market_regime(
         "source_quality": {
             "bybit_market_data": "GOOD" if analyses else "DEGRADED",
             "bybit_spot_margin": "GOOD" if borrow_ok else "PARTIAL",
-            "coinalyze_derivatives": "GOOD" if enriched_count == len(analyses) else "PARTIAL",
+            "coinalyze_derivatives": coinalyze_quality,
         },
         "notes": notes,
     }
@@ -1675,7 +1943,12 @@ async def run() -> None:
             except Exception as exc:
                 exclusions.append({"symbol": instrument.symbol, "reason": f"Feature calculation failed: {exc}"})
 
-        coinalyze_ok, coinalyze_error = await enrich_coinalyze(analyses, coinalyze)
+        coinalyze_ok, coinalyze_error = await enrich_coinalyze(
+            analyses,
+            coinalyze,
+            mutate_scores=False,
+            partial_safe=True,
+        )
         borrow_ok, borrow_error = await apply_shortability(analyses, bybit)
         now = datetime.now(timezone.utc)
 
@@ -1711,6 +1984,9 @@ async def run() -> None:
         regime = build_market_regime(analyses, now, coinalyze_ok, borrow_ok)
 
         enriched_count = sum(1 for item in analyses if item.derivatives)
+        coinalyze_target_count = min(
+            len(analyses), COINALYZE_ENRICH_LIMIT
+        )
         data_quality = regime["data_quality"]
         coverage = {
             "raw_usdc_instrument_records": universe_stats["raw_usdc_instrument_records"],
@@ -1719,6 +1995,7 @@ async def run() -> None:
             "duplicate_symbols": universe_stats["duplicate_symbols"],
             "analyzed_symbols": len(analyses),
             "coinalyze_enriched_symbols": enriched_count,
+            "coinalyze_target_symbols": coinalyze_target_count,
             "coinalyze_enrichment_limit": COINALYZE_ENRICH_LIMIT,
             "borrowability_checked_symbols": len(analyses) if borrow_ok else 0,
             "symbols_missing_history": missing_history,
@@ -1777,9 +2054,12 @@ async def run() -> None:
                 {
                     "source": "Coinalyze",
                     "status": "ok" if coinalyze_ok else "partial",
-                    "data_as_of": now.isoformat() if coinalyze_ok else None,
-                    "latency_seconds": 0 if coinalyze_ok else None,
-                    "coverage": f"{enriched_count}/{len(analyses)}",
+                    "data_as_of": now.isoformat() if enriched_count > 0 else None,
+                    "latency_seconds": 0 if enriched_count > 0 else None,
+                    "coverage": (
+                        f"{enriched_count}/{coinalyze_target_count} targeted "
+                        f"({len(analyses)} analyzed total)"
+                    ),
                     "missing_fields": [] if coinalyze_ok else [coinalyze_error or "enrichment unavailable"],
                 },
                 {
@@ -1797,7 +2077,8 @@ async def run() -> None:
             "Worker complete: "
             f"analyzed={len(analyses)}, tradeable={universe_stats['tradeable_universe_size']}, "
             f"watchlist={len(watchlist)}, liquidity_blocked={len(liquidity_blocked)}, "
-            f"coinalyze={enriched_count}/{len(analyses)}, longs={len(long_setups)}, "
+            f"coinalyze={enriched_count}/{coinalyze_target_count} targeted, "
+            f"longs={len(long_setups)}, "
             f"shorts={len(short_setups)}, momentum={len(momentum_items)}, "
             f"momentum_coverage={len(momentum_analyses)}/{len(candidate_pool)}, "
             f"quality={data_quality}, duration={elapsed:.1f}s"
