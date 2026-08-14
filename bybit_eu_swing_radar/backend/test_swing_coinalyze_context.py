@@ -135,7 +135,10 @@ async def test_context_only_enrichment_never_mutates_swing_core_scores(monkeypat
     )
 
     ok, error = await enrich_coinalyze(
-        [analysis], api, mutate_scores=False
+        [analysis],
+        api,
+        mutate_scores=False,
+        partial_safe=True,
     )
 
     assert ok is True
@@ -170,7 +173,10 @@ async def test_partial_endpoint_failure_preserves_available_context(monkeypatch)
     )
 
     ok, error = await enrich_coinalyze(
-        [analysis], api, mutate_scores=False
+        [analysis],
+        api,
+        mutate_scores=False,
+        partial_safe=True,
     )
 
     assert ok is False
@@ -218,6 +224,30 @@ async def test_default_enrichment_mode_keeps_day_worker_score_behavior(monkeypat
         analysis.direction_score,
         analysis.quality_score,
     ) != before
+
+
+@pytest.mark.asyncio
+async def test_default_day_mode_keeps_all_or_nothing_failure(monkeypatch):
+    monkeypatch.setattr(worker, "COINALYZE_API_KEY", "test-key")
+    analysis = make_analysis()
+    api = FakeCoinalyze(fail_endpoint="/funding-rate")
+    before = (
+        analysis.expansion_score,
+        analysis.direction_score,
+        analysis.quality_score,
+    )
+
+    ok, error = await enrich_coinalyze([analysis], api)
+
+    assert ok is False
+    assert error is not None
+    assert analysis.derivatives == {}
+    assert "Coinalyze enrichment failed" in analysis.missing_data
+    assert (
+        analysis.expansion_score,
+        analysis.direction_score,
+        analysis.quality_score,
+    ) == before
 
 
 def test_market_regime_coinalyze_quality_uses_targeted_coverage(monkeypatch):
