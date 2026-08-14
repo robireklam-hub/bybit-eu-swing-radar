@@ -227,3 +227,15 @@ Kötelező riport setup-típusonként:
 - rezsim szerinti bontás.
 
 Core score-súly csak legalább 100 lezárt, adatminőségileg megfelelő setup után módosítható. Derivatíva-context súly vagy gate csak külön kutatás/backtest és explicit verzióváltás után vezethető be.
+
+## 13. Day-trade v0.7.3 kiegészítés
+Ez a fejezet kizárólag a day-trade motorra vonatkozik; a fenti swing 1D/4H trigger-szabályokat nem módosítja.
+
+- Stratégia verzió: `0.7.3`. A külön derivatives Flow feature verziója változatlanul `0.7.2.2`.
+- Authoritative day-trade trigger: lezárt 5m liquidity sweep -> reclaim -> 5m local structure shift -> a confirmation időpontjáig teljesen lezárt 15m nem-ellenirányú struktúra -> volume confirmation.
+- Entry: a 5m structure-confirmation gyertya záróára. Stop/invalidation: a sweep extreme.
+- A 4H `timeframe_conflict` diagnosztikai/context mező marad, de nem hard-veto a strict eligibilityre vagy executionre. A 4H technikai komponensek továbbra is részt vehetnek a direction/context számításban.
+- Változatlan hard gate-ek: USDC-only execution, spot long, exact USDC spot-margin borrowable short, likviditás/spread, core score minimumok, költség utáni RR és structural-barrier/target-path.
+- A korábbi egyszerű 12x5m breakout önmagában nem adhat `TRADE` döntést. WATCH/ARMED státusz előre jelezhet közelgő setupot, de `TRIGGERED/TRADE` csak a teljes sweep-confirmation szekvenciával lehetséges.
+- Journal és historical replay `strategy_version=0.7.3`, ezért a v0.7.2 mintákkal nem keverhető.
+- OI/funding/Flow context-only marad, nem módosítja a strict gate-eket.
