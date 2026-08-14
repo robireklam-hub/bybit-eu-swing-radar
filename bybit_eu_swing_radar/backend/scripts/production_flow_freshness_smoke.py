@@ -106,6 +106,33 @@ def run_smoke(base_url: str, api_key: str, expected_sha: str, *, timeout: float 
               fetch: Callable[[str, str, float], dict[str, Any]] = fetch_json,
               sleep: Callable[[float], None] = time.sleep) -> int:
     """Verify API commit, worker execution, and final Flow freshness invariants."""
+    deployment_verified = False
+    for attempt in range(MAX_POLLS):
+        try:
+            version = _get(fetch, base_url, "/version", api_key, timeout)
+        except HTTPError as exc:
+            if exc.code in AUTH_OR_RATE_LIMIT_STATUSES:
+                _request_failure("version_check", exc)
+                return 1
+            if exc.code not in TRANSIENT_VERSION_STATUSES:
+                _request_failure("version_check", exc)
+                return 1
+        except (URLError, TimeoutError, OSError):
+            pass
+        except (ValueError, RuntimeError) as exc:
+            _request_failure("version_check", exc)
+            return 1
+        else:
+            if version.get("commit_sha") == expected_sha:
+                deployment_verified = True
+                break
+        if attempt + 1 < MAX_POLLS:
+            sleep(POLL_INTERVAL_SECONDS)
+
+    if not deployment_verified:
+        print("FAIL phase=version_check reason=expected_commit_not_deployed_before_timeout")
+        return 1
+
     try:
         baseline = _get(fetch, base_url, STATUS_PATH, api_key, timeout)
     except HTTPError as exc:
@@ -118,31 +145,6 @@ def run_smoke(base_url: str, api_key: str, expected_sha: str, *, timeout: float 
     baseline_batch_id = valid_batch_id(baseline)
     if baseline_batch_id is None:
         print("FAIL phase=baseline_flow_status reason=missing_or_invalid_flow_batch_id")
-        return 1
-
-    deployment_verified = False
-    for attempt in range(MAX_POLLS):
-        try:
-            version = _get(fetch, base_url, "/version", api_key, timeout)
-        except HTTPError as exc:
-            if exc.code in AUTH_OR_RATE_LIMIT_STATUSES:
-                _request_failure("version_check", exc)
-                return 1
-            if exc.code not in TRANSIENT_VERSION_STATUSES:
-                _request_failure("version_check", exc)
-                return 1
-        except (URLError, TimeoutError, OSError, ValueError, RuntimeError) as exc:
-            _request_failure("version_check", exc)
-            return 1
-        else:
-            if version.get("commit_sha") == expected_sha:
-                deployment_verified = True
-                break
-        if attempt + 1 < MAX_POLLS:
-            sleep(POLL_INTERVAL_SECONDS)
-
-    if not deployment_verified:
-        print("FAIL phase=version_check reason=expected_commit_not_deployed_before_timeout")
         return 1
 
     worker_verified = baseline.get("source_commit_sha") == expected_sha
