@@ -52,6 +52,7 @@ def env_float(name: str, default: float) -> float:
 BUDAPEST = ZoneInfo("Europe/Budapest")
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
+SOURCE_COMMIT_SHA = os.getenv("RAILWAY_GIT_COMMIT_SHA") or None
 DERIVATIVES_BYBIT_BASE_URL = os.getenv(
     "DERIVATIVES_BYBIT_BASE_URL", "https://api.bybit.com"
 ).rstrip("/")
@@ -207,6 +208,7 @@ async def run_flow_worker() -> dict[str, Any]:
             "enabled": False,
             "status": "DISABLED",
             "flow_batch_id": flow_batch_id,
+            "source_commit_sha": SOURCE_COMMIT_SHA,
             "symbols": [],
             "processed": 0,
             "good": 0,
@@ -237,6 +239,7 @@ async def run_flow_worker() -> dict[str, Any]:
                     "processed": 0,
                     "symbols": [],
                     "flow_batch_id": flow_batch_id,
+                    "source_commit_sha": SOURCE_COMMIT_SHA,
                     "errors": [],
                 }
                 await upsert_cache(connection, "day_trade_flow_status", status)
@@ -301,6 +304,7 @@ async def run_flow_worker() -> dict[str, Any]:
             async with connection.transaction():
                 for symbol, payload, error in processed:
                     payload["flow_batch_id"] = flow_batch_id
+                    payload["source_commit_sha"] = SOURCE_COMMIT_SHA
                     await upsert_cache(connection, f"day_trade_flow:{symbol}", payload)
                     coverage = str(payload.get("coverage_status"))
                     if coverage == "GOOD":
@@ -323,6 +327,7 @@ async def run_flow_worker() -> dict[str, Any]:
                     "processed": len(processed),
                     "symbols": [symbol for symbol, _, _ in processed],
                     "flow_batch_id": flow_batch_id,
+                    "source_commit_sha": SOURCE_COMMIT_SHA,
                     "good": good,
                     "partial": partial,
                     "no_derivative_match": no_match,

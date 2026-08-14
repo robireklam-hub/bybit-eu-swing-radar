@@ -35,6 +35,7 @@ def test_disabled_returns_complete_metadata_without_database_access(monkeypatch)
         "enabled": False,
         "status": "DISABLED",
         "flow_batch_id": "batch-disabled",
+        "source_commit_sha": None,
         "symbols": [],
         "processed": 0,
         "good": 0,
@@ -78,6 +79,7 @@ def test_no_fresh_setups_reuses_single_batch_id(monkeypatch):
     calls = []
     worker.uuid4 = lambda: calls.append("uuid") or "batch-empty"
     worker.FLOW_CONTEXT_ENABLED = True
+    worker.SOURCE_COMMIT_SHA = "commit-empty"
     worker.DATABASE_URL = "postgresql://configured"
     worker.httpx.Timeout = lambda *args, **kwargs: None
     worker.httpx.Limits = lambda *args, **kwargs: None
@@ -105,6 +107,7 @@ def test_no_fresh_setups_reuses_single_batch_id(monkeypatch):
     assert calls == ["uuid"]
     assert result["flow_batch_id"] == "batch-empty"
     assert result["symbols"] == []
+    assert result["source_commit_sha"] == "commit-empty"
     assert written == [("day_trade_flow_status", result)]
 
 
@@ -115,6 +118,7 @@ def test_normal_worker_reuses_single_batch_id_for_payload_and_status(monkeypatch
     calls = []
     worker.uuid4 = lambda: calls.append("uuid") or "batch-normal"
     worker.FLOW_CONTEXT_ENABLED = True
+    worker.SOURCE_COMMIT_SHA = "commit-normal"
     worker.DATABASE_URL = "postgresql://configured"
     worker.httpx.Timeout = lambda *args, **kwargs: None
     worker.httpx.Limits = lambda *args, **kwargs: None
@@ -158,4 +162,6 @@ def test_normal_worker_reuses_single_batch_id_for_payload_and_status(monkeypatch
     assert result["symbols"] == ["BTCUSDC"]
     assert written[0][0] == "day_trade_flow:BTCUSDC"
     assert written[0][1]["flow_batch_id"] == "batch-normal"
+    assert written[0][1]["source_commit_sha"] == "commit-normal"
+    assert result["source_commit_sha"] == "commit-normal"
     assert written[1] == ("day_trade_flow_status", result)
