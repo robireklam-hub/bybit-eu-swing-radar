@@ -30,7 +30,7 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install pytest pytest-asyncio
 
-      - name: Verify runtime imports
+      - name: Verify runtime imports and required routes
         env:
           DATABASE_URL: postgresql://test:test@localhost:5432/test
           RADAR_API_KEY: test-radar-key
@@ -46,6 +46,9 @@ jobs:
           import app.main
           import app.repository
           import flow_worker
+
+          routes = {route.path for route in app.main.app.routes}
+          assert "/version" in routes, "required /version route is missing"
           PY
 
       - name: Run backend tests

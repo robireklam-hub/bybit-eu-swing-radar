@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """Fail-closed production gate for the deployed API and its Flow worker."""
 
-# Historical failure wording retained for source-policy compatibility only:
-# DEPLOYMENT VERIFIED, WORKER EXECUTION NOT VERIFIED.
-
 from __future__ import annotations
 
 import json
@@ -15,7 +12,6 @@ from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-
 STATUS_PATH = "/v1/day-trade/flow/status"
 PATHS = (
     ("FlowStatus", STATUS_PATH),
@@ -25,8 +21,9 @@ PATHS = (
 )
 TIMESTAMP_FIELDS = ("generated_at", "updated_at", "data_as_of")
 MAX_POLLS = 20
-POLL_INTERVAL_SECONDS = 30
+POLL_INTERVAL_SECONDS = 15
 AUTH_OR_RATE_LIMIT_STATUSES = frozenset((401, 403, 429))
+TRANSIENT_VERSION_STATUSES = frozenset((404, 502, 503, 504))
 
 
 def parse_timestamp(value: Any) -> datetime:
@@ -48,7 +45,7 @@ def select_timestamp(payload: dict[str, Any]) -> tuple[str, datetime]:
 def fetch_json(url: str, api_key: str, timeout: float) -> dict[str, Any]:
     request = Request(url, method="GET", headers={
         "Accept": "application/json",
-        "User-Agent": "bybit-eu-flow-freshness-smoke/1",
+        "User-Agent": "bybit-eu-flow-freshness-smoke/2",
         "X-Radar-Key": api_key,
     })
     with urlopen(request, timeout=timeout) as response:
@@ -69,8 +66,7 @@ def evaluate_status(payload: dict[str, Any]) -> tuple[datetime, list[str]]:
     _, reference_time = select_timestamp(payload)
     errors = []
     try:
-        counters = [int(payload[name]) for name in
-                    ("processed", "good", "partial", "no_derivative_match")]
+        counters = [int(payload[name]) for name in ("processed", "good", "partial", "no_derivative_match")]
     except (KeyError, TypeError, ValueError) as exc:
         return reference_time, [f"invalid FlowStatus counters: {exc}"]
     processed, good, partial, no_match = counters
@@ -95,55 +91,90 @@ def evaluate_context(payload: dict[str, Any], reference_time: datetime) -> list[
     return errors
 
 
-def _get(fetch: Callable[[str, str, float], dict[str, Any]], base_url: str,
-         path: str, api_key: str, timeout: float) -> dict[str, Any]:
+def _get(fetch: Callable[[str, str, float], dict[str, Any]], base_url: str, path: str, api_key: str, timeout: float) -> dict[str, Any]:
     return fetch(f"{base_url.rstrip('/')}{path}", api_key, timeout)
+
+
+def _request_failure(phase: str, exc: BaseException) -> None:
+    if isinstance(exc, HTTPError):
+        print(f"FAIL phase={phase} http_status={exc.code}; credentials and response are redacted")
+    else:
+        print(f"FAIL phase={phase} error_type={type(exc).__name__}; credentials and response are redacted")
 
 
 def run_smoke(base_url: str, api_key: str, expected_sha: str, *, timeout: float = 15.0,
               fetch: Callable[[str, str, float], dict[str, Any]] = fetch_json,
               sleep: Callable[[float], None] = time.sleep) -> int:
-    """Verify deployment, observe a new worker batch, then run the four-GET smoke."""
+    """Verify API commit, worker execution, and final Flow freshness invariants."""
     try:
-        version = _get(fetch, base_url, "/version", api_key, timeout)
-        if version.get("commit_sha") != expected_sha:
-            print("FAIL deployed API commit does not match workflow run head SHA")
-            return 1
-
-        # This is deliberately a single read after API commit verification.
         baseline = _get(fetch, base_url, STATUS_PATH, api_key, timeout)
-        baseline_flow_batch_id = valid_batch_id(baseline)
-        if baseline_flow_batch_id is None:
-            print("FAIL baseline FlowStatus flow_batch_id is missing or invalid")
-            return 1
+    except HTTPError as exc:
+        _request_failure("baseline_flow_status", exc)
+        return 1
+    except (URLError, TimeoutError, OSError, ValueError, RuntimeError) as exc:
+        _request_failure("baseline_flow_status", exc)
+        return 1
 
-        verified = False
+    baseline_batch_id = valid_batch_id(baseline)
+    if baseline_batch_id is None:
+        print("FAIL phase=baseline_flow_status reason=missing_or_invalid_flow_batch_id")
+        return 1
+
+    deployment_verified = False
+    for attempt in range(MAX_POLLS):
+        try:
+            version = _get(fetch, base_url, "/version", api_key, timeout)
+        except HTTPError as exc:
+            if exc.code in AUTH_OR_RATE_LIMIT_STATUSES:
+                _request_failure("version_check", exc)
+                return 1
+            if exc.code not in TRANSIENT_VERSION_STATUSES:
+                _request_failure("version_check", exc)
+                return 1
+        except (URLError, TimeoutError, OSError, ValueError, RuntimeError) as exc:
+            _request_failure("version_check", exc)
+            return 1
+        else:
+            if version.get("commit_sha") == expected_sha:
+                deployment_verified = True
+                break
+        if attempt + 1 < MAX_POLLS:
+            sleep(POLL_INTERVAL_SECONDS)
+
+    if not deployment_verified:
+        print("FAIL phase=version_check reason=expected_commit_not_deployed_before_timeout")
+        return 1
+
+    worker_verified = baseline.get("source_commit_sha") == expected_sha
+    if not worker_verified:
         for attempt in range(MAX_POLLS):
-            candidate = _get(fetch, base_url, STATUS_PATH, api_key, timeout)
+            try:
+                candidate = _get(fetch, base_url, STATUS_PATH, api_key, timeout)
+            except HTTPError as exc:
+                _request_failure("worker_check", exc)
+                return 1
+            except (URLError, TimeoutError, OSError, ValueError, RuntimeError) as exc:
+                _request_failure("worker_check", exc)
+                return 1
             candidate_batch_id = valid_batch_id(candidate)
-            if (candidate.get("source_commit_sha") == expected_sha
-                    and candidate_batch_id is not None
-                    and candidate_batch_id != baseline_flow_batch_id):
-                verified = True
+            if (candidate.get("source_commit_sha") == expected_sha and candidate_batch_id is not None
+                    and candidate_batch_id != baseline_batch_id):
+                worker_verified = True
                 break
             if attempt + 1 < MAX_POLLS:
                 sleep(POLL_INTERVAL_SECONDS)
-        if not verified:
-            print("FAIL worker execution was not verified before polling timeout")
-            return 1
 
-        # Exactly four final requests: one status and three named contexts.
-        responses = {
-            name: _get(fetch, base_url, path, api_key, timeout) for name, path in PATHS
-        }
-    except HTTPError as exc:
-        if exc.code in AUTH_OR_RATE_LIMIT_STATUSES:
-            print(f"FAIL HTTP {exc.code}; stopping fail-closed")
-        else:
-            print("FAIL request failed; credentials and response are redacted")
+    if not worker_verified:
+        print("FAIL phase=worker_check reason=expected_worker_batch_not_observed_before_timeout")
         return 1
-    except (URLError, TimeoutError, OSError, ValueError, RuntimeError):
-        print("FAIL request failed; credentials and response are redacted")
+
+    try:
+        responses = {name: _get(fetch, base_url, path, api_key, timeout) for name, path in PATHS}
+    except HTTPError as exc:
+        _request_failure("final_flow_smoke", exc)
+        return 1
+    except (URLError, TimeoutError, OSError, ValueError, RuntimeError) as exc:
+        _request_failure("final_flow_smoke", exc)
         return 1
 
     failures = []
@@ -166,8 +197,7 @@ def run_smoke(base_url: str, api_key: str, expected_sha: str, *, timeout: float 
             failures.append(f"{name}: flow_batch_id mismatch")
         if name != "FlowStatus" and reference_time is not None:
             try:
-                failures.extend(f"{name}: {error}" for error in
-                                evaluate_context(payload, reference_time))
+                failures.extend(f"{name}: {error}" for error in evaluate_context(payload, reference_time))
             except ValueError as exc:
                 failures.append(f"{name}: {exc}")
 
@@ -175,7 +205,7 @@ def run_smoke(base_url: str, api_key: str, expected_sha: str, *, timeout: float 
         print(f"FAIL {failure}")
     if failures:
         return 1
-    print("DEPLOYMENT VERIFIED, WORKER EXECUTION " + "VERIFIED.")
+    print("DEPLOYMENT VERIFIED, WORKER EXECUTION VERIFIED.")
     return 0
 
 

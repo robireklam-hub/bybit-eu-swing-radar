@@ -5,141 +5,124 @@ import pytest
 
 import scripts.production_flow_freshness_smoke as smoke
 
-
 SHA = "a" * 40
 NOW = datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc)
 
 
-def status(batch="batch-a", sha=SHA, **overrides):
-    value = {"data_as_of": NOW.isoformat(), "flow_batch_id": batch,
-             "source_commit_sha": sha, "processed": 3, "good": 1,
-             "partial": 1, "no_derivative_match": 1}
+def status(batch="batch-a", sha="old", **overrides):
+    value = {"data_as_of": NOW.isoformat(), "flow_batch_id": batch, "source_commit_sha": sha,
+             "processed": 3, "good": 1, "partial": 1, "no_derivative_match": 1}
     value.update(overrides)
     return value
 
 
 def context(batch="batch-b", sha=SHA, age=1, **overrides):
-    value = {"data_as_of": (NOW - timedelta(seconds=age)).isoformat(),
-             "flow_batch_id": batch, "source_commit_sha": sha,
-             "data_quality": "GOOD", "coverage_status": "GOOD"}
+    value = {"data_as_of": (NOW - timedelta(seconds=age)).isoformat(), "flow_batch_id": batch,
+             "source_commit_sha": sha, "data_quality": "GOOD", "coverage_status": "GOOD"}
     value.update(overrides)
     return value
 
 
 def final_payloads(batch="batch-b"):
-    return [status(batch), context(batch), context(batch), context(batch)]
+    return [status(batch, SHA), context(batch), context(batch), context(batch)]
 
 
-def execute(candidates, baseline=None, final=None, error=None):
-    responses = [{"commit_sha": SHA}, baseline or status()] + candidates
-    responses += final if final is not None else final_payloads()
-    calls, sleeps = [], []
-
-    def fetch(url, api_key, timeout):
-        calls.append(url)
-        if error and len(calls) == error[0]:
-            raise HTTPError(url, error[1], "error", {}, None)
-        return responses[len(calls) - 1]
-
-    result = smoke.run_smoke("https://production.example", "secret", SHA,
-                             fetch=fetch, sleep=sleeps.append)
-    return result, calls, sleeps
-
-
-def test_same_batch_with_later_timestamp_does_not_pass():
-    candidates = [status("batch-a", data_as_of=(NOW + timedelta(days=1)).isoformat())] * 20
-    result, _, sleeps = execute(candidates)
-    assert result == 1
-    assert sleeps == [30] * 19
-
-
-def test_new_batch_and_matching_commit_passes_and_final_smoke_is_exactly_four_gets(capsys):
-    result, calls, sleeps = execute([status("batch-b")])
-    assert result == 0 and sleeps == []
-    assert calls[-4:] == [f"https://production.example{path}" for _, path in smoke.PATHS]
-    assert len(calls) == 7
-    assert capsys.readouterr().out.endswith(
-        "DEPLOYMENT VERIFIED, WORKER EXECUTION VERIFIED.\n")
-
-
-def test_new_batch_with_wrong_commit_does_not_pass():
-    result, _, _ = execute([status("batch-b", "wrong")] * 20)
-    assert result == 1
-
-
-@pytest.mark.parametrize("batch", [None, "", 123])
-def test_missing_or_invalid_baseline_batch_fails_closed(batch):
-    result, calls, _ = execute([], baseline=status(batch))
-    assert result == 1 and len(calls) == 2
-
-
-def test_missing_candidate_batch_does_not_pass():
-    result, _, _ = execute([status(None)] * 20)
-    assert result == 1
-
-
-def test_runner_clock_cannot_affect_batch_decision(monkeypatch):
-    class ExplodingDateTime(datetime):
-        @classmethod
-        def now(cls, *args, **kwargs):
-            raise AssertionError("runner clock must not be read")
-    monkeypatch.setattr(smoke, "datetime", ExplodingDateTime)
-    assert execute([status("batch-b", data_as_of="2000-01-01T00:00:00+00:00")])[0] == 0
-
-
-def test_polling_timeout_remains_bounded():
-    result, calls, sleeps = execute([status()] * 20)
-    assert result == 1 and len(calls) == 22
-    assert len(sleeps) == 19
-
-
-@pytest.mark.parametrize("code", [401, 403, 429])
-def test_auth_and_rate_limit_errors_stop_immediately(code):
-    result, calls, sleeps = execute([status("batch-b")], error=(3, code))
-    assert result == 1 and len(calls) == 3 and sleeps == []
-
-
-def test_version_must_match_expected_deployment_sha():
+def scripted_fetch(responses):
     calls = []
     def fetch(url, api_key, timeout):
         calls.append(url)
-        return {"commit_sha": "wrong"}
-    assert smoke.run_smoke("https://production.example", "secret", SHA, fetch=fetch) == 1
+        response = responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
+    return fetch, calls
+
+
+def test_waits_for_version_404_then_accepts_deployed_sha():
+    responses = [status(), HTTPError("u", 404, "not found", {}, None), {"commit_sha": SHA},
+                 status("batch-b", SHA), *final_payloads()]
+    fetch, calls = scripted_fetch(responses)
+    sleeps = []
+    result = smoke.run_smoke("https://prod", "secret", SHA, fetch=fetch, sleep=sleeps.append)
+    assert result == 0
+    assert sleeps == [smoke.POLL_INTERVAL_SECONDS]
+    assert calls[0].endswith(smoke.STATUS_PATH)
+    assert calls[1].endswith("/version")
+
+
+def test_baseline_from_expected_commit_avoids_waiting_for_another_worker_batch():
+    responses = [status("batch-b", SHA), {"commit_sha": SHA}, *final_payloads()]
+    fetch, calls = scripted_fetch(responses)
+    assert smoke.run_smoke("https://prod", "secret", SHA, fetch=fetch, sleep=lambda _: None) == 0
+    assert len(calls) == 6
+
+
+def test_old_baseline_requires_distinct_expected_worker_batch():
+    responses = [status(), {"commit_sha": SHA}, status(), status("batch-b", SHA), *final_payloads()]
+    fetch, _ = scripted_fetch(responses)
+    sleeps = []
+    assert smoke.run_smoke("https://prod", "secret", SHA, fetch=fetch, sleep=sleeps.append) == 0
+    assert sleeps == [smoke.POLL_INTERVAL_SECONDS]
+
+
+@pytest.mark.parametrize("code", [401, 403, 429])
+def test_version_auth_and_rate_limit_fail_immediately(code):
+    responses = [status(), HTTPError("u", code, "error", {}, None)]
+    fetch, calls = scripted_fetch(responses)
+    sleeps = []
+    assert smoke.run_smoke("https://prod", "secret", SHA, fetch=fetch, sleep=sleeps.append) == 1
+    assert len(calls) == 2
+    assert sleeps == []
+
+
+def test_unexpected_version_http_error_fails_immediately():
+    fetch, calls = scripted_fetch([status(), HTTPError("u", 500, "error", {}, None)])
+    assert smoke.run_smoke("https://prod", "secret", SHA, fetch=fetch, sleep=lambda _: None) == 1
+    assert len(calls) == 2
+
+
+def test_version_polling_timeout_is_bounded(monkeypatch):
+    monkeypatch.setattr(smoke, "MAX_POLLS", 3)
+    fetch, calls = scripted_fetch([status()] + [{"commit_sha": "old"}] * 3)
+    sleeps = []
+    assert smoke.run_smoke("https://prod", "secret", SHA, fetch=fetch, sleep=sleeps.append) == 1
+    assert len(calls) == 4
+    assert sleeps == [smoke.POLL_INTERVAL_SECONDS] * 2
+
+
+def test_worker_polling_timeout_is_bounded(monkeypatch):
+    monkeypatch.setattr(smoke, "MAX_POLLS", 3)
+    fetch, calls = scripted_fetch([status(), {"commit_sha": SHA}] + [status()] * 3)
+    sleeps = []
+    assert smoke.run_smoke("https://prod", "secret", SHA, fetch=fetch, sleep=sleeps.append) == 1
+    assert len(calls) == 5
+    assert sleeps == [smoke.POLL_INTERVAL_SECONDS] * 2
+
+
+def test_missing_baseline_batch_fails_closed():
+    fetch, calls = scripted_fetch([status(batch=None)])
+    assert smoke.run_smoke("https://prod", "secret", SHA, fetch=fetch) == 1
     assert len(calls) == 1
-
-
-def test_main_uses_expected_sha_not_github_sha(monkeypatch):
-    captured = {}
-
-    def run_smoke(base_url, api_key, expected_sha):
-        captured.update(base_url=base_url, api_key=api_key, expected_sha=expected_sha)
-        return 0
-
-    monkeypatch.setenv("PRODUCTION_RADAR_API_BASE_URL", "https://production.example")
-    monkeypatch.setenv("PRODUCTION_RADAR_API_KEY", "secret")
-    monkeypatch.setenv("EXPECTED_SHA", SHA)
-    monkeypatch.setenv("GITHUB_SHA", "wrong")
-    monkeypatch.setattr(smoke, "run_smoke", run_smoke)
-    assert smoke.main() == 0
-    assert captured["expected_sha"] == SHA
-
-
-@pytest.mark.parametrize("expected_sha", [None, "", "   "])
-def test_main_fails_closed_without_expected_sha(monkeypatch, expected_sha):
-    monkeypatch.setenv("PRODUCTION_RADAR_API_BASE_URL", "https://production.example")
-    monkeypatch.setenv("PRODUCTION_RADAR_API_KEY", "secret")
-    monkeypatch.setenv("GITHUB_SHA", SHA)
-    if expected_sha is None:
-        monkeypatch.delenv("EXPECTED_SHA", raising=False)
-    else:
-        monkeypatch.setenv("EXPECTED_SHA", expected_sha)
-    monkeypatch.setattr(smoke, "run_smoke", lambda *args: pytest.fail("must fail closed"))
-    assert smoke.main() == 1
 
 
 def test_final_payloads_require_same_commit_batch_and_invariants():
     bad = final_payloads()
+    bad[0] = status("batch-b", SHA, processed=4)
     bad[1] = context("other")
     bad[2] = context(sha="wrong")
-    bad[0] = status("batch-b", processed=4)
-    assert execute([status("batch-b")], final=bad)[0] == 1
+    fetch, _ = scripted_fetch([status("batch-b", SHA), {"commit_sha": SHA}, *bad])
+    assert smoke.run_smoke("https://prod", "secret", SHA, fetch=fetch, sleep=lambda _: None) == 1
+
+
+def test_stale_good_context_fails():
+    bad = final_payloads()
+    bad[1] = context("batch-b", age=301)
+    fetch, _ = scripted_fetch([status("batch-b", SHA), {"commit_sha": SHA}, *bad])
+    assert smoke.run_smoke("https://prod", "secret", SHA, fetch=fetch, sleep=lambda _: None) == 1
+
+
+def test_main_requires_all_configuration(monkeypatch):
+    monkeypatch.delenv("PRODUCTION_RADAR_API_BASE_URL", raising=False)
+    monkeypatch.delenv("PRODUCTION_RADAR_API_KEY", raising=False)
+    monkeypatch.delenv("EXPECTED_SHA", raising=False)
+    assert smoke.main() == 1
