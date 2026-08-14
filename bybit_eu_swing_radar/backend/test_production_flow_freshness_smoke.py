@@ -38,27 +38,37 @@ def scripted_fetch(responses):
     return fetch, calls
 
 
-def test_waits_for_version_404_then_accepts_deployed_sha():
-    responses = [status(), HTTPError("u", 404, "not found", {}, None), {"commit_sha": SHA},
+def test_waits_for_version_404_before_reading_baseline():
+    responses = [HTTPError("u", 404, "not found", {}, None), {"commit_sha": SHA},
                  status("batch-b", SHA), *final_payloads()]
     fetch, calls = scripted_fetch(responses)
     sleeps = []
     result = smoke.run_smoke("https://prod", "secret", SHA, fetch=fetch, sleep=sleeps.append)
     assert result == 0
     assert sleeps == [smoke.POLL_INTERVAL_SECONDS]
-    assert calls[0].endswith(smoke.STATUS_PATH)
+    assert calls[0].endswith("/version")
     assert calls[1].endswith("/version")
+    assert calls[2].endswith(smoke.STATUS_PATH)
+
+
+def test_waits_for_transient_version_timeout_before_reading_baseline():
+    responses = [TimeoutError(), {"commit_sha": SHA}, status("batch-b", SHA), *final_payloads()]
+    fetch, calls = scripted_fetch(responses)
+    sleeps = []
+    assert smoke.run_smoke("https://prod", "secret", SHA, fetch=fetch, sleep=sleeps.append) == 0
+    assert sleeps == [smoke.POLL_INTERVAL_SECONDS]
+    assert calls[:3] == ["https://prod/version", "https://prod/version", f"https://prod{smoke.STATUS_PATH}"]
 
 
 def test_baseline_from_expected_commit_avoids_waiting_for_another_worker_batch():
-    responses = [status("batch-b", SHA), {"commit_sha": SHA}, *final_payloads()]
+    responses = [{"commit_sha": SHA}, status("batch-b", SHA), *final_payloads()]
     fetch, calls = scripted_fetch(responses)
     assert smoke.run_smoke("https://prod", "secret", SHA, fetch=fetch, sleep=lambda _: None) == 0
     assert len(calls) == 6
 
 
 def test_old_baseline_requires_distinct_expected_worker_batch():
-    responses = [status(), {"commit_sha": SHA}, status(), status("batch-b", SHA), *final_payloads()]
+    responses = [{"commit_sha": SHA}, status(), status(), status("batch-b", SHA), *final_payloads()]
     fetch, _ = scripted_fetch(responses)
     sleeps = []
     assert smoke.run_smoke("https://prod", "secret", SHA, fetch=fetch, sleep=sleeps.append) == 0
@@ -67,42 +77,42 @@ def test_old_baseline_requires_distinct_expected_worker_batch():
 
 @pytest.mark.parametrize("code", [401, 403, 429])
 def test_version_auth_and_rate_limit_fail_immediately(code):
-    responses = [status(), HTTPError("u", code, "error", {}, None)]
+    responses = [HTTPError("u", code, "error", {}, None)]
     fetch, calls = scripted_fetch(responses)
     sleeps = []
     assert smoke.run_smoke("https://prod", "secret", SHA, fetch=fetch, sleep=sleeps.append) == 1
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert sleeps == []
 
 
 def test_unexpected_version_http_error_fails_immediately():
-    fetch, calls = scripted_fetch([status(), HTTPError("u", 500, "error", {}, None)])
+    fetch, calls = scripted_fetch([HTTPError("u", 500, "error", {}, None)])
     assert smoke.run_smoke("https://prod", "secret", SHA, fetch=fetch, sleep=lambda _: None) == 1
-    assert len(calls) == 2
+    assert len(calls) == 1
 
 
 def test_version_polling_timeout_is_bounded(monkeypatch):
     monkeypatch.setattr(smoke, "MAX_POLLS", 3)
-    fetch, calls = scripted_fetch([status()] + [{"commit_sha": "old"}] * 3)
+    fetch, calls = scripted_fetch([{"commit_sha": "old"}] * 3)
     sleeps = []
     assert smoke.run_smoke("https://prod", "secret", SHA, fetch=fetch, sleep=sleeps.append) == 1
-    assert len(calls) == 4
+    assert len(calls) == 3
     assert sleeps == [smoke.POLL_INTERVAL_SECONDS] * 2
 
 
 def test_worker_polling_timeout_is_bounded(monkeypatch):
     monkeypatch.setattr(smoke, "MAX_POLLS", 3)
-    fetch, calls = scripted_fetch([status(), {"commit_sha": SHA}] + [status()] * 3)
+    fetch, calls = scripted_fetch([{"commit_sha": SHA}, status()] + [status()] * 3)
     sleeps = []
     assert smoke.run_smoke("https://prod", "secret", SHA, fetch=fetch, sleep=sleeps.append) == 1
     assert len(calls) == 5
     assert sleeps == [smoke.POLL_INTERVAL_SECONDS] * 2
 
 
-def test_missing_baseline_batch_fails_closed():
-    fetch, calls = scripted_fetch([status(batch=None)])
+def test_missing_baseline_batch_fails_closed_after_deployment_verification():
+    fetch, calls = scripted_fetch([{"commit_sha": SHA}, status(batch=None)])
     assert smoke.run_smoke("https://prod", "secret", SHA, fetch=fetch) == 1
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
 def test_final_payloads_require_same_commit_batch_and_invariants():
@@ -110,14 +120,14 @@ def test_final_payloads_require_same_commit_batch_and_invariants():
     bad[0] = status("batch-b", SHA, processed=4)
     bad[1] = context("other")
     bad[2] = context(sha="wrong")
-    fetch, _ = scripted_fetch([status("batch-b", SHA), {"commit_sha": SHA}, *bad])
+    fetch, _ = scripted_fetch([{"commit_sha": SHA}, status("batch-b", SHA), *bad])
     assert smoke.run_smoke("https://prod", "secret", SHA, fetch=fetch, sleep=lambda _: None) == 1
 
 
 def test_stale_good_context_fails():
     bad = final_payloads()
     bad[1] = context("batch-b", age=301)
-    fetch, _ = scripted_fetch([status("batch-b", SHA), {"commit_sha": SHA}, *bad])
+    fetch, _ = scripted_fetch([{"commit_sha": SHA}, status("batch-b", SHA), *bad])
     assert smoke.run_smoke("https://prod", "secret", SHA, fetch=fetch, sleep=lambda _: None) == 1
 
 
