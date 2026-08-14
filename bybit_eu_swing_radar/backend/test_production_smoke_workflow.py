@@ -51,12 +51,14 @@ def test_deployment_and_railway_execution_paths_are_absent():
     assert "backboard.railway" not in text
 
 
-def test_worker_execution_is_not_claimed_by_workflow_or_script():
+def test_worker_execution_claim_requires_commit_and_batch_evidence():
     workflow = WORKFLOW.read_text()
     script = Path("scripts/production_flow_freshness_smoke.py").read_text()
     assert "MIN_FLOW_STATUS_TIME" not in workflow
-    assert "WORKER EXECUTION VERIFIED" not in script
-    assert "DEPLOYMENT VERIFIED, WORKER EXECUTION NOT VERIFIED." in script
+    assert "source_commit_sha" in script
+    assert "flow_batch_id" in script
+    assert "expected_sha" in script
+    assert "WORKER EXECUTION VERIFIED" in script
 
 
 def test_workflow_run_sha_is_used_for_checkout_and_commit_evidence():
