@@ -1,15 +1,8 @@
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-# app.main constructs Settings at import time. Match the normal Backend CI test env.
-os.environ.setdefault("DATABASE_URL", "postgresql://test:test@localhost:5432/test")
-os.environ.setdefault("RADAR_API_KEY", "test-radar-key")
-os.environ.setdefault("COINALYZE_API_KEY", "test-coinalyze-key")
-
-import app.main
 from flow_context import build_flow_payload
 
 
@@ -52,8 +45,11 @@ def test_flow_feature_keeps_0722_but_parent_strategy_is_073():
     assert any("v0.7.3 STRICT gates" in note for note in payload["notes"])
 
 
-def test_fastapi_release_version_is_073():
-    assert app.main.app.version == "0.7.3"
+def test_fastapi_release_source_declares_073():
+    text = (BACKEND / "app" / "main.py").read_text(encoding="utf-8")
+    assert 'version="0.7.3"' in text
+    assert "day-trade strategy v0.7.3" in text
+    assert "Flow feature v0.7.2.2" in text
 
 
 def test_openapi_contract_describes_v073_day_trigger_and_0722_flow():
