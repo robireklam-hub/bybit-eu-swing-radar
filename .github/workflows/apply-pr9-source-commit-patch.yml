@@ -1,0 +1,160 @@
+name: Apply PR9 source commit patch
+
+on:
+  push:
+    branches: [fix/flow-source-commit-sha]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out patch branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/flow-source-commit-sha
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Apply bounded source-commit patch
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected 1 anchor, found {count}')
+              return text.replace(old, new, 1)
+
+          worker_path = Path('bybit_eu_swing_radar/backend/flow_worker.py')
+          worker = worker_path.read_text()
+          worker = replace_once(
+              worker,
+              'DATABASE_URL = os.getenv("DATABASE_URL", "")\nDERIVATIVES_BYBIT_BASE_URL = os.getenv(',
+              'DATABASE_URL = os.getenv("DATABASE_URL", "")\nSOURCE_COMMIT_SHA = os.getenv("RAILWAY_GIT_COMMIT_SHA") or None\nDERIVATIVES_BYBIT_BASE_URL = os.getenv(',
+              'worker SOURCE_COMMIT_SHA',
+          )
+          worker = replace_once(
+              worker,
+              '            "status": "DISABLED",\n            "flow_batch_id": flow_batch_id,\n            "symbols": [],',
+              '            "status": "DISABLED",\n            "flow_batch_id": flow_batch_id,\n            "source_commit_sha": SOURCE_COMMIT_SHA,\n            "symbols": [],',
+              'disabled metadata',
+          )
+          worker = replace_once(
+              worker,
+              '                    "symbols": [],\n                    "flow_batch_id": flow_batch_id,\n                    "errors": [],',
+              '                    "symbols": [],\n                    "flow_batch_id": flow_batch_id,\n                    "source_commit_sha": SOURCE_COMMIT_SHA,\n                    "errors": [],',
+              'no-fresh metadata',
+          )
+          worker = replace_once(
+              worker,
+              '                    payload["flow_batch_id"] = flow_batch_id\n                    await upsert_cache(connection, f"day_trade_flow:{symbol}", payload)',
+              '                    payload["flow_batch_id"] = flow_batch_id\n                    payload["source_commit_sha"] = SOURCE_COMMIT_SHA\n                    await upsert_cache(connection, f"day_trade_flow:{symbol}", payload)',
+              'payload source commit',
+          )
+          worker = replace_once(
+              worker,
+              '                    "symbols": [symbol for symbol, _, _ in processed],\n                    "flow_batch_id": flow_batch_id,\n                    "good": good,',
+              '                    "symbols": [symbol for symbol, _, _ in processed],\n                    "flow_batch_id": flow_batch_id,\n                    "source_commit_sha": SOURCE_COMMIT_SHA,\n                    "good": good,',
+              'status source commit',
+          )
+          worker_path.write_text(worker)
+
+          models_path = Path('bybit_eu_swing_radar/backend/app/models.py')
+          models = models_path.read_text()
+          models = replace_once(
+              models,
+              '    spot_snapshot_as_of: datetime | None = None\n    spot_snapshot_age_seconds: float | None = None\n    data_quality: DataQuality',
+              '    spot_snapshot_as_of: datetime | None = None\n    spot_snapshot_age_seconds: float | None = None\n    flow_batch_id: str | None = None\n    source_commit_sha: str | None = None\n    data_quality: DataQuality',
+              'FlowContext model fields',
+          )
+          models_path.write_text(models)
+
+          test_path = Path('bybit_eu_swing_radar/backend/test_flow_worker_early_exit.py')
+          tests = test_path.read_text()
+          tests = replace_once(
+              tests,
+              'import pytest\n\n\ndef load_worker',
+              'import pytest\n\nfrom app.models import DayTradeFlowContextResponse\n\n\ndef load_worker',
+              'test model import',
+          )
+          tests = replace_once(
+              tests,
+              '    worker.FLOW_CONTEXT_ENABLED = False\n    worker.asyncpg.connect',
+              '    worker.FLOW_CONTEXT_ENABLED = False\n    worker.SOURCE_COMMIT_SHA = "sha-disabled"\n    worker.asyncpg.connect',
+              'disabled SHA setup',
+          )
+          tests = replace_once(
+              tests,
+              '        "flow_batch_id": "batch-disabled",\n        "symbols": [],',
+              '        "flow_batch_id": "batch-disabled",\n        "source_commit_sha": "sha-disabled",\n        "symbols": [],',
+              'disabled SHA assertion',
+          )
+          tests = replace_once(
+              tests,
+              '    worker.FLOW_CONTEXT_ENABLED = True\n    worker.DATABASE_URL = "postgresql://configured"\n    worker.httpx.Timeout',
+              '    worker.FLOW_CONTEXT_ENABLED = True\n    worker.DATABASE_URL = "postgresql://configured"\n    worker.SOURCE_COMMIT_SHA = "sha-empty"\n    worker.httpx.Timeout',
+              'empty SHA setup',
+          )
+          tests = replace_once(
+              tests,
+              '    assert result["flow_batch_id"] == "batch-empty"\n    assert result["symbols"] == []',
+              '    assert result["flow_batch_id"] == "batch-empty"\n    assert result["source_commit_sha"] == "sha-empty"\n    assert result["symbols"] == []',
+              'empty SHA assertion',
+          )
+          # Patch the second configured worker block (normal run) separately.
+          normal_anchor = '    worker.FLOW_CONTEXT_ENABLED = True\n    worker.DATABASE_URL = "postgresql://configured"\n    worker.httpx.Timeout'
+          if tests.count(normal_anchor) != 1:
+              raise SystemExit(f'normal SHA setup: expected 1 remaining anchor, found {tests.count(normal_anchor)}')
+          tests = tests.replace(
+              normal_anchor,
+              '    worker.FLOW_CONTEXT_ENABLED = True\n    worker.DATABASE_URL = "postgresql://configured"\n    worker.SOURCE_COMMIT_SHA = "sha-normal"\n    worker.httpx.Timeout',
+              1,
+          )
+          tests = replace_once(
+              tests,
+              '    assert result["flow_batch_id"] == "batch-normal"\n    assert result["symbols"] == ["BTCUSDC"]',
+              '    assert result["flow_batch_id"] == "batch-normal"\n    assert result["source_commit_sha"] == "sha-normal"\n    assert result["symbols"] == ["BTCUSDC"]',
+              'normal status SHA assertion',
+          )
+          tests = replace_once(
+              tests,
+              '    assert written[0][1]["flow_batch_id"] == "batch-normal"\n    assert written[1] == ("day_trade_flow_status", result)',
+              '    assert written[0][1]["flow_batch_id"] == "batch-normal"\n    assert written[0][1]["source_commit_sha"] == "sha-normal"\n    assert written[1] == ("day_trade_flow_status", result)',
+              'normal payload SHA assertion',
+          )
+          tests += '''\n\ndef test_flow_context_model_preserves_batch_and_source_commit_sha():\n    payload = {\n        "strategy_mode": "DAY_TRADE",\n        "strategy_version": "0.7.2",\n        "feature_version": "0.7.2.2",\n        "symbol": "BTCUSDC",\n        "data_as_of": "2026-08-14T15:30:00+00:00",\n        "data_as_of_budapest": "2026-08-14T17:30:00+02:00",\n        "flow_batch_id": "batch-model",\n        "source_commit_sha": "sha-model",\n        "data_quality": "GOOD",\n        "coverage_status": "GOOD",\n    }\n    model = DayTradeFlowContextResponse.model_validate(payload)\n    assert model.flow_batch_id == "batch-model"\n    assert model.source_commit_sha == "sha-model"\n'''
+          test_path.write_text(tests)
+          PY
+
+      - name: Install test dependencies
+        working-directory: bybit_eu_swing_radar/backend
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install pytest pytest-asyncio
+
+      - name: Verify targeted behavior
+        working-directory: bybit_eu_swing_radar/backend
+        run: |
+          python -m pytest -q test_flow_worker_early_exit.py test_flow_repository_read.py
+          python -m py_compile flow_worker.py app/models.py
+          git diff --check
+
+      - name: Remove temporary patch workflow
+        run: rm .github/workflows/apply-pr9-source-commit-patch.yml
+
+      - name: Commit tested patch
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -- bybit_eu_swing_radar/backend/flow_worker.py bybit_eu_swing_radar/backend/app/models.py bybit_eu_swing_radar/backend/test_flow_worker_early_exit.py .github/workflows/apply-pr9-source-commit-patch.yml
+          git commit -m "Propagate Flow source commit identity"
+          git push origin HEAD:fix/flow-source-commit-sha
