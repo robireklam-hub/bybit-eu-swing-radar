@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
@@ -14,11 +15,18 @@ app = FastAPI(
 
 repo = RadarRepository()
 bybit = BybitClient()
+SOURCE_COMMIT_SHA = os.getenv("RAILWAY_GIT_COMMIT_SHA") or None
 
 
 def require_api_key(x_radar_key: str = Header(..., alias="X-Radar-Key")) -> None:
     if x_radar_key != settings.radar_api_key:
         raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+@app.get("/version")
+async def version() -> dict[str, str | None]:
+    """Return immutable build identity without network or database access."""
+    return {"commit_sha": SOURCE_COMMIT_SHA}
 
 
 @app.get("/health")
