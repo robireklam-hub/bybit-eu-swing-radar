@@ -69,6 +69,29 @@ class RadarRepository:
         payload = row["payload"]
         return json.loads(payload) if isinstance(payload, str) else payload
 
+    async def get_caches(self, cache_keys: list[str]) -> dict[str, dict]:
+        if not cache_keys:
+            return {}
+        conn = await self._connect()
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT cache_key, payload
+                FROM radar_cache
+                WHERE cache_key = ANY($1::text[])
+                """,
+                cache_keys,
+            )
+        finally:
+            await conn.close()
+        result = {}
+        for row in rows:
+            payload = row["payload"]
+            result[row["cache_key"]] = (
+                json.loads(payload) if isinstance(payload, str) else payload
+            )
+        return result
+
     async def get_latest_scan(self, direction: str, limit: int, min_score: float) -> ScanResponse | None:
         payload = await self.get_cache("latest_scan")
         if payload is None:
@@ -512,9 +535,9 @@ async def _get_day_trade_flow_status(
         )
         return result
 
-    payloads = []
-    for symbol in symbols:
-        payloads.append(await repository.get_cache(f"day_trade_flow:{str(symbol).upper()}"))
+    cache_keys = [f"day_trade_flow:{str(symbol).upper()}" for symbol in symbols]
+    payload_by_key = await repository.get_caches(cache_keys)
+    payloads = [payload_by_key.get(cache_key) for cache_key in cache_keys]
     counts = summarize_flow_payloads(payloads, flow_batch_id=flow_batch_id)
     result.update(processed=len(symbols), **counts)
     return result
