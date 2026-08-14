@@ -99,13 +99,42 @@ def test_auth_and_rate_limit_errors_stop_immediately(code):
     assert result == 1 and len(calls) == 3 and sleeps == []
 
 
-def test_version_must_match_workflow_head_sha():
+def test_version_must_match_expected_deployment_sha():
     calls = []
     def fetch(url, api_key, timeout):
         calls.append(url)
         return {"commit_sha": "wrong"}
     assert smoke.run_smoke("https://production.example", "secret", SHA, fetch=fetch) == 1
     assert len(calls) == 1
+
+
+def test_main_uses_expected_sha_not_github_sha(monkeypatch):
+    captured = {}
+
+    def run_smoke(base_url, api_key, expected_sha):
+        captured.update(base_url=base_url, api_key=api_key, expected_sha=expected_sha)
+        return 0
+
+    monkeypatch.setenv("PRODUCTION_RADAR_API_BASE_URL", "https://production.example")
+    monkeypatch.setenv("PRODUCTION_RADAR_API_KEY", "secret")
+    monkeypatch.setenv("EXPECTED_SHA", SHA)
+    monkeypatch.setenv("GITHUB_SHA", "wrong")
+    monkeypatch.setattr(smoke, "run_smoke", run_smoke)
+    assert smoke.main() == 0
+    assert captured["expected_sha"] == SHA
+
+
+@pytest.mark.parametrize("expected_sha", [None, "", "   "])
+def test_main_fails_closed_without_expected_sha(monkeypatch, expected_sha):
+    monkeypatch.setenv("PRODUCTION_RADAR_API_BASE_URL", "https://production.example")
+    monkeypatch.setenv("PRODUCTION_RADAR_API_KEY", "secret")
+    monkeypatch.setenv("GITHUB_SHA", SHA)
+    if expected_sha is None:
+        monkeypatch.delenv("EXPECTED_SHA", raising=False)
+    else:
+        monkeypatch.setenv("EXPECTED_SHA", expected_sha)
+    monkeypatch.setattr(smoke, "run_smoke", lambda *args: pytest.fail("must fail closed"))
+    assert smoke.main() == 1
 
 
 def test_final_payloads_require_same_commit_batch_and_invariants():

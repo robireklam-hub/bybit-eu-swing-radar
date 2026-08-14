@@ -182,7 +182,7 @@ def run_smoke(base_url: str, api_key: str, expected_sha: str, *, timeout: float 
 def main() -> int:
     base_url = os.getenv("PRODUCTION_RADAR_API_BASE_URL", "").strip()
     api_key = os.getenv("PRODUCTION_RADAR_API_KEY", "")
-    expected_sha = os.getenv("GITHUB_SHA", "").strip()
+    expected_sha = os.getenv("EXPECTED_SHA", "").strip()
     if not base_url or not api_key or not expected_sha:
         print("FAIL required production smoke configuration is missing")
         return 1

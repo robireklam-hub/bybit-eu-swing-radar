@@ -23,6 +23,7 @@ def test_smoke_requires_successful_production_main_deployment():
     assert "format('{0}/', github.event.deployment_status.environment_url)" in text
     assert "format('{0}/', vars.PRODUCTION_RADAR_API_BASE_URL)" in text
     assert "ref: ${{ github.event.deployment.sha }}" in text
+    assert "EXPECTED_SHA: ${{ github.event.deployment.sha }}" in text
     assert "deployments: read" in text
     assert "cancel-in-progress: true" in text
 
@@ -49,3 +50,11 @@ def test_worker_execution_is_not_claimed_by_workflow_or_script():
     assert "MIN_FLOW_STATUS_TIME" not in workflow
     assert "WORKER EXECUTION VERIFIED" not in script
     assert "DEPLOYMENT VERIFIED, WORKER EXECUTION NOT VERIFIED." in script
+
+
+def test_deployment_sha_is_the_only_commit_evidence_environment_variable():
+    workflow = WORKFLOW.read_text()
+    script = Path("scripts/production_flow_freshness_smoke.py").read_text()
+    assert "EXPECTED_SHA: ${{ github.event.deployment.sha }}" in workflow
+    assert 'os.getenv("EXPECTED_SHA"' in script
+    assert 'os.getenv("GITHUB_SHA"' not in script
