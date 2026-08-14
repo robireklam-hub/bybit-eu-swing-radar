@@ -66,11 +66,51 @@ class FakeRepository:
     def __init__(self, values):
         self.values = values
         self.reads = []
+        self.batch_reads = []
         self.writes = 0
 
     async def get_cache(self, key):
         self.reads.append(key)
         return self.values.get(key)
+
+    async def get_caches(self, keys):
+        self.batch_reads.append(list(keys))
+        return {key: self.values[key] for key in keys if key in self.values}
+
+
+def test_repository_batch_cache_read_uses_one_connection(monkeypatch):
+    module = load_repository(monkeypatch)
+
+    class FakeConnection:
+        def __init__(self):
+            self.fetch_calls = []
+            self.close_calls = 0
+
+        async def fetch(self, query, keys):
+            self.fetch_calls.append((query, list(keys)))
+            return [
+                {"cache_key": "a", "payload": {"value": 1}},
+                {"cache_key": "b", "payload": '{"value": 2}'},
+            ]
+
+        async def close(self):
+            self.close_calls += 1
+
+    conn = FakeConnection()
+
+    async def connect(database_url):
+        assert database_url == "unused"
+        return conn
+
+    module.asyncpg.connect = connect
+    result = asyncio.run(module.RadarRepository().get_caches(["a", "b", "missing"]))
+
+    assert result == {"a": {"value": 1}, "b": {"value": 2}}
+    assert len(conn.fetch_calls) == 1
+    query, keys = conn.fetch_calls[0]
+    assert "ANY($1::text[])" in query
+    assert keys == ["a", "b", "missing"]
+    assert conn.close_calls == 1
 
 
 def test_repository_context_read_applies_freshness_before_validation(monkeypatch):
@@ -102,8 +142,11 @@ def test_repository_status_recounts_batch_and_ignores_foreign_symbol(monkeypatch
         "day_trade_flow:FOREIGN": flow("FOREIGN", 0),
     })
     result = asyncio.run(module._get_day_trade_flow_status(repo))
+    expected_keys = [f"day_trade_flow:{symbol}" for symbol in status["symbols"]]
     assert result == {**status, "processed": 5, "good": 1, "partial": 3, "no_derivative_match": 1}
-    assert "day_trade_flow:FOREIGN" not in repo.reads
+    assert repo.reads == ["day_trade_flow_status"]
+    assert repo.batch_reads == [expected_keys]
+    assert "day_trade_flow:FOREIGN" not in repo.batch_reads[0]
 
 
 def test_repository_status_rejects_old_status_new_batch_payload(monkeypatch):
