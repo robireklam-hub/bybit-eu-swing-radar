@@ -43,7 +43,7 @@ from app.models import (
     WatchlistResponse,
 )
 
-CURRENT_DAY_STRATEGY_VERSION = "0.7.2"
+CURRENT_DAY_STRATEGY_VERSION = "0.7.3"
 
 
 class RadarRepository:
@@ -852,7 +852,10 @@ def _setup_score_band(score: float) -> str:
 async def _get_day_trade_backtest_status(repository: RadarRepository) -> DayTradeBacktestStatusResponse:
     conn = await repository._connect()
     try:
-        job_raw = await conn.fetchrow("SELECT * FROM day_trade_backtest_jobs ORDER BY id DESC LIMIT 1")
+        job_raw = await conn.fetchrow(
+            "SELECT * FROM day_trade_backtest_jobs WHERE strategy_version=$1 ORDER BY id DESC LIMIT 1",
+            CURRENT_DAY_STRATEGY_VERSION,
+        )
         if not job_raw:
             return DayTradeBacktestStatusResponse(
                 generated_at=datetime.now(timezone.utc), exists=False,
@@ -903,7 +906,10 @@ async def _get_day_trade_backtest_summary(
 ) -> DayTradeBacktestSummaryResponse:
     conn = await repository._connect()
     try:
-        job_raw = await conn.fetchrow("SELECT * FROM day_trade_backtest_jobs ORDER BY id DESC LIMIT 1")
+        job_raw = await conn.fetchrow(
+            "SELECT * FROM day_trade_backtest_jobs WHERE strategy_version=$1 ORDER BY id DESC LIMIT 1",
+            CURRENT_DAY_STRATEGY_VERSION,
+        )
         if not job_raw:
             job = {"status": "NOT_INITIALIZED"}
             rows_raw = []
@@ -956,7 +962,7 @@ async def _get_day_trade_backtest_summary(
     job["universe"] = universe
     job["warnings"] = warnings
     return DayTradeBacktestSummaryResponse(
-        strategy_version=str(job.get("strategy_version", "0.7.2")),
+        strategy_version=str(job.get("strategy_version", CURRENT_DAY_STRATEGY_VERSION)),
         generated_at=datetime.now(timezone.utc), job=job,
         requested_signal_class=signal_class, requested_side=side,
         primary_only=primary_only, evidence_status=evidence,
@@ -989,7 +995,10 @@ async def _get_day_trade_backtest_signals(
 ) -> DayTradeBacktestSignalsResponse:
     conn = await repository._connect()
     try:
-        job_id = await conn.fetchval("SELECT id FROM day_trade_backtest_jobs ORDER BY id DESC LIMIT 1")
+        job_id = await conn.fetchval(
+            "SELECT id FROM day_trade_backtest_jobs WHERE strategy_version=$1 ORDER BY id DESC LIMIT 1",
+            CURRENT_DAY_STRATEGY_VERSION,
+        )
         if job_id is None:
             rows_raw = []
         else:
