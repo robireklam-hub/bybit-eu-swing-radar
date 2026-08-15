@@ -1,0 +1,53 @@
+name: v0.7.3 target-path A/B
+
+on:
+  workflow_dispatch:
+    inputs:
+      batches:
+        description: Number of sequential 2-symbol Railway research batches
+        required: true
+        default: '1'
+        type: choice
+        options:
+          - '1'
+          - '5'
+          - '15'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v073-target-path-active-barrier-ab
+  cancel-in-progress: false
+
+jobs:
+  target-path-ab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: bybit_eu_swing_radar/backend
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      TARGET_PATH_AB_BATCH_COUNT: ${{ inputs.batches }}
+    steps:
+      - name: Check out dispatched commit
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Validate production API configuration
+        shell: bash
+        run: |
+          if [ -z "${PRODUCTION_RADAR_API_BASE_URL}" ]; then
+            echo "::error::PRODUCTION_RADAR_API_BASE_URL repository variable is not configured."
+            exit 2
+          fi
+          if [ -z "${PRODUCTION_RADAR_API_KEY}" ]; then
+            echo "::error::PRODUCTION_RADAR_API_KEY GitHub Actions secret is not configured."
+            exit 2
+          fi
+      - name: Dispatch and monitor v0.7.3 target-path A/B
+        run: python scripts/run_production_v073_target_path_ab.py

@@ -7,6 +7,7 @@ from fastapi import Depends, FastAPI
 
 from app.v073_sensitivity_api import attach_v073_sensitivity_routes
 from app.v073_structure_ab_api import attach_v073_structure_ab_routes
+from app.v073_target_path_ab_api import attach_v073_target_path_ab_routes
 from diagnostics_v073 import STRATEGY_VERSION
 from diagnostics_v073_perf import get_runtime_progress, install_performance_patch
 
@@ -35,3 +36,7 @@ def attach_v073_diagnostic_perf_routes(
     # Attach the single-hypothesis 180d pivot-structure A/B research runner.
     # It has its own tables and background task and does not patch live strategy.
     attach_v073_structure_ab_routes(app, require_api_key)
+
+    # Attach the single-hypothesis 180d active-barrier target-path A/B runner.
+    # It is research-only and does not patch live strategy or execution.
+    attach_v073_target_path_ab_routes(app, require_api_key)
