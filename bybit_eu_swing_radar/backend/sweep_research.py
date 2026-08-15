@@ -1,7 +1,7 @@
 """Trading Radar — liquidity sweep research detector v0.1.
 
 RESEARCH ONLY.
-This module does not modify the live v0.7.2 day-trade strategy.
+This detector is reused by the live v0.7.3 day-trade trigger; execution, scoring and derivatives context remain outside this module.
 
 Purpose
 -------
