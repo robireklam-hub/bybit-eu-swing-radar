@@ -384,8 +384,16 @@ async def data_status():
     }
 
 
+# Install diagnostics-only performance patches before the v0.7.3 diagnostics
+# route module imports run_diagnostic_batch. Live strategy modules are untouched.
+from diagnostics_v073_perf import install_performance_patch
+
+install_performance_patch()
+
 # v0.7.3 research-only gate diagnostics are attached separately so the live
 # day-trade strategy/scoring/execution code remains untouched.
 from app.v073_diagnostics_api import attach_v073_diagnostic_routes
+from app.v073_diagnostics_perf_api import attach_v073_diagnostic_perf_routes
 
 attach_v073_diagnostic_routes(app, require_api_key)
+attach_v073_diagnostic_perf_routes(app, require_api_key)
