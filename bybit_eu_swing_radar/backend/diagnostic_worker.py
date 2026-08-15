@@ -1,4 +1,4 @@
-"""Railway cron entry point for Trading Radar v0.7.2 diagnostics.
+"""Railway/manual entry point for Trading Radar v0.7.3 gate diagnostics.
 
 Recommended start command:
     python diagnostic_worker.py
@@ -10,7 +10,7 @@ import json
 import time
 import traceback
 
-from diagnostics import run_diagnostic_batch
+from diagnostics_v073 import run_diagnostic_batch
 
 
 async def main() -> None:

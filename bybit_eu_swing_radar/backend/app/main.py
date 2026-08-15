@@ -382,3 +382,10 @@ async def data_status():
             },
         ],
     }
+
+
+# v0.7.3 research-only gate diagnostics are attached separately so the live
+# day-trade strategy/scoring/execution code remains untouched.
+from app.v073_diagnostics_api import attach_v073_diagnostic_routes
+
+attach_v073_diagnostic_routes(app, require_api_key)
