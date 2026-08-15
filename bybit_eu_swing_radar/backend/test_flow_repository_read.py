@@ -176,6 +176,7 @@ def test_context_endpoint_returns_repository_degraded_result(monkeypatch):
     class FastAPI:
         def __init__(self, **kwargs): pass
         def get(self, *args, **kwargs): return lambda function: function
+        def post(self, *args, **kwargs): return lambda function: function
     fastapi.FastAPI = FastAPI
     fastapi.Depends = lambda value: value
     fastapi.Header = lambda *args, **kwargs: None
