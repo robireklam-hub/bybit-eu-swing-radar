@@ -1,3 +1,5 @@
+import asyncio
+import logging
 import os
 from datetime import datetime, timezone
 
@@ -6,6 +8,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from app.config import settings
 from app.providers.bybit import BybitClient
 from app.repository import RadarRepository
+from backtest import BACKTEST_JOB_NAME, STRATEGY_VERSION, run_backtest_batch
 
 app = FastAPI(
     title="Bybit EU Trading Radar API",
@@ -16,11 +19,25 @@ app = FastAPI(
 repo = RadarRepository()
 bybit = BybitClient()
 SOURCE_COMMIT_SHA = os.getenv("RAILWAY_GIT_COMMIT_SHA") or None
+logger = logging.getLogger(__name__)
+_backtest_task: asyncio.Task[None] | None = None
 
 
 def require_api_key(x_radar_key: str = Header(..., alias="X-Radar-Key")) -> None:
     if x_radar_key != settings.radar_api_key:
         raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+async def _run_backtest_batch_background() -> None:
+    """Run one research batch inside Railway without blocking the HTTP request."""
+    global _backtest_task
+    try:
+        result = await run_backtest_batch()
+        logger.info("v0.7.3 backtest batch finished: %s", result)
+    except Exception:
+        logger.exception("v0.7.3 backtest batch failed")
+    finally:
+        _backtest_task = None
 
 
 @app.get("/version")
@@ -228,6 +245,28 @@ async def day_trade_journal_signals(
         symbol,
         limit,
     )
+
+
+@app.post(
+    "/v1/day-trade/backtest/run-batch",
+    status_code=202,
+    dependencies=[Depends(require_api_key)],
+)
+async def day_trade_backtest_run_batch():
+    """Start exactly one v0.7.3 research replay batch inside Railway."""
+    global _backtest_task
+    if _backtest_task is not None and not _backtest_task.done():
+        raise HTTPException(status_code=409, detail="Backtest batch already running")
+    _backtest_task = asyncio.create_task(
+        _run_backtest_batch_background(),
+        name="v073-backtest-batch",
+    )
+    return {
+        "accepted": True,
+        "strategy_version": STRATEGY_VERSION,
+        "job_name": BACKTEST_JOB_NAME,
+        "execution": "railway_background_batch",
+    }
 
 
 @app.get(
