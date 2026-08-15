@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       batches:
-        description: Number of sequential 2-symbol diagnostic batches
+        description: Number of sequential 1-symbol diagnostic batches
         required: true
         default: '1'
         type: choice
@@ -12,6 +12,7 @@ on:
           - '1'
           - '5'
           - '15'
+          - '30'
 
 permissions:
   contents: read

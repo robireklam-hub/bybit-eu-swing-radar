@@ -11,7 +11,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-ALLOWED_BATCH_COUNTS = {1, 5, 15}
+ALLOWED_BATCH_COUNTS = {1, 5, 15, 30}
 POLL_SECONDS = 10
 BATCH_TIMEOUT_SECONDS = 20 * 60
 
@@ -34,10 +34,7 @@ def _request_json(
     request = Request(
         f"{base_url}{path}{query}",
         method=method,
-        headers={
-            "Accept": "application/json",
-            "X-Radar-Key": api_key,
-        },
+        headers={"Accept": "application/json", "X-Radar-Key": api_key},
     )
     try:
         with urlopen(request, timeout=45) as response:
@@ -71,9 +68,7 @@ def _batch_count() -> int:
     return count
 
 
-def _progress(
-    payload: dict[str, Any],
-) -> tuple[bool, int, int, int, str]:
+def _progress(payload: dict[str, Any]) -> tuple[bool, int, int, int, str]:
     exists = bool(payload.get("exists"))
     job = payload.get("job") or {}
     completed = int(job.get("completed_symbols") or 0)
@@ -81,6 +76,16 @@ def _progress(
     total = int(job.get("total_symbols") or 0)
     status = str(job.get("status") or "NOT_INITIALIZED")
     return exists, completed, failed, total, status
+
+
+def _runtime_status() -> dict[str, Any]:
+    try:
+        _, payload = _request_json(
+            "GET", "/v1/day-trade/backtest/diagnostics/v073/runtime-status"
+        )
+        return payload.get("runtime_progress") or {}
+    except Exception as exc:
+        return {"stage": "RUNTIME_STATUS_UNAVAILABLE", "detail": {"error": str(exc)}}
 
 
 def _terminal(status: str) -> bool:
@@ -96,15 +101,16 @@ def main() -> int:
         _, before = _request_json("GET", status_path)
         exists, completed_before, failed_before, total, status = _progress(before)
         done_before = completed_before + failed_before
+        runtime = _runtime_status()
         print(
-            f"batch {index}/{count}: before exists={exists} "
-            f"done={done_before}/{total} failed={failed_before} status={status}"
+            f"batch {index}/{count}: before exists={exists} done={done_before}/{total} "
+            f"failed={failed_before} status={status} stage={runtime.get('stage')} "
+            f"symbol={runtime.get('symbol')} heartbeat={runtime.get('heartbeat_at')}"
         )
         if exists and _terminal(status):
             if status != "COMPLETED" or failed_before:
                 raise RuntimeError(
-                    f"Diagnostic job is terminal but not clean: status={status}, "
-                    f"failed={failed_before}"
+                    f"Diagnostic job is terminal but not clean: status={status}, failed={failed_before}"
                 )
             print("Diagnostic job already completed; no further dispatch needed.")
             break
@@ -119,34 +125,31 @@ def main() -> int:
         while True:
             time.sleep(POLL_SECONDS)
             _, current = _request_json("GET", status_path)
-            current_exists, completed, failed, current_total, current_status = _progress(
-                current
-            )
+            current_exists, completed, failed, current_total, current_status = _progress(current)
             done = completed + failed
+            runtime = _runtime_status()
             print(
-                f"batch {index}/{count}: poll exists={current_exists} "
-                f"done={done}/{current_total} failed={failed} status={current_status}"
+                f"batch {index}/{count}: poll exists={current_exists} done={done}/{current_total} "
+                f"failed={failed} status={current_status} stage={runtime.get('stage')} "
+                f"symbol={runtime.get('symbol')} heartbeat={runtime.get('heartbeat_at')} "
+                f"detail={runtime.get('detail')}"
             )
             if failed > failed_before:
                 raise RuntimeError(
-                    f"Diagnostic batch recorded a failed symbol: "
-                    f"failed {failed_before}->{failed}"
+                    f"Diagnostic batch recorded a failed symbol: failed {failed_before}->{failed}"
                 )
-            if current_exists and (
-                done > done_before or _terminal(current_status)
-            ):
+            if current_exists and (done > done_before or _terminal(current_status)):
                 if _terminal(current_status) and current_status != "COMPLETED":
-                    raise RuntimeError(
-                        f"Diagnostic job ended with status={current_status}"
-                    )
+                    raise RuntimeError(f"Diagnostic job ended with status={current_status}")
                 break
             if time.monotonic() >= deadline:
                 raise RuntimeError(
-                    f"Timed out waiting for diagnostic batch {index} to advance"
+                    f"Timed out waiting for diagnostic batch {index} to advance; runtime={runtime}"
                 )
 
     _, final = _request_json("GET", status_path)
     print("FINAL_DIAGNOSTIC_STATUS=" + json.dumps(final, default=str, sort_keys=True))
+    print("FINAL_RUNTIME_STATUS=" + json.dumps(_runtime_status(), default=str, sort_keys=True))
 
     for split in ("all", "DEVELOPMENT", "VALIDATION"):
         for side in ("both", "long", "short"):
@@ -155,10 +158,7 @@ def main() -> int:
                 "/v1/day-trade/backtest/diagnostics/v073/waterfall",
                 {"split": split, "side": side, "primary_only": "false"},
             )
-            print(
-                f"WATERFALL_{split}_{side}="
-                + json.dumps(waterfall, default=str, sort_keys=True)
-            )
+            print(f"WATERFALL_{split}_{side}=" + json.dumps(waterfall, default=str, sort_keys=True))
 
     for split in ("all", "DEVELOPMENT", "VALIDATION"):
         for side in ("both", "long", "short"):
@@ -167,11 +167,7 @@ def main() -> int:
                 "/v1/day-trade/backtest/diagnostics/v073/edge",
                 {"split": split, "side": side, "primary_only": "true"},
             )
-            print(
-                f"EDGE_{split}_{side}="
-                + json.dumps(edge, default=str, sort_keys=True)
-            )
-
+            print(f"EDGE_{split}_{side}=" + json.dumps(edge, default=str, sort_keys=True))
     return 0
 
 
