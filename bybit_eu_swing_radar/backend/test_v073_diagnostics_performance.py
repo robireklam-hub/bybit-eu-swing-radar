@@ -36,6 +36,51 @@ def test_fast_15m_classifier_matches_reference() -> None:
         )
 
 
+def test_fast_scanner_matches_reference_event_for_event() -> None:
+    five = sweep_research.FIVE_MIN_MS
+    bars: list[ResearchBar] = []
+    for index in range(72):
+        close = 100.0
+        high = 100.5
+        low = 99.5
+        volume = 100.0
+        if index == 30:
+            close = 99.8
+            high = 100.2
+            low = 98.9
+        elif index == 31:
+            close = 100.8
+            high = 101.0
+            low = 99.7
+            volume = 220.0
+        bars.append(
+            ResearchBar(
+                start_ms=index * five,
+                open=100.0,
+                high=high,
+                low=low,
+                close=close,
+                volume=volume,
+                turnover=volume * close,
+            )
+        )
+    fifteen = sweep_research.aggregate_5m_to_15m(bars)
+    reference = sweep_research.scan_sweep_setups(
+        bars,
+        "long",
+        bars_15m=fifteen,
+        include_incomplete=True,
+    )
+    accelerated = perf.fast_scan_sweep_setups(
+        bars,
+        "long",
+        bars_15m=fifteen,
+        include_incomplete=True,
+    )
+    assert reference
+    assert accelerated == reference
+
+
 def test_install_is_diagnostics_only_and_forces_one_symbol_batch() -> None:
     live_scan = sweep_research.scan_sweep_setups
     perf.install_performance_patch()
@@ -85,7 +130,12 @@ def test_bulk_insert_uses_executemany_not_per_row_fetchrow() -> None:
         }
     )
     connection = FakeConnection()
-    inserted = asyncio.run(perf.bulk_insert_events(connection, [item, {**item, "event_key": "event-2"}]))
+    inserted = asyncio.run(
+        perf.bulk_insert_events(
+            connection,
+            [item, {**item, "event_key": "event-2"}],
+        )
+    )
     assert inserted == 2
     assert connection.executemany_calls == 1
     assert connection.count_calls == 2
