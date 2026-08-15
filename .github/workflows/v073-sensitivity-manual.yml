@@ -1,0 +1,53 @@
+name: v0.7.3 parameter sensitivity
+
+on:
+  workflow_dispatch:
+    inputs:
+      top_k:
+        description: Number of development-ranked finalists to validate per side
+        required: true
+        default: '20'
+        type: choice
+        options:
+          - '10'
+          - '20'
+          - '30'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v073-parameter-sensitivity
+  cancel-in-progress: false
+
+jobs:
+  sensitivity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: bybit_eu_swing_radar/backend
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      SENSITIVITY_TOP_K: ${{ inputs.top_k }}
+    steps:
+      - name: Check out dispatched commit
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Validate production API configuration
+        shell: bash
+        run: |
+          if [ -z "${PRODUCTION_RADAR_API_BASE_URL}" ]; then
+            echo "::error::PRODUCTION_RADAR_API_BASE_URL repository variable is not configured."
+            exit 2
+          fi
+          if [ -z "${PRODUCTION_RADAR_API_KEY}" ]; then
+            echo "::error::PRODUCTION_RADAR_API_KEY GitHub Actions secret is not configured."
+            exit 2
+          fi
+      - name: Fetch v0.7.3 parameter sensitivity report
+        run: python scripts/run_production_v073_sensitivity.py
