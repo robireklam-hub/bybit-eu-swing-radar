@@ -1,0 +1,111 @@
+name: v0.7.3 manual backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      batches:
+        description: Number of sequential 2-symbol backtest batches
+        required: true
+        default: '1'
+        type: choice
+        options:
+          - '1'
+          - '5'
+          - '15'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v073-backtest-manual
+  cancel-in-progress: false
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        working-directory: bybit_eu_swing_radar/backend
+    env:
+      DATABASE_URL: ${{ secrets.BACKTEST_DATABASE_URL || secrets.DATABASE_URL }}
+      BACKTEST_ENABLED: 'true'
+      BACKTEST_JOB_NAME: v073-90d-netrr-structural-barrier
+      BACKTEST_LOOKBACK_DAYS: '90'
+      BACKTEST_WARMUP_DAYS: '14'
+      BACKTEST_SYMBOL_LIMIT: '30'
+      BACKTEST_BATCH_SYMBOLS: '2'
+      BACKTEST_SHORT_MODE: technical_only
+      BACKTEST_PRIMARY_NO_OVERLAP: 'true'
+
+    steps:
+      - name: Check out dispatched commit
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: bybit_eu_swing_radar/backend/requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Validate backtest database secret
+        shell: bash
+        run: |
+          if [ -z "${DATABASE_URL}" ]; then
+            echo "::error::Neither BACKTEST_DATABASE_URL nor DATABASE_URL is configured in GitHub Actions secrets."
+            exit 2
+          fi
+
+      - name: Run selected v0.7.3 backtest batches
+        shell: bash
+        run: |
+          case "${{ inputs.batches }}" in
+            1|5|15) batch_count="${{ inputs.batches }}" ;;
+            *) echo "::error::Unsupported batch count"; exit 2 ;;
+          esac
+
+          for ((i=1; i<=batch_count; i++)); do
+            echo "=== v0.7.3 backtest batch ${i}/${batch_count} ==="
+            python backtest_worker.py
+          done
+
+      - name: Read final v0.7.3 job status
+        shell: bash
+        run: |
+          python - <<'PY'
+          import asyncio
+          import json
+          import os
+          import asyncpg
+
+          async def main():
+              conn = await asyncpg.connect(os.environ["DATABASE_URL"], timeout=30)
+              try:
+                  job = await conn.fetchrow(
+                      """
+                      SELECT id, job_name, strategy_version, status,
+                             total_symbols, completed_symbols, failed_symbols,
+                             total_signals, primary_signals,
+                             start_at, end_at, created_at, updated_at
+                      FROM day_trade_backtest_jobs
+                      WHERE strategy_version=$1 AND job_name=$2
+                      ORDER BY id DESC LIMIT 1
+                      """,
+                      "0.7.3",
+                      "v073-90d-netrr-structural-barrier",
+                  )
+                  if not job:
+                      print(json.dumps({"exists": False, "strategy_version": "0.7.3"}))
+                      return
+                  payload = dict(job)
+                  payload["exists"] = True
+                  print(json.dumps(payload, default=str, sort_keys=True))
+              finally:
+                  await conn.close()
+
+          asyncio.run(main())
+          PY
