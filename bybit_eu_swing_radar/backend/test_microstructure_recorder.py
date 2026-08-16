@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from research.microstructure.recorder import (
+from research.microstructure.collector import (
     MicrostructureConfig,
     OrderBookState,
     ResearchBucket,
@@ -86,7 +86,7 @@ def test_depth_metrics_are_quote_weighted() -> None:
     assert -1.0 <= metrics["imbalance_5"] <= 1.0
 
 
-def test_trade_bucket_uses_taker_side_and_tracks_rpi_block() -> None:
+def test_trade_bucket_uses_taker_side_and_standard_vwap() -> None:
     bucket = ResearchBucket("BTCUSDC", start_ms=1_700_000_000_000, bucket_seconds=5)
     bucket.add_trade({"T": 1_700_000_000_100, "S": "Buy", "p": "100", "v": "2", "BT": False})
     bucket.add_trade({"T": 1_700_000_000_200, "S": "Sell", "p": "101", "v": "1", "BT": True, "RPI": True})
@@ -97,7 +97,8 @@ def test_trade_bucket_uses_taker_side_and_tracks_rpi_block() -> None:
     assert bucket.block_trade_count == 1
     assert bucket.rpi_trade_count == 1
     assert values[11] == pytest.approx(99.0)  # signed_quote_flow
-    assert math.isfinite(values[13])  # trade_vwap
+    assert values[13] == pytest.approx(301.0 / 3.0)  # standard base-volume VWAP
+    assert math.isfinite(values[13])
 
 
 def test_book_bucket_persists_last_state_and_flow() -> None:
