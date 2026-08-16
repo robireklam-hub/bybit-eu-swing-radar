@@ -28,20 +28,33 @@ def _ensure_recorder() -> MicrostructureRecorder:
     return _recorder
 
 
-async def _startup() -> None:
+def _ensure_task_started() -> bool:
+    """Start the research collector on the current event loop when needed.
+
+    Railway's API process is allowed to run with application lifespan hooks
+    disabled, so the collector must not depend exclusively on FastAPI startup
+    events. The authenticated research status endpoint calls this helper as a
+    fail-safe. It only starts research data collection and never mutates live
+    strategy/scoring/execution state.
+    """
     global _task
     recorder = _ensure_recorder()
     if not recorder.config.enabled:
-        logger.info("microstructure recorder disabled")
-        return
-    if _task is None or _task.done():
-        _task = asyncio.create_task(recorder.run(), name="microstructure-recorder-v1")
-        logger.info(
-            "microstructure recorder task started: symbols=%s bucket=%ss depth=%s",
-            recorder.config.symbols,
-            recorder.config.bucket_seconds,
-            recorder.config.depth,
-        )
+        return False
+    if _task is not None and not _task.done():
+        return False
+    _task = asyncio.create_task(recorder.run(), name="microstructure-recorder-v1")
+    logger.info(
+        "microstructure recorder task started: symbols=%s bucket=%ss depth=%s",
+        recorder.config.symbols,
+        recorder.config.bucket_seconds,
+        recorder.config.depth,
+    )
+    return True
+
+
+async def _startup() -> None:
+    _ensure_task_started()
 
 
 async def _shutdown() -> None:
@@ -72,9 +85,9 @@ def attach_microstructure_research(
     app: FastAPI,
     require_api_key: Callable[..., Any],
 ) -> None:
-    # Production FastAPI exposes add_event_handler. A few repository tests use a
-    # deliberately tiny FastAPI stub that only models route registration; keep
-    # those import-only tests isolated from lifecycle behavior.
+    # Keep normal FastAPI lifecycle registration when available. The status
+    # route below is also a self-start fail-safe because Railway may run the API
+    # with lifespan hooks disabled.
     add_event_handler = getattr(app, "add_event_handler", None)
     if callable(add_event_handler):
         add_event_handler("startup", _startup)
@@ -85,4 +98,14 @@ def attach_microstructure_research(
         dependencies=[Depends(require_api_key)],
     )
     async def status() -> dict[str, Any]:
+        try:
+            _ensure_task_started()
+            # Yield once so the newly scheduled collector can set its initial
+            # runtime state before we report status on first access.
+            await asyncio.sleep(0)
+        except Exception as exc:
+            logger.exception("microstructure recorder self-start failed")
+            payload = microstructure_status()
+            payload["start_error"] = str(exc)[:1000]
+            return payload
         return microstructure_status()
