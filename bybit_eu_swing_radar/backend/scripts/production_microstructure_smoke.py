@@ -63,6 +63,41 @@ def healthy(payload: dict[str, Any]) -> tuple[bool, str]:
     return True, "ok"
 
 
+def readiness_healthy(payload: dict[str, Any], expected_symbols: list[str]) -> tuple[bool, str]:
+    """Validate the readiness report contract without requiring the 24h gate to pass."""
+    if payload.get("research_only") is not True:
+        return False, "readiness_research_only_not_true"
+    if payload.get("live_strategy_mutated") is not False:
+        return False, "readiness_live_strategy_mutated_not_false"
+    if payload.get("gate_version") != "microstructure-readiness-v1":
+        return False, "unexpected_readiness_gate_version"
+    if payload.get("promotion_allowed") is not False:
+        return False, "readiness_promotion_allowed_not_false"
+    if payload.get("error") or payload.get("error_type"):
+        return False, "readiness_query_error"
+    symbols = payload.get("symbols")
+    if not isinstance(symbols, list) or not symbols:
+        return False, "readiness_symbols_missing"
+    by_symbol = {
+        item.get("symbol"): item for item in symbols
+        if isinstance(item, dict) and isinstance(item.get("symbol"), str)
+    }
+    if set(by_symbol) != set(expected_symbols):
+        return False, "readiness_symbol_set_mismatch"
+    required = {
+        "ready", "reasons", "bucket_count", "duration_hours", "continuity_ratio",
+        "book_ready_ratio", "book_message_ratio", "trade_bucket_ratio",
+        "freshness_seconds", "first_bucket_at", "last_bucket_at",
+    }
+    for symbol in expected_symbols:
+        item = by_symbol[symbol]
+        if not required.issubset(item):
+            return False, f"readiness_metrics_missing:{symbol}"
+        if int(item.get("bucket_count") or 0) <= 0:
+            return False, f"readiness_no_buckets:{symbol}"
+    return True, "ok"
+
+
 def run_smoke(base_url: str, api_key: str, expected_sha: str, *, timeout: float = 15.0,
               fetch: Callable[[str, str, float], dict[str, Any]] = fetch_json,
               sleep: Callable[[float], None] = time.sleep) -> int:
@@ -93,6 +128,7 @@ def run_smoke(base_url: str, api_key: str, expected_sha: str, *, timeout: float 
         print("FAIL phase=version reason=expected_commit_not_deployed")
         return 1
 
+    recorder_status: dict[str, Any] | None = None
     for attempt in range(MAX_POLLS):
         try:
             status = _get(fetch, base_url, "/v1/research/microstructure/status", api_key, timeout)
@@ -126,13 +162,44 @@ def run_smoke(base_url: str, api_key: str, expected_sha: str, *, timeout: float 
             }
             print("RECORDER_STATUS=" + json.dumps(safe, sort_keys=True))
             if ok:
-                print("MICROSTRUCTURE FORWARD RECORDER VERIFIED.")
-                return 0
+                recorder_status = status
+                break
         if attempt + 1 < MAX_POLLS:
             sleep(POLL_INTERVAL_SECONDS)
 
-    print(f"FAIL phase=recorder reason={last_reason}")
-    return 1
+    if recorder_status is None:
+        print(f"FAIL phase=recorder reason={last_reason}")
+        return 1
+
+    try:
+        readiness = _get(
+            fetch, base_url, "/v1/research/microstructure/readiness", api_key, timeout
+        )
+    except HTTPError as exc:
+        print(f"FAIL phase=readiness http_status={exc.code}")
+        return 1
+    except (URLError, TimeoutError, OSError, ValueError, RuntimeError) as exc:
+        print(f"FAIL phase=readiness error_type={type(exc).__name__}")
+        return 1
+
+    expected_symbols = list(recorder_status.get("symbols") or [])
+    readiness_ok, readiness_reason = readiness_healthy(readiness, expected_symbols)
+    safe_readiness = {
+        "gate_version": readiness.get("gate_version"),
+        "ready_for_forward_feature_analysis": readiness.get("ready_for_forward_feature_analysis"),
+        "promotion_allowed": readiness.get("promotion_allowed"),
+        "thresholds": readiness.get("thresholds"),
+        "bucket_seconds": readiness.get("bucket_seconds"),
+        "symbols": readiness.get("symbols"),
+        "checked_at": readiness.get("checked_at"),
+    }
+    print("READINESS_STATUS=" + json.dumps(safe_readiness, sort_keys=True))
+    if not readiness_ok:
+        print(f"FAIL phase=readiness reason={readiness_reason}")
+        return 1
+
+    print("MICROSTRUCTURE FORWARD RECORDER AND READINESS VERIFIED.")
+    return 0
 
 
 def main() -> int:
