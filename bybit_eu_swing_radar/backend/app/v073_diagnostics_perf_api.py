@@ -6,6 +6,7 @@ from typing import Any, Callable
 from fastapi import Depends, FastAPI
 
 from app.v073_research_dataset_api import attach_v073_research_dataset_routes
+from app.v073_research_flow_v2_api import attach_v073_research_flow_v2_routes
 from app.v073_sensitivity_api import attach_v073_sensitivity_routes
 from app.v073_structure_ab_api import attach_v073_structure_ab_routes
 from app.v073_target_path_ab_api import attach_v073_target_path_ab_routes
@@ -43,3 +44,7 @@ def attach_v073_diagnostic_perf_routes(
     # Attach the materialized opportunity-level research dataset. It reuses the
     # diagnostic replay but does not alter live day-trade logic.
     attach_v073_research_dataset_routes(app, require_api_key)
+
+    # Attach historical derivatives enrichment as a separate research-only path.
+    # OI/funding remains contextual and never becomes a live hard gate.
+    attach_v073_research_flow_v2_routes(app, require_api_key)
