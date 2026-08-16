@@ -1,3 +1,9 @@
+import os
+
+os.environ.setdefault("DATABASE_URL", "postgresql://test:test@localhost:5432/test")
+os.environ.setdefault("RADAR_API_KEY", "test-radar-key")
+os.environ.setdefault("COINALYZE_API_KEY", "test-coinalyze-key")
+
 from fastapi import FastAPI
 
 from app.v073_research_dataset_api import attach_v073_research_dataset_routes
