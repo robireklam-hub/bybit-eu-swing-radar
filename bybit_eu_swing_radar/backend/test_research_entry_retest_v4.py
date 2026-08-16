@@ -42,7 +42,7 @@ def test_report_selects_train_winner_and_requires_positive_holdout():
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     development_end = start + timedelta(days=120)
     rows = []
-    # 180 train opportunities with structure retest clearly best.
+    # 180 train opportunities with structure retest clearly best and PF > 1.
     for i in range(180):
         rows.append(
             {
@@ -50,13 +50,13 @@ def test_report_selects_train_winner_and_requires_positive_holdout():
                 "dataset_split": "DEVELOPMENT",
                 "base_net_r": -0.4,
                 "entry_retests": {
-                    "structure_break_retest": {"filled": True, "net_r": 0.30},
+                    "structure_break_retest": {"filled": True, "net_r": -0.20 if i % 3 == 0 else 0.50},
                     "half_retrace_to_break": {"filled": True, "net_r": -0.10},
                     "sweep_level_retest": {"filled": True, "net_r": -0.20},
                 },
             }
         )
-    # 60 holdout opportunities preserve positive structure-retest edge.
+    # 60 holdout opportunities preserve positive structure-retest edge and PF > 1.
     for i in range(60):
         rows.append(
             {
@@ -64,7 +64,7 @@ def test_report_selects_train_winner_and_requires_positive_holdout():
                 "dataset_split": "DEVELOPMENT",
                 "base_net_r": -0.3,
                 "entry_retests": {
-                    "structure_break_retest": {"filled": True, "net_r": 0.20},
+                    "structure_break_retest": {"filled": True, "net_r": -0.20 if i % 3 == 0 else 0.40},
                     "half_retrace_to_break": {"filled": True, "net_r": -0.10},
                     "sweep_level_retest": {"filled": True, "net_r": -0.20},
                 },
