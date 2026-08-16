@@ -41,39 +41,49 @@ def test_choose_derivative_market_matches_turnover_first_policy():
 
 @pytest.mark.asyncio
 async def test_open_interest_history_follows_cursor_and_normalizes():
+    first_ms = 1_700_000_000_000
+    second_ms = first_ms + 3_600_000
     api = FakeFlowAPI(
         [
             {
                 "retCode": 0,
                 "result": {
-                    "list": [{"timestamp": "2000", "openInterest": "2"}],
+                    "list": [{"timestamp": str(second_ms), "openInterest": "2"}],
                     "nextPageCursor": "next",
                 },
             },
             {
                 "retCode": 0,
                 "result": {
-                    "list": [{"timestamp": "1000", "openInterest": "1"}],
+                    "list": [{"timestamp": str(first_ms), "openInterest": "1"}],
                     "nextPageCursor": "",
                 },
             },
         ]
     )
-    points = await api.open_interest_history("BTCUSDT", start_ms=0, end_ms=3000)
-    assert [(point.ts, point.value) for point in points] == [(1, 1.0), (2, 2.0)]
+    points = await api.open_interest_history(
+        "BTCUSDT", start_ms=first_ms, end_ms=second_ms
+    )
+    assert [(point.ts, point.value) for point in points] == [
+        (first_ms // 1000, 1.0),
+        (second_ms // 1000, 2.0),
+    ]
     assert api.calls[1][1]["cursor"] == "next"
 
 
 @pytest.mark.asyncio
 async def test_funding_history_walks_backwards_without_forward_leakage():
+    first_ms = 1_700_000_000_000
+    second_ms = first_ms + 8 * 3_600_000
+    third_ms = second_ms + 8 * 3_600_000
     api = FakeFlowAPI(
         [
             {
                 "retCode": 0,
                 "result": {
                     "list": [
-                        {"fundingRateTimestamp": "300000", "fundingRate": "0.003"},
-                        {"fundingRateTimestamp": "200000", "fundingRate": "0.002"},
+                        {"fundingRateTimestamp": str(third_ms), "fundingRate": "0.003"},
+                        {"fundingRateTimestamp": str(second_ms), "fundingRate": "0.002"},
                     ]
                 },
             },
@@ -81,16 +91,18 @@ async def test_funding_history_walks_backwards_without_forward_leakage():
                 "retCode": 0,
                 "result": {
                     "list": [
-                        {"fundingRateTimestamp": "100000", "fundingRate": "0.001"},
+                        {"fundingRateTimestamp": str(first_ms), "fundingRate": "0.001"},
                     ]
                 },
             },
         ]
     )
-    points = await api.funding_history("BTCUSDT", start_ms=100000, end_ms=300000)
+    points = await api.funding_history(
+        "BTCUSDT", start_ms=first_ms, end_ms=third_ms
+    )
     assert [(point.ts, point.rate) for point in points] == [
-        (100, 0.001),
-        (200, 0.002),
-        (300, 0.003),
+        (first_ms // 1000, 0.001),
+        (second_ms // 1000, 0.002),
+        (third_ms // 1000, 0.003),
     ]
-    assert api.calls[1][1]["endTime"] == 199999
+    assert api.calls[1][1]["endTime"] == second_ms - 1
