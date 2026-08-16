@@ -47,8 +47,7 @@ def test_readiness_fails_closed_for_missing_symbol() -> None:
 
 def test_readiness_detects_short_history_coverage_and_staleness() -> None:
     now = datetime(2026, 8, 17, 16, 0, tzinfo=timezone.utc)
-    row = _row("BTCUSDC", now, hours=2.0, ready_ratio=0.80, book_message_ratio=0.70)
-    row["bucket_count"] = 500
+    row = _row("BTCUSDC", now, hours=2.0, count=500, ready_ratio=0.80, book_message_ratio=0.70)
     row["last_bucket_at"] = now - timedelta(minutes=2)
 
     report = summarize_readiness([row], ("BTCUSDC",), 5, now=now)
