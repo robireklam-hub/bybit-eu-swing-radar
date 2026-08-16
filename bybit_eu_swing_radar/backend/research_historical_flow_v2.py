@@ -31,10 +31,18 @@ def _timestamp_seconds(value: Any) -> int | None:
     if isinstance(value, datetime):
         dt = value
     elif isinstance(value, str):
+        text = value.strip()
         try:
-            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            raw = float(text)
         except ValueError:
-            return None
+            try:
+                dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        else:
+            if not math.isfinite(raw):
+                return None
+            return int(raw / 1000.0) if raw > 10_000_000_000 else int(raw)
     elif isinstance(value, (int, float)) and not isinstance(value, bool):
         raw = float(value)
         if not math.isfinite(raw):
