@@ -19,6 +19,7 @@ from research_dataset_v1 import (
     build_profile_report,
     run_dataset_batch,
 )
+from research_interactions_v1 import build_interaction_report
 
 logger = logging.getLogger(__name__)
 _dataset_task: asyncio.Task[None] | None = None
@@ -129,7 +130,7 @@ async def dataset_report_payload() -> dict[str, Any]:
             )
         rows = await conn.fetch(
             """
-            SELECT dataset_split,symbol,side,base_net_r,
+            SELECT dataset_split,symbol,side,opened_at,base_net_r,
                    sweep_depth_atr,bars_from_sweep_to_confirmation,
                    volume_ratio_5m,turnover_24h_usdc,modeled_spread_bps,
                    expansion_score,side_direction_score,quality_score,
@@ -144,7 +145,13 @@ async def dataset_report_payload() -> dict[str, Any]:
     finally:
         await conn.close()
 
-    report = build_profile_report([dict(row) for row in rows])
+    materialized_rows = [dict(row) for row in rows]
+    report = build_profile_report(materialized_rows)
+    interaction_report = build_interaction_report(
+        materialized_rows,
+        start_at=job["start_at"],
+        development_end_at=job["development_end_at"],
+    )
     job["parameters"] = _json_value(job.get("parameters"), {})
     job["universe"] = _json_value(job.get("universe"), [])
     job["warnings"] = _json_value(job.get("warnings"), [])
@@ -152,6 +159,7 @@ async def dataset_report_payload() -> dict[str, Any]:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "job": job,
         **report,
+        "interaction_analysis": interaction_report,
     }
 
 def attach_v073_research_dataset_routes(
