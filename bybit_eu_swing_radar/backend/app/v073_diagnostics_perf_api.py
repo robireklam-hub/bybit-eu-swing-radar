@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 from fastapi import Depends, FastAPI
 
+from app.v073_research_breakout_v5_api import attach_v073_research_breakout_v5_routes
 from app.v073_research_dataset_api import attach_v073_research_dataset_routes
 from app.v073_research_entry_v4_api import attach_v073_research_entry_v4_routes
 from app.v073_research_flow_v2_api import attach_v073_research_flow_v2_routes
@@ -32,29 +33,14 @@ def attach_v073_diagnostic_perf_routes(
             "runtime_progress": get_runtime_progress(),
         }
 
-    # Attach read-only sensitivity through the existing diagnostics hook so live
-    # day-trade strategy/scoring/execution modules remain untouched.
     attach_v073_sensitivity_routes(app, require_api_key)
-
-    # Attach the completed single-hypothesis pivot-structure A/B runner.
     attach_v073_structure_ab_routes(app, require_api_key)
-
-    # Attach the isolated structural target-path CURRENT/FRESH/IGNORE replay.
-    # It reuses research tables/batching and never patches live strategy state.
     attach_v073_target_path_ab_routes(app, require_api_key)
-
-    # Attach the materialized opportunity-level research dataset. It reuses the
-    # diagnostic replay but does not alter live day-trade logic.
     attach_v073_research_dataset_routes(app, require_api_key)
-
-    # Attach historical derivatives enrichment as a separate research-only path.
-    # OI/funding remains contextual and never becomes a live hard gate.
     attach_v073_research_flow_v2_routes(app, require_api_key)
-
-    # Attach historical premium-index microstructure research. Premium remains
-    # derivatives context only and cannot change live eligibility/execution.
     attach_v073_research_premium_v3_routes(app, require_api_key)
-
-    # Attach the entry-architecture pivot replay. It changes only hypothetical
-    # research entries after confirmation; live day_worker remains untouched.
     attach_v073_research_entry_v4_routes(app, require_api_key)
+
+    # Separate continuation-family research after the sweep family failed.
+    # This endpoint remains research-only and cannot mutate live strategy state.
+    attach_v073_research_breakout_v5_routes(app, require_api_key)
