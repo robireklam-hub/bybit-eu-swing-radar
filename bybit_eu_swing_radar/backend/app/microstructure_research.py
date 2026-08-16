@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 from fastapi import Depends, FastAPI
 
-from research.microstructure.recorder import MicrostructureConfig, MicrostructureRecorder
+from research.microstructure.collector import MicrostructureConfig, MicrostructureRecorder
 
 logger = logging.getLogger(__name__)
 
