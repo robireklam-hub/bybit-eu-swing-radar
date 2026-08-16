@@ -72,8 +72,13 @@ def attach_microstructure_research(
     app: FastAPI,
     require_api_key: Callable[..., Any],
 ) -> None:
-    app.add_event_handler("startup", _startup)
-    app.add_event_handler("shutdown", _shutdown)
+    # Production FastAPI exposes add_event_handler. A few repository tests use a
+    # deliberately tiny FastAPI stub that only models route registration; keep
+    # those import-only tests isolated from lifecycle behavior.
+    add_event_handler = getattr(app, "add_event_handler", None)
+    if callable(add_event_handler):
+        add_event_handler("startup", _startup)
+        add_event_handler("shutdown", _shutdown)
 
     @app.get(
         "/v1/research/microstructure/status",
