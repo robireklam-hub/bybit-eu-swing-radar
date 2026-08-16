@@ -26,7 +26,7 @@ jobs:
     env:
       PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
       PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
-      RESEARCH_DATASET_BATCH_COUNT: '15'
+      RESEARCH_DATASET_BATCH_COUNT: '30'
       EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
 
     steps:

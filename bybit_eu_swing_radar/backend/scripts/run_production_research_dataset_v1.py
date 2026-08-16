@@ -9,13 +9,14 @@ import urllib.request
 
 BASE = os.environ.get("PRODUCTION_RADAR_API_BASE_URL", "").rstrip("/")
 KEY = os.environ.get("PRODUCTION_RADAR_API_KEY", "")
-BATCH_COUNT = max(1, min(int(os.environ.get("RESEARCH_DATASET_BATCH_COUNT", "15")), 15))
+BATCH_COUNT = max(1, min(int(os.environ.get("RESEARCH_DATASET_BATCH_COUNT", "30")), 60))
 POLL_SECONDS = 10
 ADVANCE_TIMEOUT_SECONDS = 20 * 60
 
 STATUS_PATH = "/v1/day-trade/research/dataset/v1/status"
 RUN_PATH = "/v1/day-trade/research/dataset/v1/run-batch"
 REPORT_PATH = "/v1/day-trade/research/dataset/v1/report"
+
 
 def request_json(path: str, *, method: str = "GET") -> dict:
     if not BASE or not KEY:
@@ -28,9 +29,11 @@ def request_json(path: str, *, method: str = "GET") -> dict:
         body = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"Research dataset API HTTP {exc.code} {path}: {body[:1200]}") from exc
 
+
 def terminal_count(status: dict) -> int:
     job = status.get("job") or {}
     return int(job.get("completed_symbols") or 0) + int(job.get("failed_symbols") or 0)
+
 
 def compact_status(status: dict) -> str:
     job = status.get("job") or {}
@@ -39,6 +42,22 @@ def compact_status(status: dict) -> str:
         f"failed={job.get('failed_symbols')} total={job.get('total_symbols')} "
         f"events={job.get('total_events')} progress={status.get('progress_pct')}"
     )
+
+
+def assert_complete(status: dict) -> None:
+    job = status.get("job") or {}
+    total = int(job.get("total_symbols") or 0)
+    completed = int(job.get("completed_symbols") or 0)
+    failed = int(job.get("failed_symbols") or 0)
+    state = str(job.get("status") or "")
+    if not total:
+        raise RuntimeError("Research dataset did not expose a non-zero total symbol count")
+    if state != "COMPLETED" or completed != total or failed != 0:
+        raise RuntimeError(
+            "Research dataset incomplete: "
+            f"status={state} completed={completed} failed={failed} total={total}"
+        )
+
 
 def main() -> int:
     status = request_json(STATUS_PATH)
@@ -65,23 +84,24 @@ def main() -> int:
 
     status = request_json(STATUS_PATH)
     print("FINAL_STATUS=" + json.dumps(status, sort_keys=True, default=str))
-    job = status.get("job") or {}
-    if job.get("status") in {"COMPLETED", "PARTIAL"}:
-        report = request_json(REPORT_PATH)
-        print("RESEARCH_DATASET_REPORT=" + json.dumps(report, sort_keys=True, default=str))
-        counts = report.get("counts") or {}
-        discovery = ((report.get("baseline") or {}).get("discovery") or {})
-        validation = ((report.get("baseline") or {}).get("validation") or {})
-        print(
-            "RESEARCH_DATASET_SUMMARY "
-            f"materialized={counts.get('materialized_opportunities')} "
-            f"evaluable={counts.get('outcome_evaluable')} "
-            f"discovery={counts.get('discovery_evaluable')} "
-            f"validation={counts.get('validation_evaluable')} "
-            f"discovery_avg_r={discovery.get('average_net_r')} discovery_pf={discovery.get('profit_factor')} "
-            f"validation_avg_r={validation.get('average_net_r')} validation_pf={validation.get('profit_factor')}"
-        )
+    assert_complete(status)
+
+    report = request_json(REPORT_PATH)
+    print("RESEARCH_DATASET_REPORT=" + json.dumps(report, sort_keys=True, default=str))
+    counts = report.get("counts") or {}
+    discovery = ((report.get("baseline") or {}).get("discovery") or {})
+    validation = ((report.get("baseline") or {}).get("validation") or {})
+    print(
+        "RESEARCH_DATASET_SUMMARY "
+        f"materialized={counts.get('materialized_opportunities')} "
+        f"evaluable={counts.get('outcome_evaluable')} "
+        f"discovery={counts.get('discovery_evaluable')} "
+        f"validation={counts.get('validation_evaluable')} "
+        f"discovery_avg_r={discovery.get('average_net_r')} discovery_pf={discovery.get('profit_factor')} "
+        f"validation_avg_r={validation.get('average_net_r')} validation_pf={validation.get('profit_factor')}"
+    )
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
