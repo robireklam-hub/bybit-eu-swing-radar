@@ -4,6 +4,8 @@ Status: research knowledge base; not production strategy specification.
 
 Last updated: 2026-08-16
 
+Repository cleanup companion: `docs/research/REPOSITORY_CLEANUP_AUDIT.md`.
+
 ## Purpose
 
 This file preserves the evidence gathered before designing the next Bybit EU Trading Radar strategy family. It separates empirical evidence, practitioner-derived hypotheses, project measurements, and unverified ideas so that future implementation does not drift into narrative-driven or repeated threshold tuning.
