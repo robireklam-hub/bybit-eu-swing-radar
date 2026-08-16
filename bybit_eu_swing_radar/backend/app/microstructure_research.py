@@ -12,6 +12,7 @@ from typing import Any, Callable
 from fastapi import Depends, FastAPI
 
 from research.microstructure.collector import MicrostructureConfig, MicrostructureRecorder
+from research.microstructure.readiness import get_readiness
 
 logger = logging.getLogger(__name__)
 
@@ -109,3 +110,30 @@ def attach_microstructure_research(
             payload["start_error"] = str(exc)[:1000]
             return payload
         return microstructure_status()
+
+    @app.get(
+        "/v1/research/microstructure/readiness",
+        dependencies=[Depends(require_api_key)],
+    )
+    async def readiness() -> dict[str, Any]:
+        """Measure forward dataset quality without testing or tuning an edge."""
+        try:
+            _ensure_task_started()
+            await asyncio.sleep(0)
+            recorder = _ensure_recorder()
+            return await get_readiness(
+                recorder.config.database_url,
+                recorder.config.symbols,
+                recorder.config.bucket_seconds,
+            )
+        except Exception as exc:
+            logger.exception("microstructure readiness query failed")
+            return {
+                "research_only": True,
+                "live_strategy_mutated": False,
+                "gate_version": "microstructure-readiness-v1",
+                "ready_for_forward_feature_analysis": False,
+                "promotion_allowed": False,
+                "error_type": type(exc).__name__,
+                "error": str(exc)[:1000],
+            }
