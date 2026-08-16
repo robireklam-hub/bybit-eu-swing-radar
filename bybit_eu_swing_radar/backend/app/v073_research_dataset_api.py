@@ -19,6 +19,7 @@ from research_dataset_v1 import (
     build_profile_report,
     run_dataset_batch,
 )
+from research_gate_family_v1 import build_gate_family_report
 from research_interactions_v1 import build_interaction_report
 
 logger = logging.getLogger(__name__)
@@ -135,7 +136,9 @@ async def dataset_report_payload() -> dict[str, Any]:
                    volume_ratio_5m,turnover_24h_usdc,modeled_spread_bps,
                    expansion_score,side_direction_score,quality_score,
                    setup_score,expected_rr,btc_volatility_regime,
-                   btc_structure_1h,btc_structure_4h,timeframe_conflict
+                   btc_structure_1h,btc_structure_4h,timeframe_conflict,
+                   pass_volume_confirmation,pass_structure_15m,
+                   pass_target_path,pass_rr
             FROM day_trade_diagnostic_events
             WHERE job_id=$1 AND candidate_built AND pass_structure_5m
             ORDER BY opened_at,id
@@ -152,6 +155,11 @@ async def dataset_report_payload() -> dict[str, Any]:
         start_at=job["start_at"],
         development_end_at=job["development_end_at"],
     )
+    gate_family_report = build_gate_family_report(
+        materialized_rows,
+        start_at=job["start_at"],
+        development_end_at=job["development_end_at"],
+    )
     job["parameters"] = _json_value(job.get("parameters"), {})
     job["universe"] = _json_value(job.get("universe"), [])
     job["warnings"] = _json_value(job.get("warnings"), [])
@@ -160,6 +168,7 @@ async def dataset_report_payload() -> dict[str, Any]:
         "job": job,
         **report,
         "interaction_analysis": interaction_report,
+        "gate_family_analysis": gate_family_report,
     }
 
 def attach_v073_research_dataset_routes(
