@@ -1,6 +1,6 @@
 """Bybit EU spot microstructure collection and feature engineering."""
 
-from .recorder import (
+from .collector import (
     MicrostructureConfig,
     MicrostructureRecorder,
     OrderBookState,
