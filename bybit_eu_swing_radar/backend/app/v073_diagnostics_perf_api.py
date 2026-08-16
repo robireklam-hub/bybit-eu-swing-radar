@@ -6,6 +6,7 @@ from typing import Any, Callable
 from fastapi import Depends, FastAPI
 
 from app.v073_research_dataset_api import attach_v073_research_dataset_routes
+from app.v073_research_entry_v4_api import attach_v073_research_entry_v4_routes
 from app.v073_research_flow_v2_api import attach_v073_research_flow_v2_routes
 from app.v073_research_premium_v3_api import attach_v073_research_premium_v3_routes
 from app.v073_sensitivity_api import attach_v073_sensitivity_routes
@@ -53,3 +54,7 @@ def attach_v073_diagnostic_perf_routes(
     # Attach historical premium-index microstructure research. Premium remains
     # derivatives context only and cannot change live eligibility/execution.
     attach_v073_research_premium_v3_routes(app, require_api_key)
+
+    # Attach the entry-architecture pivot replay. It changes only hypothetical
+    # research entries after confirmation; live day_worker remains untouched.
+    attach_v073_research_entry_v4_routes(app, require_api_key)
