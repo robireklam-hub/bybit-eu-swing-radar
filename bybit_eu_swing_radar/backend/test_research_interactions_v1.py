@@ -19,13 +19,14 @@ def test_interaction_selection_uses_discovery_only_and_freezes_validation():
     development_end = start + timedelta(days=120)
     rows = []
 
-    # Discovery: high expansion + EXPANDING BTC is the strongest rule.
-    for i in range(400):
-        expansion = 90.0 if i >= 300 else 20.0 + (i % 50)
-        regime = "EXPANDING" if i >= 300 else "NORMAL"
+    # Discovery: provide enough rows that the discovery-only upper quartile
+    # can satisfy the production MIN_DISCOVERY_N guard without weakening it.
+    for i in range(800):
+        expansion = 90.0 if i >= 600 else 20.0 + (i % 50)
+        regime = "EXPANDING" if i >= 600 else "NORMAL"
         bars = 3 if i % 2 == 0 else 4
-        net = 1.2 if i >= 300 else -0.4
-        rows.append(_row("DEVELOPMENT", start + timedelta(hours=6 * i), expansion, regime, bars, net))
+        net = 1.2 if i >= 600 else -0.4
+        rows.append(_row("DEVELOPMENT", start + timedelta(hours=3 * i), expansion, regime, bars, net))
 
     # Validation values are intentionally extreme and cannot affect discovery selection.
     for i in range(120):
