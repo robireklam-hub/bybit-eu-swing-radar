@@ -30,11 +30,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Capture label-blind swing liquidity snapshot
+      - name: Capture and durably persist label-blind swing liquidity snapshot
         working-directory: bybit_eu_swing_radar/backend
         run: python research/swing_liquidity_shadow.py
 
       - name: Upload immutable forward snapshot
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: swing-liquidity-shadow-${{ github.run_id }}

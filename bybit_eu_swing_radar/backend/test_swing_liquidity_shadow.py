@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from research import swing_liquidity_shadow as shadow
 from research.swing_liquidity_shadow import (
     book_cost_metrics,
     dedupe_candidates,
+    persist_snapshot,
     spread_tier,
     turnover_tier,
 )
@@ -80,3 +82,39 @@ def test_scan_dedup_preserves_liquidity_blocked_candidate_when_no_executable_set
     assert item["turnover_tier"] == "50K_100K"
     assert item["spread_tier"] == "10_20"
     assert item["current_tradeable"] is False
+
+
+def test_persist_snapshot_requires_research_only_fail_closed_response(monkeypatch):
+    snapshot = {"candidate_count": 2}
+
+    def good_post(url, payload, headers, timeout=30.0):
+        assert url.endswith("/v1/research/swing-liquidity/forward-snapshot")
+        assert headers["X-Radar-Key"] == "secret"
+        assert payload is snapshot
+        return {
+            "research_only": True,
+            "live_strategy_mutated": False,
+            "promotion_allowed": False,
+            "candidate_count": 2,
+            "inserted": True,
+        }
+
+    monkeypatch.setattr(shadow, "_post_json", good_post)
+    assert persist_snapshot("https://example.test", "secret", snapshot)["inserted"] is True
+
+    monkeypatch.setattr(
+        shadow,
+        "_post_json",
+        lambda *args, **kwargs: {
+            "research_only": True,
+            "live_strategy_mutated": False,
+            "promotion_allowed": True,
+            "candidate_count": 2,
+        },
+    )
+    try:
+        persist_snapshot("https://example.test", "secret", snapshot)
+    except RuntimeError as exc:
+        assert "unexpectedly allows promotion" in str(exc)
+    else:
+        raise AssertionError("promotion_allowed=true must fail closed")
