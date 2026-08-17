@@ -8,6 +8,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from app.config import settings
 from app.providers.bybit import BybitClient
 from app.repository import RadarRepository
+from app.swing_candidate_context import attach_swing_candidate_derivatives
 from backtest import BACKTEST_JOB_NAME, STRATEGY_VERSION, run_backtest_batch
 
 app = FastAPI(
@@ -88,14 +89,15 @@ async def top_candidates(
     limit: int = Query(3, ge=1, le=5),
     include_watchlist: bool = Query(True),
 ):
-    """Return a compact strict long/short ranking without oversized scan payloads."""
+    """Return compact swing rankings plus context-only candidate derivatives."""
     result = await repo.get_top_candidates(limit, include_watchlist)
     if result is None:
         raise HTTPException(
             status_code=503,
             detail="No fresh cached scan. Run and populate the background scanner first.",
         )
-    return result
+    scan_payload = await repo.get_cache("latest_scan")
+    return attach_swing_candidate_derivatives(result, scan_payload)
 
 
 @app.get("/v1/market-regime", dependencies=[Depends(require_api_key)])
