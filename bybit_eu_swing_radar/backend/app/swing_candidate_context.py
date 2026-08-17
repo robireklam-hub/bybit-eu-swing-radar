@@ -13,17 +13,19 @@ CANDIDATE_SECTIONS = (
 )
 
 
-def _derivatives_status(payload: dict[str, Any]) -> str:
+def _derivatives_status(payload: dict[str, Any]) -> tuple[str, str]:
     if not payload:
-        return "UNAVAILABLE"
+        return "UNAVAILABLE", "No Coinalyze derivatives payload is cached for this candidate."
     availability = payload.get("availability")
     endpoint_errors = payload.get("endpoint_errors")
     if endpoint_errors:
-        return "PARTIAL"
+        labels = ", ".join(str(value).split(":", 1)[0] for value in endpoint_errors)
+        return "PARTIAL", f"One or more Coinalyze endpoints failed: {labels}."
     if isinstance(availability, dict) and availability:
-        if not all(bool(value) for value in availability.values()):
-            return "PARTIAL"
-    return "GOOD"
+        missing = sorted(str(key) for key, value in availability.items() if not bool(value))
+        if missing:
+            return "PARTIAL", "Coinalyze payload is missing: " + ", ".join(missing) + "."
+    return "GOOD", "All requested Coinalyze derivatives endpoints are available for this candidate."
 
 
 def attach_swing_candidate_derivatives(
@@ -69,8 +71,17 @@ def attach_swing_candidate_derivatives(
                 if setup is not None
                 else {}
             )
+            status, reason = _derivatives_status(derivatives)
+            if not derivatives and setup is not None:
+                relevant = [
+                    str(value) for value in (setup.missing_data or [])
+                    if "Coinalyze" in str(value) or "derivative" in str(value).lower()
+                ]
+                if relevant:
+                    reason = "; ".join(relevant)
             item["derivatives"] = derivatives
-            item["derivatives_status"] = _derivatives_status(derivatives)
+            item["derivatives_status"] = status
+            item["derivatives_status_reason"] = reason
             item["derivatives_data_as_of"] = (
                 setup.data_as_of.isoformat() if setup is not None and derivatives else None
             )
