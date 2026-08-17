@@ -5,93 +5,91 @@ from datetime import datetime, timezone
 import pytest
 
 import worker
-from worker import (
-    Analysis,
-    Instrument,
-    apply_shortability,
-    build_market_regime,
-    build_setup,
-    build_watch_setup,
-    enrich_coinalyze,
-)
+from worker import Analysis, Bar, Instrument, build_market_regime, enrich_coinalyze
 
 
-def make_analysis(symbol: str = "TESTUSDC") -> Analysis:
+def make_analysis(symbol: str = "BTCUSDC") -> Analysis:
     base = symbol.removesuffix("USDC")
     instrument = Instrument(
         symbol=symbol,
         base=base,
         quote="USDC",
-        margin_trading="both",
-        tick_size=0.01,
-        turnover_24h=10_000_000.0,
-        volume_24h=1_000_000.0,
+        margin_trading="utaOnly",
+        tick_size=0.1,
+        turnover_24h=1_000_000.0,
+        volume_24h=1_000.0,
         last_price=100.0,
-        bid=99.99,
-        ask=100.01,
-        spread_bps=2.0,
-        price_change_24h_pct=1.0,
+        bid=99.9,
+        ask=100.1,
+        spread_bps=20.0,
+        price_change_24h_pct=0.0,
         tradeable=True,
         liquidity_reasons=[],
-        discovery_source="market",
+        discovery_source="mandatory",
     )
-    bars = [
-        worker.Bar(
-            start_ms=1_700_000_000_000 + i * 14_400_000,
-            open=90.0 + i * 0.1,
-            high=91.0 + i * 0.1,
-            low=89.0 + i * 0.1,
-            close=90.5 + i * 0.1,
-            volume=1000.0,
-            turnover=100_000.0,
-        )
-        for i in range(100)
-    ]
+    bar = Bar(
+        start_ms=0,
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.0,
+        volume=100.0,
+        turnover=10_000.0,
+    )
     return Analysis(
         instrument=instrument,
-        bars_1h=bars,
-        bars_4h=bars,
-        bars_1d=bars,
+        bars_1h=[bar] * 100,
+        bars_4h=[bar] * 100,
+        bars_1d=[bar] * 100,
         atr_4h=2.0,
-        ema20_4h=98.0,
-        ema50_4h=95.0,
-        ema20_1d=97.0,
-        ema50_1d=94.0,
-        range_high=101.0,
+        ema20_4h=101.0,
+        ema50_4h=102.0,
+        ema20_1d=101.0,
+        ema50_1d=102.0,
+        range_high=110.0,
         range_low=90.0,
-        recent_high=100.0,
-        recent_low=94.0,
+        recent_high=105.0,
+        recent_low=95.0,
         volume_ratio=1.2,
-        bb_width_percentile=20.0,
-        atr_ratio=0.9,
-        expansion_score=70.0,
-        direction_score=60.0,
-        quality_score=75.0,
-        relative_strength_4h=2.0,
-        structure_4h="bullish HH/HL-compatible",
-        structure_1d="bullish HH/HL-compatible",
+        bb_width_percentile=30.0,
+        atr_ratio=1.0,
+        expansion_score=54.0,
+        direction_score=-50.0,
+        quality_score=80.0,
+        relative_strength_4h=-2.0,
+        structure_4h="bearish LH/LL-compatible",
+        structure_1d="bearish LH/LL-compatible",
         derivatives={},
         missing_data=[],
+        shortable=True,
+        max_borrowing_amount=10.0,
     )
 
 
 class FakeCoinalyze:
+    def __init__(self, fail_endpoint: str | None = None) -> None:
+        self.fail_endpoint = fail_endpoint
+        self.calls: list[str] = []
+
     async def future_markets(self):
         return [
             {
-                "symbol": "TESTUSDT_PERP.A",
-                "base_asset": "TEST",
-                "quote_asset": "USDT",
+                "symbol": "BTCUSDT_PERP.A",
                 "exchange": "Binance",
+                "base_asset": "BTC",
+                "quote_asset": "USDT",
                 "is_perpetual": True,
             }
         ]
 
     async def batch_current(self, endpoint, symbols, convert_to_usd=False):
+        self.calls.append(endpoint)
+        if endpoint == self.fail_endpoint:
+            raise RuntimeError(f"forced {endpoint} failure")
         if endpoint == "/open-interest":
-            return [{"symbol": symbols[0], "value": 1_000_000.0}]
+            return [{"symbol": symbols[0], "value": 1_250_000.0}]
         if endpoint == "/funding-rate":
-            return [{"symbol": symbols[0], "value": 0.0001}]
+            return [{"symbol": symbols[0], "value": 0.0015}]
         raise AssertionError(endpoint)
 
     async def batch_history(
@@ -103,9 +101,12 @@ class FakeCoinalyze:
         convert_to_usd=False,
         interval="4hour",
     ):
+        self.calls.append(endpoint)
+        if endpoint == self.fail_endpoint:
+            raise RuntimeError(f"forced {endpoint} failure")
         if endpoint == "/open-interest-history":
             history = [
-                {"c": 900_000.0 + i * 5_000.0}
+                {"t": i, "c": 1_000_000.0 + i * 10_000.0}
                 for i in range(30)
             ]
             return [{"symbol": symbols[0], "history": history}]
@@ -113,39 +114,20 @@ class FakeCoinalyze:
             return [
                 {
                     "symbol": symbols[0],
-                    "history": [{"l": 1000.0, "s": 1200.0} for _ in range(6)],
+                    "history": [
+                        {"t": i, "l": 10_000.0, "s": 5_000.0}
+                        for i in range(6)
+                    ],
                 }
             ]
         raise AssertionError(endpoint)
 
 
-class PartialFakeCoinalyze(FakeCoinalyze):
-    async def batch_current(self, endpoint, symbols, convert_to_usd=False):
-        if endpoint == "/funding-rate":
-            raise RuntimeError("funding temporarily unavailable")
-        return await super().batch_current(endpoint, symbols, convert_to_usd)
-
-
-class FailedFakeCoinalyze(FakeCoinalyze):
-    async def batch_current(self, endpoint, symbols, convert_to_usd=False):
-        raise RuntimeError("all current endpoints unavailable")
-
-    async def batch_history(
-        self,
-        endpoint,
-        symbols,
-        from_ts,
-        to_ts,
-        convert_to_usd=False,
-        interval="4hour",
-    ):
-        raise RuntimeError("all history endpoints unavailable")
-
-
 @pytest.mark.asyncio
-async def test_swing_enrichment_does_not_mutate_strict_scores(monkeypatch):
+async def test_context_only_enrichment_never_mutates_swing_core_scores(monkeypatch):
     monkeypatch.setattr(worker, "COINALYZE_API_KEY", "test-key")
     analysis = make_analysis()
+    api = FakeCoinalyze()
     before = (
         analysis.expansion_score,
         analysis.direction_score,
@@ -154,108 +136,36 @@ async def test_swing_enrichment_does_not_mutate_strict_scores(monkeypatch):
 
     ok, error = await enrich_coinalyze(
         [analysis],
-        FakeCoinalyze(),
+        api,
         mutate_scores=False,
         partial_safe=True,
     )
 
     assert ok is True
     assert error is None
-    assert analysis.derivatives["strict_score_mutation_applied"] is False
     assert (
         analysis.expansion_score,
         analysis.direction_score,
         analysis.quality_score,
     ) == before
-
-
-@pytest.mark.asyncio
-async def test_swing_partial_enrichment_retains_available_context(monkeypatch):
-    monkeypatch.setattr(worker, "COINALYZE_API_KEY", "test-key")
-    analysis = make_analysis()
-
-    ok, error = await enrich_coinalyze(
-        [analysis],
-        PartialFakeCoinalyze(),
-        mutate_scores=False,
-        partial_safe=True,
-    )
-
-    assert ok is False
-    assert "funding-rate" in (error or "")
-    assert analysis.derivatives["open_interest_usd"] == 1_000_000.0
-    assert analysis.derivatives["funding_rate"] is None
-    assert analysis.derivatives["availability"]["current_oi"] is True
-    assert analysis.derivatives["availability"]["funding"] is False
     assert analysis.derivatives["strict_score_mutation_applied"] is False
-    assert "Coinalyze derivatives context partial" in analysis.missing_data
+    adjustments = analysis.derivatives["context_score_adjustments"]
+    assert adjustments["expansion"] != 0.0
+    assert adjustments["direction"] != 0.0
+    assert adjustments["quality"] != 0.0
+    assert api.calls == [
+        "/open-interest",
+        "/funding-rate",
+        "/open-interest-history",
+        "/liquidation-history",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_shortability_requires_public_borrowability_and_pair_margin():
-    analyses = [make_analysis("TESTUSDC"), make_analysis("NOMARGINUSDC")]
-    analyses[1].instrument.margin_trading = "none"
-
-    class FakeBybit:
-        async def vip_margin_data(self):
-            return {
-                "TEST": {"borrowable": True, "maxBorrowingAmount": "25"},
-                "NOMARGIN": {"borrowable": True, "maxBorrowingAmount": "25"},
-            }
-
-    ok, error = await apply_shortability(analyses, FakeBybit())
-    assert ok is True
-    assert error is None
-    assert analyses[0].shortable is True
-    assert analyses[0].max_borrowing_amount == 25.0
-    assert analyses[1].shortable is False
-
-
-def test_swing_derivatives_context_cannot_change_setup_scores():
-    analysis = make_analysis()
-    analysis.shortable = True
-    now = datetime.now(timezone.utc)
-    before = build_setup(analysis, "long", now)
-    assert before is not None
-
-    analysis.derivatives = {
-        "source": "Coinalyze",
-        "funding_rate": 0.5,
-        "oi_change_24h_pct": -99.0,
-        "strict_score_mutation_applied": False,
-        "context_score_adjustments": {
-            "expansion": 999.0,
-            "direction": -999.0,
-            "quality": 999.0,
-        },
-    }
-    after = build_setup(analysis, "long", now)
-    assert after is not None
-    assert after["expansion_score"] == before["expansion_score"]
-    assert after["direction_score"] == before["direction_score"]
-    assert after["quality_score"] == before["quality_score"]
-    assert after["setup_score"] == before["setup_score"]
-
-
-def test_watch_setup_exposes_derivatives_without_changing_watch_score():
-    analysis = make_analysis()
-    now = datetime.now(timezone.utc)
-    before = build_watch_setup(analysis, now)
-    analysis.derivatives = {
-        "source": "Coinalyze",
-        "funding_rate": -0.01,
-        "strict_score_mutation_applied": False,
-    }
-    after = build_watch_setup(analysis, now)
-    assert after["setup_score"] == before["setup_score"]
-    assert after["metrics"]["derivatives"]["source"] == "Coinalyze"
-
-
-@pytest.mark.asyncio
-async def test_failed_context_never_blocks_core_swing_setup(monkeypatch):
+async def test_partial_endpoint_failure_preserves_available_context(monkeypatch):
     monkeypatch.setattr(worker, "COINALYZE_API_KEY", "test-key")
     analysis = make_analysis()
-    analysis.shortable = True
+    api = FakeCoinalyze(fail_endpoint="/funding-rate")
     before = (
         analysis.expansion_score,
         analysis.direction_score,
@@ -264,17 +174,74 @@ async def test_failed_context_never_blocks_core_swing_setup(monkeypatch):
 
     ok, error = await enrich_coinalyze(
         [analysis],
-        FailedFakeCoinalyze(),
+        api,
         mutate_scores=False,
         partial_safe=True,
     )
 
     assert ok is False
-    assert error
-    assert not analysis.derivatives
-    setup = build_setup(analysis, "long", datetime.now(timezone.utc))
-    assert setup is not None
-    assert setup["data_quality"] == "PARTIAL"
+    assert error is not None
+    assert "funding-rate" in error
+    assert analysis.derivatives
+    assert analysis.derivatives["open_interest_usd"] == 1_250_000.0
+    assert analysis.derivatives["funding_rate"] is None
+    assert analysis.derivatives["availability"]["current_oi"] is True
+    assert analysis.derivatives["availability"]["funding"] is False
+    assert analysis.derivatives["availability"]["oi_history"] is True
+    assert analysis.derivatives["availability"]["liquidations"] is True
+    assert "Coinalyze derivatives context partial" in analysis.missing_data
+    assert (
+        analysis.expansion_score,
+        analysis.direction_score,
+        analysis.quality_score,
+    ) == before
+    assert api.calls == [
+        "/open-interest",
+        "/funding-rate",
+        "/open-interest-history",
+        "/liquidation-history",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_default_enrichment_mode_keeps_day_worker_score_behavior(monkeypatch):
+    monkeypatch.setattr(worker, "COINALYZE_API_KEY", "test-key")
+    analysis = make_analysis()
+    api = FakeCoinalyze()
+    before = (
+        analysis.expansion_score,
+        analysis.direction_score,
+        analysis.quality_score,
+    )
+
+    ok, error = await enrich_coinalyze([analysis], api)
+
+    assert ok is True
+    assert error is None
+    assert analysis.derivatives["strict_score_mutation_applied"] is True
+    assert (
+        analysis.expansion_score,
+        analysis.direction_score,
+        analysis.quality_score,
+    ) != before
+
+
+@pytest.mark.asyncio
+async def test_default_day_mode_keeps_all_or_nothing_failure(monkeypatch):
+    monkeypatch.setattr(worker, "COINALYZE_API_KEY", "test-key")
+    analysis = make_analysis()
+    api = FakeCoinalyze(fail_endpoint="/funding-rate")
+    before = (
+        analysis.expansion_score,
+        analysis.direction_score,
+        analysis.quality_score,
+    )
+
+    ok, error = await enrich_coinalyze([analysis], api)
+
+    assert ok is False
+    assert error is not None
+    assert analysis.derivatives == {}
     assert "Coinalyze enrichment failed" in analysis.missing_data
     assert (
         analysis.expansion_score,
