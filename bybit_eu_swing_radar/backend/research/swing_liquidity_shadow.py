@@ -2,8 +2,9 @@
 """Prospective, label-blind swing liquidity snapshot collector.
 
 Research only. Reads the production swing scan and contemporaneous Bybit EU L50
-spot order books, then writes a JSON artifact. It never changes swing scores,
-eligibility, tradeability, shortability, orders, positions, or production state.
+spot order books, writes an immutable JSON artifact, and persists compact
+label-blind observations through the research-only API. It never changes swing
+scores, eligibility, tradeability, shortability, orders, positions, or live state.
 """
 from __future__ import annotations
 
@@ -13,7 +14,6 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 NOTIONALS_USDC = (100.0, 250.0, 500.0, 1000.0)
@@ -212,6 +212,36 @@ def _get_json(url: str, headers: dict[str, str] | None = None, timeout: float = 
     return payload
 
 
+def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str], timeout: float = 30.0) -> dict[str, Any]:
+    request_headers = {"Accept": "application/json", "Content-Type": "application/json", **headers}
+    request = Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+        headers=request_headers,
+        method="POST",
+    )
+    with urlopen(request, timeout=timeout) as response:
+        result = json.load(response)
+    if not isinstance(result, dict):
+        raise RuntimeError("JSON response is not an object")
+    return result
+
+
+def persist_snapshot(base_url: str, api_key: str, snapshot: dict[str, Any]) -> dict[str, Any]:
+    result = _post_json(
+        f"{base_url.rstrip('/')}/v1/research/swing-liquidity/forward-snapshot",
+        snapshot,
+        {"X-Radar-Key": api_key, "User-Agent": "swing-liquidity-shadow/3"},
+    )
+    if result.get("research_only") is not True or result.get("live_strategy_mutated") is not False:
+        raise RuntimeError("forward snapshot persistence invariant failed")
+    if result.get("promotion_allowed") is not False:
+        raise RuntimeError("forward snapshot persistence unexpectedly allows promotion")
+    if int(result.get("candidate_count") or -1) != int(snapshot.get("candidate_count") or 0):
+        raise RuntimeError("forward snapshot persistence candidate count mismatch")
+    return result
+
+
 def collect_snapshot(base_url: str, api_key: str, bybit_base_url: str = "https://api.bybit.eu") -> dict[str, Any]:
     captured_at = datetime.now(timezone.utc).isoformat()
     scan = _get_json(
@@ -295,6 +325,7 @@ def main() -> int:
         raise SystemExit("required production API configuration is missing")
     snapshot = collect_snapshot(base_url, api_key, bybit_base)
     output.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2, sort_keys=True))
+    persisted = persist_snapshot(base_url, api_key, snapshot)
     safe = {
         "captured_at": snapshot["captured_at"],
         "scan_data_as_of": snapshot["scan_data_as_of"],
@@ -303,6 +334,7 @@ def main() -> int:
         "orderbook_error_count": len(snapshot["orderbook_errors"]),
         "turnover_tiers": sorted({item["turnover_tier"] for item in snapshot["candidates"]}),
         "spread_tiers": sorted({item["spread_tier"] for item in snapshot["candidates"]}),
+        "durable_inserted": persisted.get("inserted"),
     }
     print("SWING_LIQUIDITY_SHADOW_CAPTURED=" + json.dumps(safe, sort_keys=True))
     return 0
