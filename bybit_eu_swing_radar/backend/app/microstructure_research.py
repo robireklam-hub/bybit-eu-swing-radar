@@ -10,6 +10,7 @@ import logging
 from datetime import datetime
 from typing import Any, Callable, Iterable, Mapping
 
+import asyncpg
 from fastapi import Depends, FastAPI
 
 from research.microstructure.alignment import (
@@ -97,15 +98,113 @@ def _parse_dt(value: Any) -> datetime:
     return parsed
 
 
+async def _load_journal_signal_counts(
+    database_url: str,
+    symbols: Iterable[str],
+    since: datetime,
+    until: datetime,
+) -> dict[str, int]:
+    """Count forward journal signals without reading any post-signal labels."""
+    if not database_url:
+        raise RuntimeError("DATABASE_URL is not configured")
+    wanted = tuple(dict.fromkeys(str(symbol).upper() for symbol in symbols))
+    counts = {symbol: 0 for symbol in wanted}
+    connection = await asyncpg.connect(database_url)
+    try:
+        rows = await connection.fetch(
+            """
+            SELECT symbol, COUNT(*)::bigint AS signal_count
+            FROM day_trade_signal_journal
+            WHERE symbol = ANY($1::text[])
+              AND opened_at >= $2
+              AND opened_at < $3
+            GROUP BY symbol
+            ORDER BY symbol
+            """,
+            list(wanted),
+            since,
+            until,
+        )
+    finally:
+        await connection.close()
+    for row in rows:
+        symbol = str(row["symbol"]).upper()
+        if symbol in counts:
+            counts[symbol] = int(row["signal_count"] or 0)
+    return counts
+
+
+def build_alignment_coverage(
+    features: Iterable[Mapping[str, Any]],
+    symbols: Iterable[str],
+    journal_signal_counts: Mapping[str, int],
+) -> dict[str, Any]:
+    """Explain whether zero/partial alignment comes from signals or coverage."""
+    rows = list(features)
+    wanted = list(dict.fromkeys(str(symbol).upper() for symbol in symbols))
+    aligned_counts = {symbol: 0 for symbol in wanted}
+    for row in rows:
+        symbol = str(row.get("symbol") or "").upper()
+        if symbol in aligned_counts:
+            aligned_counts[symbol] += 1
+
+    normalized_journal = {
+        symbol: max(0, int(journal_signal_counts.get(symbol, 0) or 0))
+        for symbol in wanted
+    }
+    per_symbol: dict[str, dict[str, int]] = {}
+    count_inconsistency = False
+    for symbol in wanted:
+        journal_count = normalized_journal[symbol]
+        aligned_count = aligned_counts[symbol]
+        if aligned_count > journal_count:
+            count_inconsistency = True
+        per_symbol[symbol] = {
+            "journal_signals": journal_count,
+            "aligned_signals": aligned_count,
+            "unaligned_signals": max(0, journal_count - aligned_count),
+        }
+
+    journal_total = sum(item["journal_signals"] for item in per_symbol.values())
+    aligned_total = sum(item["aligned_signals"] for item in per_symbol.values())
+    unaligned_total = sum(item["unaligned_signals"] for item in per_symbol.values())
+
+    if count_inconsistency:
+        status = "COUNT_INCONSISTENCY"
+        reason = "aligned_signals_exceed_journal_signals"
+    elif journal_total == 0:
+        status = "WAITING_FOR_FORWARD_SIGNALS"
+        reason = "waiting_for_forward_signals"
+    elif unaligned_total > 0:
+        status = "COVERAGE_FAILURE"
+        reason = "alignment_coverage_failure"
+    else:
+        status = "ALIGNED"
+        reason = "all_forward_signals_aligned"
+
+    return {
+        "status": status,
+        "reason": reason,
+        "journal_signal_count": journal_total,
+        "aligned_signal_count": aligned_total,
+        "unaligned_signal_count": unaligned_total,
+        "per_symbol": per_symbol,
+    }
+
+
 def build_alignment_status(
     readiness_payload: Mapping[str, Any],
     features: Iterable[Mapping[str, Any]],
     symbols: Iterable[str],
+    journal_signal_counts: Mapping[str, int],
 ) -> dict[str, Any]:
-    """Combine preregistered data-quality and sample gates without labels."""
+    """Combine preregistered data-quality, coverage and sample gates without labels."""
     wanted = list(dict.fromkeys(str(symbol).upper() for symbol in symbols))
-    sample = sample_readiness(features, wanted)
+    rows = list(features)
+    sample = sample_readiness(rows, wanted)
+    coverage = build_alignment_coverage(rows, wanted, journal_signal_counts)
     data_quality_ready = readiness_payload.get("ready_for_forward_feature_analysis") is True
+    alignment_coverage_ready = coverage["status"] == "ALIGNED"
     return {
         "research_only": True,
         "live_strategy_mutated": False,
@@ -114,9 +213,13 @@ def build_alignment_status(
         "promotion_allowed": False,
         "spec": alignment_spec(),
         "data_quality_ready": data_quality_ready,
+        "alignment_coverage_ready": alignment_coverage_ready,
+        "alignment_coverage": coverage,
         "sample": sample,
         "ready_for_preregistered_effect_test": (
-            data_quality_ready and sample["ready_for_preregistered_effect_test"]
+            data_quality_ready
+            and alignment_coverage_ready
+            and sample["ready_for_preregistered_effect_test"]
         ),
     }
 
@@ -192,11 +295,13 @@ def attach_microstructure_research(
                 recorder.config.symbols,
                 recorder.config.bucket_seconds,
             )
+            empty_counts = {symbol: 0 for symbol in recorder.config.symbols}
             if readiness_payload.get("ready_for_forward_feature_analysis") is not True:
                 return build_alignment_status(
                     readiness_payload,
                     [],
                     recorder.config.symbols,
+                    empty_counts,
                 )
 
             readiness_symbols = readiness_payload.get("symbols") or []
@@ -209,17 +314,26 @@ def attach_microstructure_research(
                 raise ValueError("readiness first_bucket_at coverage is incomplete")
             since = max(_parse_dt(value) for value in first_bucket_values)
             until = _parse_dt(readiness_payload.get("checked_at"))
-            features = await load_feature_rows(
-                recorder.config.database_url,
-                recorder.config.symbols,
-                since,
-                until,
-                bucket_seconds=recorder.config.bucket_seconds,
+            features, journal_signal_counts = await asyncio.gather(
+                load_feature_rows(
+                    recorder.config.database_url,
+                    recorder.config.symbols,
+                    since,
+                    until,
+                    bucket_seconds=recorder.config.bucket_seconds,
+                ),
+                _load_journal_signal_counts(
+                    recorder.config.database_url,
+                    recorder.config.symbols,
+                    since,
+                    until,
+                ),
             )
             payload = build_alignment_status(
                 readiness_payload,
                 features,
                 recorder.config.symbols,
+                journal_signal_counts,
             )
             payload["interval"] = {
                 "since": since.isoformat(),
