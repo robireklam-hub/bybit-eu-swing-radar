@@ -14,7 +14,6 @@ concurrency:
 
 jobs:
   patch:
-    if: ${{ hashFiles('scripts/apply_swing_coverage_wording_patch.py') != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
