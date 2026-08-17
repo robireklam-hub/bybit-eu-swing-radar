@@ -399,3 +399,9 @@ from app.v073_diagnostics_perf_api import attach_v073_diagnostic_perf_routes
 
 attach_v073_diagnostic_routes(app, require_api_key)
 attach_v073_diagnostic_perf_routes(app, require_api_key)
+
+# Research-only Bybit EU order-book proxy used by the prospective swing liquidity
+# shadow collector. It has no strategy/scoring/execution mutation path.
+from app.research_swing_liquidity_api import attach_research_swing_liquidity_routes
+
+attach_research_swing_liquidity_routes(app, require_api_key)

@@ -1,0 +1,43 @@
+name: Swing liquidity shadow capture
+
+on:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: swing-liquidity-shadow-capture
+  cancel-in-progress: true
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      BYBIT_EU_PUBLIC_BASE_URL: https://api.bybit.eu
+      SWING_LIQUIDITY_SHADOW_OUTPUT: swing-liquidity-shadow.json
+    steps:
+      - name: Check out research contract
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Capture label-blind swing liquidity snapshot
+        working-directory: bybit_eu_swing_radar/backend
+        run: python research/swing_liquidity_shadow.py
+
+      - name: Upload immutable forward snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: swing-liquidity-shadow-${{ github.run_id }}
+          path: bybit_eu_swing_radar/backend/swing-liquidity-shadow.json
+          retention-days: 90
+          if-no-files-found: error
