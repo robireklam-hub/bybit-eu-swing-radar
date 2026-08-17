@@ -4,9 +4,6 @@ on:
   schedule:
     - cron: "23 * * * *"
   workflow_dispatch:
-  push:
-    branches:
-      - research/swing-liquidity-shadow-v1
 
 permissions:
   contents: read
