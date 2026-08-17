@@ -32,6 +32,8 @@ from zoneinfo import ZoneInfo
 import asyncpg
 import httpx
 
+from app.swing_priority import select_compact_priority_sections
+
 
 BUDAPEST = ZoneInfo("Europe/Budapest")
 INTERVAL_MS = {
@@ -1030,12 +1032,52 @@ def select_coinalyze_markets(
     return selected
 
 
+def select_coinalyze_targets(
+    analyses: list[Analysis],
+    priority_symbols: list[str] | None = None,
+) -> list[Analysis]:
+    """Select the rate-budget target set with compact top/watch candidates first."""
+    priority_symbols = list(dict.fromkeys(priority_symbols or []))
+    if len(priority_symbols) > COINALYZE_ENRICH_LIMIT:
+        raise RuntimeError(
+            "Coinalyze compact priority set exceeds safe rate budget: "
+            f"{len(priority_symbols)}>{COINALYZE_ENRICH_LIMIT}; "
+            "refusing to publish silently incomplete top/watch coverage"
+        )
+
+    by_symbol = {item.instrument.symbol: item for item in analyses}
+    missing_priority = [symbol for symbol in priority_symbols if symbol not in by_symbol]
+    if missing_priority:
+        raise RuntimeError(
+            "Compact priority symbols missing from swing analyses: "
+            + ", ".join(missing_priority)
+        )
+
+    prioritized = [by_symbol[symbol] for symbol in priority_symbols]
+    priority_set = set(priority_symbols)
+    secondary = sorted(
+        [item for item in analyses if item.instrument.symbol not in priority_set],
+        key=lambda item: (
+            setup_score(
+                item.expansion_score,
+                abs(item.direction_score),
+                item.quality_score,
+            )
+            + (5.0 if item.instrument.symbol in DISCOVERY_SYMBOLS else 0.0)
+        ),
+        reverse=True,
+    )
+    remaining = COINALYZE_ENRICH_LIMIT - len(prioritized)
+    return prioritized + secondary[:remaining]
+
+
 async def enrich_coinalyze(
     analyses: list[Analysis],
     api: CoinalyzeAPI,
     *,
     mutate_scores: bool = True,
     partial_safe: bool = False,
+    target_analyses: list[Analysis] | None = None,
 ) -> tuple[bool, str | None]:
     """Attach Coinalyze derivatives context.
 
@@ -1050,18 +1092,16 @@ async def enrich_coinalyze(
             analysis.missing_data.append("Coinalyze derivatives data")
         return False, "COINALYZE_API_KEY missing"
 
-    selected_analyses = sorted(
-        analyses,
-        key=lambda item: (
-            setup_score(
-                item.expansion_score,
-                abs(item.direction_score),
-                item.quality_score,
-            )
-            + (5.0 if item.instrument.symbol in DISCOVERY_SYMBOLS else 0.0)
-        ),
-        reverse=True,
-    )[:COINALYZE_ENRICH_LIMIT]
+    selected_analyses = (
+        list(target_analyses)
+        if target_analyses is not None
+        else select_coinalyze_targets(analyses)
+    )
+    if len(selected_analyses) > COINALYZE_ENRICH_LIMIT:
+        raise RuntimeError(
+            "Coinalyze target set exceeds safe rate budget: "
+            f"{len(selected_analyses)}>{COINALYZE_ENRICH_LIMIT}"
+        )
     targeted_count = len(selected_analyses)
     selected_symbols = {
         item.instrument.symbol for item in selected_analyses
@@ -1946,13 +1986,52 @@ async def run() -> None:
             except Exception as exc:
                 exclusions.append({"symbol": instrument.symbol, "reason": f"Feature calculation failed: {exc}"})
 
+        # Shortability is execution semantics and must be known before deciding
+        # which compact short/watch candidates receive the limited Coinalyze budget.
+        borrow_ok, borrow_error = await apply_shortability(analyses, bybit)
+        priority_now = datetime.now(timezone.utc)
+        priority_longs = [
+            setup for analysis in analyses
+            if (setup := build_setup(analysis, "long", priority_now)) is not None
+        ]
+        priority_shorts = [
+            setup for analysis in analyses
+            if (setup := build_setup(analysis, "short", priority_now)) is not None
+        ]
+        priority_longs.sort(key=lambda item: item["setup_score"], reverse=True)
+        priority_shorts.sort(key=lambda item: item["setup_score"], reverse=True)
+        priority_executable_symbols = {
+            item["symbol"] for item in priority_longs + priority_shorts
+        }
+        priority_all_watch = rank_watchlist(
+            analyses, priority_now, priority_executable_symbols
+        )
+        priority_watch = priority_all_watch[:20]
+        priority_liquidity_blocked = [
+            item for item in priority_all_watch
+            if item.get("metrics", {}).get("execution_status") == "LIQUIDITY_BLOCKED"
+        ]
+        compact_priority = select_compact_priority_sections(
+            priority_longs[:10],
+            priority_shorts[:10],
+            priority_watch,
+            priority_liquidity_blocked,
+            limit=3,
+        )
+        coinalyze_priority_symbols = compact_priority["priority_symbols"]
+        coinalyze_targets = select_coinalyze_targets(
+            analyses, coinalyze_priority_symbols
+        )
+        coinalyze_target_symbols = [
+            item.instrument.symbol for item in coinalyze_targets
+        ]
         coinalyze_ok, coinalyze_error = await enrich_coinalyze(
             analyses,
             coinalyze,
             mutate_scores=False,
             partial_safe=True,
+            target_analyses=coinalyze_targets,
         )
-        borrow_ok, borrow_error = await apply_shortability(analyses, bybit)
         now = datetime.now(timezone.utc)
 
         long_setups = [setup for analysis in analyses if (setup := build_setup(analysis, "long", now)) is not None]
@@ -1984,11 +2063,31 @@ async def run() -> None:
             "promotion_minimum_score": MOMENTUM_MIN_SCORE,
             "items": momentum_items,
         }
-        regime = build_market_regime(analyses, now, coinalyze_ok, borrow_ok)
-
         enriched_count = sum(1 for item in analyses if item.derivatives)
-        coinalyze_target_count = min(
-            len(analyses), COINALYZE_ENRICH_LIMIT
+        coinalyze_target_count = len(coinalyze_targets)
+        coinalyze_priority_targeted_symbols = [
+            symbol for symbol in coinalyze_priority_symbols
+            if symbol in set(coinalyze_target_symbols)
+        ]
+        coinalyze_priority_enriched_symbols = [
+            symbol for symbol in coinalyze_priority_symbols
+            if any(
+                analysis.instrument.symbol == symbol and bool(analysis.derivatives)
+                for analysis in analyses
+            )
+        ]
+        coinalyze_priority_missing_symbols = [
+            symbol for symbol in coinalyze_priority_symbols
+            if symbol not in set(coinalyze_priority_enriched_symbols)
+        ]
+        regime = build_market_regime(analyses, now, coinalyze_ok, borrow_ok)
+        regime["notes"].append(
+            "Coinalyze compact top/watch priority coverage: "
+            f"targeted={len(coinalyze_priority_targeted_symbols)}/"
+            f"{len(coinalyze_priority_symbols)}, "
+            f"enriched={len(coinalyze_priority_enriched_symbols)}/"
+            f"{len(coinalyze_priority_symbols)}, "
+            f"missing={coinalyze_priority_missing_symbols}."
         )
         data_quality = regime["data_quality"]
         coverage = {
@@ -2000,6 +2099,17 @@ async def run() -> None:
             "coinalyze_enriched_symbols": enriched_count,
             "coinalyze_target_symbols": coinalyze_target_count,
             "coinalyze_enrichment_limit": COINALYZE_ENRICH_LIMIT,
+            "coinalyze_targeted_symbol_list": coinalyze_target_symbols,
+            "coinalyze_priority_symbols": coinalyze_priority_symbols,
+            "coinalyze_priority_targeted_symbols": coinalyze_priority_targeted_symbols,
+            "coinalyze_priority_enriched_symbols": coinalyze_priority_enriched_symbols,
+            "coinalyze_priority_missing_symbols": coinalyze_priority_missing_symbols,
+            "coinalyze_priority_full_target_coverage": (
+                set(coinalyze_priority_targeted_symbols) == set(coinalyze_priority_symbols)
+            ),
+            "coinalyze_priority_full_enrichment": (
+                set(coinalyze_priority_enriched_symbols) == set(coinalyze_priority_symbols)
+            ),
             "borrowability_checked_symbols": len(analyses) if borrow_ok else 0,
             "symbols_missing_history": missing_history,
             "momentum_eligible_pairs": len(candidate_pool),
@@ -2060,9 +2170,16 @@ async def run() -> None:
                     "data_as_of": now.isoformat() if enriched_count > 0 else None,
                     "latency_seconds": 0 if enriched_count > 0 else None,
                     "coverage": (
-                        f"{enriched_count}/{coinalyze_target_count} targeted "
-                        f"({len(analyses)} analyzed total)"
+                        f"rate-budget targets enriched {enriched_count}/{coinalyze_target_count}; "
+                        f"compact priority targeted {len(coinalyze_priority_targeted_symbols)}/"
+                        f"{len(coinalyze_priority_symbols)}, enriched "
+                        f"{len(coinalyze_priority_enriched_symbols)}/"
+                        f"{len(coinalyze_priority_symbols)}; "
+                        f"{len(analyses)} analyzed total"
                     ),
+                    "priority_targeted_symbols": coinalyze_priority_targeted_symbols,
+                    "priority_enriched_symbols": coinalyze_priority_enriched_symbols,
+                    "priority_missing_symbols": coinalyze_priority_missing_symbols,
                     "missing_fields": [] if coinalyze_ok else [coinalyze_error or "enrichment unavailable"],
                 },
                 {
@@ -2080,7 +2197,9 @@ async def run() -> None:
             "Worker complete: "
             f"analyzed={len(analyses)}, tradeable={universe_stats['tradeable_universe_size']}, "
             f"watchlist={len(watchlist)}, liquidity_blocked={len(liquidity_blocked)}, "
-            f"coinalyze={enriched_count}/{coinalyze_target_count} targeted, "
+            f"coinalyze={enriched_count}/{coinalyze_target_count} rate-budget targets, "
+            f"priority={len(coinalyze_priority_enriched_symbols)}/"
+            f"{len(coinalyze_priority_symbols)} enriched, "
             f"longs={len(long_setups)}, "
             f"shorts={len(short_setups)}, momentum={len(momentum_items)}, "
             f"momentum_coverage={len(momentum_analyses)}/{len(candidate_pool)}, "
