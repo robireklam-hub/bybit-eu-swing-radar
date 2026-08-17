@@ -1,0 +1,3 @@
+Operational deploy marker for the swing worker.
+
+Purpose: force Railway to rebuild/redeploy the swing-worker service from the current main SHA after PR #47 restored the exact stable code tree without touching worker.py. This file is not imported or executed and changes no strategy, scoring, eligibility, execution, data schema, or research logic.
