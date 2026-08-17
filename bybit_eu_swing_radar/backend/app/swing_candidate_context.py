@@ -11,47 +11,21 @@ CANDIDATE_SECTIONS = (
     "watch_only_longs",
     "watch_only_shorts",
 )
-DERIVATIVE_VALUE_FIELDS = (
-    "open_interest_usd",
-    "oi_change_1h_pct",
-    "oi_change_4h_pct",
-    "oi_change_24h_pct",
-    "funding_rate",
-    "long_liquidations_24h_usd",
-    "short_liquidations_24h_usd",
-)
 
 
 def _derivatives_status(payload: dict[str, Any]) -> tuple[str, str]:
     if not payload:
         return "UNAVAILABLE", "No Coinalyze derivatives payload is cached for this candidate."
-
-    reasons: list[str] = []
+    availability = payload.get("availability")
     endpoint_errors = payload.get("endpoint_errors")
     if endpoint_errors:
-        labels = sorted({str(value).split(":", 1)[0] for value in endpoint_errors})
-        reasons.append("Coinalyze endpoint failures: " + ", ".join(labels) + ".")
-
-    availability = payload.get("availability")
+        labels = ", ".join(str(value).split(":", 1)[0] for value in endpoint_errors)
+        return "PARTIAL", f"One or more Coinalyze endpoints failed: {labels}."
     if isinstance(availability, dict) and availability:
-        missing_endpoints = sorted(
-            str(key) for key, value in availability.items() if not bool(value)
-        )
-        if missing_endpoints:
-            reasons.append(
-                "Unavailable Coinalyze coverage: " + ", ".join(missing_endpoints) + "."
-            )
-
-    missing_fields = [
-        field for field in DERIVATIVE_VALUE_FIELDS
-        if payload.get(field) is None
-    ]
-    if missing_fields:
-        reasons.append("Missing derivatives fields: " + ", ".join(missing_fields) + ".")
-
-    if reasons:
-        return "PARTIAL", " ".join(reasons)
-    return "GOOD", "All requested Coinalyze derivatives endpoints and fields are available for this candidate."
+        missing = sorted(str(key) for key, value in availability.items() if not bool(value))
+        if missing:
+            return "PARTIAL", "Coinalyze payload is missing: " + ", ".join(missing) + "."
+    return "GOOD", "All requested Coinalyze derivatives endpoints are available for this candidate."
 
 
 def attach_swing_candidate_derivatives(

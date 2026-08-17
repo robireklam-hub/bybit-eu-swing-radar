@@ -4,16 +4,10 @@ import os
 from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from starlette.requests import Request
 
 from app.config import settings
 from app.providers.bybit import BybitClient
 from app.repository import RadarRepository
-from app.swing_api_views import (
-    compact_swing_scan,
-    is_research_full_scan_request,
-    select_fresh_symbol_setup,
-)
 from app.swing_candidate_context import attach_swing_candidate_derivatives
 from backtest import BACKTEST_JOB_NAME, STRATEGY_VERSION, run_backtest_batch
 
@@ -77,7 +71,6 @@ async def health() -> dict:
 
 @app.get("/v1/scan", dependencies=[Depends(require_api_key)])
 async def scan(
-    request: Request,
     direction: str = Query("both", pattern="^(long|short|both)$"),
     limit: int = Query(3, ge=1, le=10),
     min_score: float = Query(70, ge=0, le=100),
@@ -88,9 +81,7 @@ async def scan(
             status_code=503,
             detail="No fresh cached scan. Run and populate the background scanner first.",
         )
-    if is_research_full_scan_request(request.headers.get("user-agent")):
-        return result
-    return compact_swing_scan(result)
+    return result
 
 
 @app.get("/v1/top-candidates", dependencies=[Depends(require_api_key)])
@@ -119,10 +110,9 @@ async def market_regime():
 
 @app.get("/v1/setup/{symbol}", dependencies=[Depends(require_api_key)])
 async def setup(symbol: str):
-    scan_payload = await repo.get_cache("latest_scan")
-    result = select_fresh_symbol_setup(scan_payload, symbol)
+    result = await repo.get_setup(symbol)
     if result is None:
-        raise HTTPException(status_code=404, detail="Setup not found in latest scan.")
+        raise HTTPException(status_code=404, detail="Setup not found.")
     return result
 
 
