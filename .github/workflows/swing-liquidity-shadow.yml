@@ -34,6 +34,10 @@ jobs:
         working-directory: bybit_eu_swing_radar/backend
         run: python research/swing_liquidity_shadow.py
 
+      - name: Verify durable forward capture state
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_forward_status.py
+
       - name: Upload immutable forward snapshot
         if: always()
         uses: actions/upload-artifact@v4

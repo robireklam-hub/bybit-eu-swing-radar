@@ -1,0 +1,52 @@
+from datetime import datetime, timedelta, timezone
+
+from scripts.production_swing_liquidity_forward_status import run_check, validate_status
+
+
+def _payload(**overrides):
+    now = datetime(2026, 8, 18, 0, 0, tzinfo=timezone.utc)
+    payload = {
+        "research_only": True,
+        "live_strategy_mutated": False,
+        "promotion_allowed": False,
+        "study": "swing-liquidity-validation-v1",
+        "capture_count": 3,
+        "first_capture_at": (now - timedelta(hours=2)).isoformat(),
+        "last_capture_at": (now - timedelta(minutes=5)).isoformat(),
+        "candidate_observations": 72,
+        "orderbook_errors": 0,
+        "turnover_tiers": {"<25k": 4, "100-250k": 7},
+        "spread_tiers": {"<5bps": 10},
+    }
+    payload.update(overrides)
+    return payload, now
+
+
+def test_validate_status_accepts_fresh_durable_capture():
+    payload, now = _payload()
+    assert validate_status(payload, now=now) == []
+
+
+def test_validate_status_rejects_stale_or_empty_state():
+    payload, now = _payload(
+        capture_count=0,
+        candidate_observations=0,
+        last_capture_at=(datetime(2026, 8, 17, 23, 0, tzinfo=timezone.utc) - timedelta(hours=1)).isoformat(),
+        turnover_tiers={},
+        spread_tiers={},
+    )
+    errors = validate_status(payload, now=now)
+    assert "no_durable_captures" in errors
+    assert "no_durable_observations" in errors
+    assert any(error.startswith("stale_last_capture:") for error in errors)
+    assert "missing_turnover_tier_coverage" in errors
+    assert "missing_spread_tier_coverage" in errors
+
+
+def test_run_check_requires_research_only_nonpromotion_contract():
+    payload, now = _payload(promotion_allowed=True)
+
+    def fetch(url, api_key, timeout):
+        return payload
+
+    assert run_check("https://example.test", "secret", fetch=fetch, now=now) == 1
