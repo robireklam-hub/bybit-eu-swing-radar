@@ -7,10 +7,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Callable
+from datetime import datetime
+from typing import Any, Callable, Iterable, Mapping
 
 from fastapi import Depends, FastAPI
 
+from research.microstructure.alignment import (
+    alignment_spec,
+    load_feature_rows,
+    sample_readiness,
+)
 from research.microstructure.collector import MicrostructureConfig, MicrostructureRecorder
 from research.microstructure.readiness import get_readiness
 
@@ -82,6 +88,39 @@ def microstructure_status() -> dict[str, Any]:
     return recorder.status()
 
 
+def _parse_dt(value: Any) -> datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("alignment boundary timestamp is missing")
+    parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("alignment boundary timestamp must be timezone-aware")
+    return parsed
+
+
+def build_alignment_status(
+    readiness_payload: Mapping[str, Any],
+    features: Iterable[Mapping[str, Any]],
+    symbols: Iterable[str],
+) -> dict[str, Any]:
+    """Combine preregistered data-quality and sample gates without labels."""
+    wanted = list(dict.fromkeys(str(symbol).upper() for symbol in symbols))
+    sample = sample_readiness(features, wanted)
+    data_quality_ready = readiness_payload.get("ready_for_forward_feature_analysis") is True
+    return {
+        "research_only": True,
+        "live_strategy_mutated": False,
+        "label_blind": True,
+        "post_signal_data_used": False,
+        "promotion_allowed": False,
+        "spec": alignment_spec(),
+        "data_quality_ready": data_quality_ready,
+        "sample": sample,
+        "ready_for_preregistered_effect_test": (
+            data_quality_ready and sample["ready_for_preregistered_effect_test"]
+        ),
+    }
+
+
 def attach_microstructure_research(
     app: FastAPI,
     require_api_key: Callable[..., Any],
@@ -134,6 +173,69 @@ def attach_microstructure_research(
                 "gate_version": "microstructure-readiness-v1",
                 "ready_for_forward_feature_analysis": False,
                 "promotion_allowed": False,
+                "error_type": type(exc).__name__,
+                "error": str(exc)[:1000],
+            }
+
+    @app.get(
+        "/v1/research/microstructure/alignment-status",
+        dependencies=[Depends(require_api_key)],
+    )
+    async def alignment_status() -> dict[str, Any]:
+        """Report label-blind preregistered alignment sample readiness only."""
+        try:
+            _ensure_task_started()
+            await asyncio.sleep(0)
+            recorder = _ensure_recorder()
+            readiness_payload = await get_readiness(
+                recorder.config.database_url,
+                recorder.config.symbols,
+                recorder.config.bucket_seconds,
+            )
+            if readiness_payload.get("ready_for_forward_feature_analysis") is not True:
+                return build_alignment_status(
+                    readiness_payload,
+                    [],
+                    recorder.config.symbols,
+                )
+
+            readiness_symbols = readiness_payload.get("symbols") or []
+            first_bucket_values = [
+                item.get("first_bucket_at")
+                for item in readiness_symbols
+                if isinstance(item, Mapping) and item.get("first_bucket_at")
+            ]
+            if len(first_bucket_values) != len(recorder.config.symbols):
+                raise ValueError("readiness first_bucket_at coverage is incomplete")
+            since = max(_parse_dt(value) for value in first_bucket_values)
+            until = _parse_dt(readiness_payload.get("checked_at"))
+            features = await load_feature_rows(
+                recorder.config.database_url,
+                recorder.config.symbols,
+                since,
+                until,
+                bucket_seconds=recorder.config.bucket_seconds,
+            )
+            payload = build_alignment_status(
+                readiness_payload,
+                features,
+                recorder.config.symbols,
+            )
+            payload["interval"] = {
+                "since": since.isoformat(),
+                "until": until.isoformat(),
+            }
+            return payload
+        except Exception as exc:
+            logger.exception("microstructure alignment status query failed")
+            return {
+                "research_only": True,
+                "live_strategy_mutated": False,
+                "label_blind": True,
+                "post_signal_data_used": False,
+                "promotion_allowed": False,
+                "spec": alignment_spec(),
+                "ready_for_preregistered_effect_test": False,
                 "error_type": type(exc).__name__,
                 "error": str(exc)[:1000],
             }
