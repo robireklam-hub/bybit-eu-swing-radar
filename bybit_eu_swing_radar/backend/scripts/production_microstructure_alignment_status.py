@@ -58,6 +58,55 @@ def validate_alignment_status(payload: dict[str, Any]) -> tuple[bool, str]:
         return False, "sample_contract_incomplete"
     if sample.get("minimum_total") != 60 or sample.get("minimum_per_symbol") != 10:
         return False, "sample_gate_mutated"
+
+    coverage = payload.get("alignment_coverage")
+    if not isinstance(coverage, dict):
+        return False, "alignment_coverage_missing"
+    coverage_required = {
+        "status",
+        "reason",
+        "journal_signal_count",
+        "aligned_signal_count",
+        "unaligned_signal_count",
+        "per_symbol",
+    }
+    if not coverage_required.issubset(coverage):
+        return False, "alignment_coverage_contract_incomplete"
+    journal_count = coverage.get("journal_signal_count")
+    aligned_count = coverage.get("aligned_signal_count")
+    unaligned_count = coverage.get("unaligned_signal_count")
+    if not all(isinstance(value, int) and value >= 0 for value in (journal_count, aligned_count, unaligned_count)):
+        return False, "alignment_coverage_counts_invalid"
+    if journal_count != aligned_count + unaligned_count:
+        return False, "alignment_coverage_counts_inconsistent"
+    per_symbol = coverage.get("per_symbol")
+    if not isinstance(per_symbol, dict):
+        return False, "alignment_coverage_per_symbol_missing"
+    for item in per_symbol.values():
+        if not isinstance(item, dict):
+            return False, "alignment_coverage_per_symbol_invalid"
+        values = (
+            item.get("journal_signals"),
+            item.get("aligned_signals"),
+            item.get("unaligned_signals"),
+        )
+        if not all(isinstance(value, int) and value >= 0 for value in values):
+            return False, "alignment_coverage_per_symbol_counts_invalid"
+        if item["journal_signals"] != item["aligned_signals"] + item["unaligned_signals"]:
+            return False, "alignment_coverage_per_symbol_counts_inconsistent"
+
+    status = coverage.get("status")
+    reason = coverage.get("reason")
+    if journal_count == 0:
+        if status != "WAITING_FOR_FORWARD_SIGNALS" or reason != "waiting_for_forward_signals":
+            return False, "waiting_state_invalid"
+    elif unaligned_count > 0:
+        if status != "COVERAGE_FAILURE" or reason != "alignment_coverage_failure":
+            return False, "coverage_failure_state_invalid"
+        if payload.get("ready_for_preregistered_effect_test") is not False:
+            return False, "coverage_failure_did_not_close_effect_gate"
+    elif status != "ALIGNED" or reason != "all_forward_signals_aligned":
+        return False, "aligned_state_invalid"
     return True, "ok"
 
 
@@ -87,6 +136,8 @@ def main() -> int:
     ok, reason = validate_alignment_status(payload)
     safe = {
         "data_quality_ready": payload.get("data_quality_ready"),
+        "alignment_coverage_ready": payload.get("alignment_coverage_ready"),
+        "alignment_coverage": payload.get("alignment_coverage"),
         "ready_for_preregistered_effect_test": payload.get("ready_for_preregistered_effect_test"),
         "sample": payload.get("sample"),
         "interval": payload.get("interval"),
