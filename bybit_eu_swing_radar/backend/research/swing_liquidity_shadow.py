@@ -178,7 +178,8 @@ def compact_candidate(candidate: dict[str, Any], source_section: str) -> dict[st
         "current_tradeable": bool(metrics.get("tradeable", source_section in {"longs", "shorts"})),
         "execution_status": metrics.get("execution_status"),
         "liquidity_reasons": metrics.get("liquidity_reasons") or [],
-        "derivatives_context_only": metrics.get("derivatives") or {},
+        "derivatives": metrics.get("derivatives") or {},
+        "derivatives_context_only": True,
     }
 
 
