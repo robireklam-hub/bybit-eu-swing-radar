@@ -1,0 +1,60 @@
+name: Patch swing action contract
+
+on:
+  push:
+    branches:
+      - fix/swing-derivatives-visibility
+
+permissions:
+  contents: write
+
+jobs:
+  patch-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: fix/swing-derivatives-visibility
+          fetch-depth: 0
+      - name: Patch static Action OpenAPI
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('bybit_eu_swing_radar/action/openapi.yaml')
+          text = path.read_text()
+
+          old_summary = '''      summary: Use this operation to show the strongest long and short candidates.\n        Returns compact strict rankings and separately labelled WATCH_ONLY fallbacks.\n'''
+          new_summary = '''      summary: Use this operation to show the strongest long and short candidates.\n        Returns compact strict rankings and separately labelled WATCH_ONLY fallbacks,\n        including candidate-level context-only Coinalyze derivatives availability and freshness.\n'''
+          if old_summary in text:
+              text = text.replace(old_summary, new_summary, 1)
+          elif 'including candidate-level context-only Coinalyze derivatives availability and freshness.' not in text:
+              raise SystemExit('top-candidates summary anchor not found')
+
+          compact_anchor = '''        missing_data:\n          type: array\n          items:\n            type: string\n    TopCandidatesResponse:\n'''
+          compact_patch = '''        missing_data:\n          type: array\n          items:\n            type: string\n        derivatives:\n          $ref: '#/components/schemas/DerivativesContext'\n        derivatives_status:\n          type: string\n          enum:\n          - GOOD\n          - PARTIAL\n          - UNAVAILABLE\n          description: Candidate-level derivatives context coverage; never a swing eligibility gate.\n        derivatives_data_as_of:\n          type:\n          - string\n          - 'null'\n          format: date-time\n          description: Timestamp of the swing candidate snapshot carrying this derivatives context.\n        derivatives_context_only:\n          type: boolean\n          description: Always true. OI/funding/liquidations do not mutate swing core scores or execution eligibility.\n    TopCandidatesResponse:\n'''
+          if compact_anchor in text:
+              text = text.replace(compact_anchor, compact_patch, 1)
+          elif '        derivatives_status:\n          type: string\n' not in text.split('    CompactCandidate:', 1)[1].split('    TopCandidatesResponse:', 1)[0]:
+              raise SystemExit('CompactCandidate anchor not found')
+
+          derivative_anchor = '''        is_bybit_specific:\n          type: boolean\n      additionalProperties: true\n    DayTradeMarketRegime:\n'''
+          derivative_patch = '''        is_bybit_specific:\n          type: boolean\n        availability:\n          type: object\n          properties:\n            current_oi:\n              type: boolean\n            funding:\n              type: boolean\n            oi_history:\n              type: boolean\n            liquidations:\n              type: boolean\n          additionalProperties: true\n        endpoint_errors:\n          type: array\n          items:\n            type: string\n        strict_score_mutation_applied:\n          type: boolean\n          description: False for swing context-only enrichment.\n      additionalProperties: true\n    DayTradeMarketRegime:\n'''
+          if derivative_anchor in text:
+              text = text.replace(derivative_anchor, derivative_patch, 1)
+          elif '        availability:\n          type: object\n' not in text.split('    DerivativesContext:', 1)[1].split('    DayTradeMarketRegime:', 1)[0]:
+              raise SystemExit('DerivativesContext anchor not found')
+
+          path.write_text(text)
+          PY
+      - name: Commit contract update if needed
+        run: |
+          if git diff --quiet -- bybit_eu_swing_radar/action/openapi.yaml; then
+            echo "Static Action contract already patched."
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add bybit_eu_swing_radar/action/openapi.yaml
+          git commit -m "contract: expose swing derivatives in Action schema"
+          git push origin HEAD:fix/swing-derivatives-visibility
