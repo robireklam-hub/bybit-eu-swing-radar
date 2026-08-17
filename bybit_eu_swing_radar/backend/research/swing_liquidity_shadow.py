@@ -221,19 +221,27 @@ def collect_snapshot(base_url: str, api_key: str, bybit_base_url: str = "https:/
     candidates = dedupe_candidates(scan)
     books: dict[str, Any] = {}
     book_errors: dict[str, str] = {}
+    protected_headers = {
+        "Accept": "application/json",
+        "X-Radar-Key": api_key,
+        "User-Agent": "swing-liquidity-shadow/2",
+    }
     for symbol in sorted({item["symbol"] for item in candidates}):
-        query = urlencode({"category": "spot", "symbol": symbol, "limit": 50})
         try:
-            payload = _get_json(f"{bybit_base_url.rstrip('/')}/v5/market/orderbook?{query}")
-            if payload.get("retCode") != 0 or not isinstance(payload.get("result"), dict):
-                raise RuntimeError(f"retCode={payload.get('retCode')} retMsg={payload.get('retMsg')}")
-            result = payload["result"]
+            payload = _get_json(
+                f"{base_url.rstrip('/')}/v1/research/swing-liquidity/orderbook/{symbol}",
+                headers=protected_headers,
+            )
+            if payload.get("research_only") is not True or payload.get("live_strategy_mutated") is not False:
+                raise RuntimeError("research orderbook proxy invariant failed")
+            result = {"b": payload.get("bids") or [], "a": payload.get("asks") or []}
             books[symbol] = {
-                "ts": payload.get("time"),
-                "update_id": result.get("u"),
-                "seq": result.get("seq"),
-                "bids": result.get("b") or [],
-                "asks": result.get("a") or [],
+                "ts": payload.get("upstream_time_ms"),
+                "data_as_of": payload.get("data_as_of"),
+                "update_id": payload.get("update_id"),
+                "seq": payload.get("seq"),
+                "bids": result["b"],
+                "asks": result["a"],
                 "costs": [book_cost_metrics(result, notional) for notional in NOTIONALS_USDC],
             }
         except Exception as exc:  # fail-open research coverage; never alter live state
