@@ -266,5 +266,7 @@ def test_market_regime_coinalyze_quality_uses_targeted_coverage(monkeypatch):
 
     assert regime["source_quality"]["coinalyze_derivatives"] == "GOOD"
     assert any(
-        "1/1 targeted symbols" in note for note in regime["notes"]
+        "1/1 selected targets" in note
+        and "compact top/watch coverage is reported separately" in note
+        for note in regime["notes"]
     )

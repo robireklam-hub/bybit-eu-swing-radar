@@ -1792,7 +1792,7 @@ def build_market_regime(
         "Executable setups and low-liquidity WATCH_ONLY ideas are separated.",
         "Short candidates are strictly USDC spot-margin shorts; derivatives are contextual only.",
         "Swing strict scores are core technical/execution scores; Coinalyze context cannot modify strict eligibility.",
-        f"Coinalyze enrichment coverage: {enriched_count}/{target_count} targeted symbols ({len(analyses)} analyzed total).",
+        f"Coinalyze rate-budget enrichment: {enriched_count}/{target_count} selected targets ({len(analyses)} analyzed total); compact top/watch coverage is reported separately.",
         "Shortability uses public Bybit margin eligibility and maximum borrowing data; final inventory must be rechecked before entry.",
     ]
     if not coinalyze_ok:
@@ -2140,6 +2140,7 @@ async def run() -> None:
             "checked_at": now.isoformat(),
             "worker": {
                 "status": "ok",
+                "source_commit_sha": os.getenv("RAILWAY_GIT_COMMIT_SHA") or None,
                 "duration_seconds": round(elapsed, 2),
                 **universe_stats,
                 **coverage,
