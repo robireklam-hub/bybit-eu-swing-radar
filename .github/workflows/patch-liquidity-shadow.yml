@@ -1,0 +1,40 @@
+name: Patch liquidity shadow schema
+
+on:
+  push:
+    branches:
+      - research/swing-liquidity-shadow-v1
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: research/swing-liquidity-shadow-v1
+          fetch-depth: 0
+      - name: Correct context-only derivatives fields
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('bybit_eu_swing_radar/backend/research/swing_liquidity_shadow.py')
+          text=p.read_text()
+          old='''        "derivatives_context_only": metrics.get("derivatives") or {},\n'''
+          new='''        "derivatives": metrics.get("derivatives") or {},\n        "derivatives_context_only": True,\n'''
+          if old in text:
+              text=text.replace(old,new,1)
+              p.write_text(text)
+          elif '        "derivatives_context_only": True,\n' not in text:
+              raise SystemExit('expected derivatives anchor not found')
+          PY
+      - name: Commit correction if needed
+        run: |
+          if git diff --quiet -- bybit_eu_swing_radar/backend/research/swing_liquidity_shadow.py; then exit 0; fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add bybit_eu_swing_radar/backend/research/swing_liquidity_shadow.py
+          git commit -m "research: mark derivatives as context-only in shadow snapshot"
+          git push origin HEAD:research/swing-liquidity-shadow-v1
