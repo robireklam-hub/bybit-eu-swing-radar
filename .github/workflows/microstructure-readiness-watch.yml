@@ -33,3 +33,7 @@ jobs:
       - name: Check recorder and preregistered readiness
         working-directory: bybit_eu_swing_radar/backend
         run: python scripts/production_microstructure_smoke.py
+
+      - name: Check preregistered alignment sample status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_alignment_status.py
