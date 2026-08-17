@@ -1,0 +1,80 @@
+name: Verify swing derivatives production
+
+on:
+  push:
+    branches:
+      - verify/swing-derivatives-prod
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 13a8728954565fde71327db8dec76a362ee6dfe7
+    steps:
+      - name: Verify exact deployed SHA and compact derivatives visibility
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.request, urllib.error
+
+          base=os.environ['BASE_URL'].rstrip('/')
+          key=os.environ['API_KEY']
+          expected=os.environ['EXPECTED_SHA']
+
+          def get(path):
+              req=urllib.request.Request(base+path, headers={'Accept':'application/json','X-Radar-Key':key,'User-Agent':'swing-derivatives-prod-verify/1'})
+              with urllib.request.urlopen(req, timeout=15) as r:
+                  return json.load(r)
+
+          deployed=False
+          for _ in range(40):
+              try:
+                  if get('/version').get('commit_sha') == expected:
+                      deployed=True
+                      break
+              except Exception:
+                  pass
+              time.sleep(10)
+          if not deployed:
+              raise SystemExit('FAIL expected production SHA not observed')
+
+          payload=get('/v1/top-candidates?limit=3&include_watchlist=true')
+          sections=('strict_longs','strict_shorts','watch_only_longs','watch_only_shorts')
+          seen=0
+          status_counts={'GOOD':0,'PARTIAL':0,'UNAVAILABLE':0}
+          for section in sections:
+              items=payload.get(section, [])
+              if not isinstance(items, list):
+                  raise SystemExit(f'FAIL {section} is not a list')
+              for item in items:
+                  seen += 1
+                  for field in ('derivatives','derivatives_status','derivatives_data_as_of','derivatives_context_only'):
+                      if field not in item:
+                          raise SystemExit(f'FAIL {section} {item.get("symbol")} missing {field}')
+                  if item['derivatives_context_only'] is not True:
+                      raise SystemExit('FAIL derivatives_context_only is not true')
+                  status=item['derivatives_status']
+                  if status not in status_counts:
+                      raise SystemExit(f'FAIL invalid derivatives_status={status!r}')
+                  status_counts[status] += 1
+                  derivatives=item['derivatives']
+                  if status == 'GOOD' and not derivatives:
+                      raise SystemExit('FAIL GOOD derivatives_status with empty derivatives')
+                  if status == 'UNAVAILABLE' and derivatives:
+                      raise SystemExit('FAIL UNAVAILABLE derivatives_status with non-empty derivatives')
+                  if derivatives and derivatives.get('strict_score_mutation_applied') is not False:
+                      raise SystemExit('FAIL swing derivatives mutated strict scores')
+
+          print('SWING_DERIVATIVES_PRODUCTION_VERIFIED='+json.dumps({
+              'commit_sha': expected,
+              'candidate_count': seen,
+              'status_counts': status_counts,
+              'data_as_of': payload.get('data_as_of'),
+              'data_quality': payload.get('data_quality'),
+          }, sort_keys=True))
+          PY
