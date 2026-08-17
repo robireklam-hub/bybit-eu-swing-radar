@@ -1,0 +1,65 @@
+name: Verify swing liquidity shadow production
+
+on:
+  push:
+    branches:
+      - verify/swing-liquidity-shadow-prod
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: d74a5ce5682f0180a1ae3435cc05972efb288439
+      SWING_LIQUIDITY_SHADOW_OUTPUT: swing-liquidity-shadow.json
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Wait for exact production SHA
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.request
+          base=os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key=os.environ['PRODUCTION_RADAR_API_KEY']
+          expected=os.environ['EXPECTED_SHA']
+          for _ in range(50):
+              try:
+                  req=urllib.request.Request(base+'/version',headers={'Accept':'application/json','X-Radar-Key':key,'User-Agent':'swing-liquidity-prod-verify/1'})
+                  with urllib.request.urlopen(req, timeout=15) as r:
+                      if json.load(r).get('commit_sha') == expected:
+                          print('DEPLOYED_SHA_VERIFIED='+expected)
+                          raise SystemExit(0)
+              except Exception:
+                  pass
+              time.sleep(10)
+          raise SystemExit('FAIL expected production SHA not observed')
+          PY
+      - name: Capture via Railway research proxy
+        working-directory: bybit_eu_swing_radar/backend
+        run: python research/swing_liquidity_shadow.py
+      - name: Assert substantive order-book coverage
+        working-directory: bybit_eu_swing_radar/backend
+        run: |
+          python - <<'PY'
+          import json
+          d=json.load(open('swing-liquidity-shadow.json'))
+          n=d['candidate_count']; books=len(d['orderbooks']); errors=len(d['orderbook_errors'])
+          if n <= 0: raise SystemExit('FAIL no candidates')
+          coverage=books/n
+          if coverage < 0.90:
+              raise SystemExit(f'FAIL orderbook coverage {books}/{n}; errors={errors}')
+          primary_complete=0
+          for book in d['orderbooks'].values():
+              for c in book.get('costs',[]):
+                  if c.get('notional_usdc') == 500.0 and c.get('complete_fill') is True:
+                      primary_complete += 1
+                      break
+          print('SWING_LIQUIDITY_PRODUCTION_VERIFIED='+json.dumps({'candidate_count':n,'orderbook_count':books,'error_count':errors,'coverage':round(coverage,4),'primary_500_complete_books':primary_complete,'scan_data_as_of':d.get('scan_data_as_of')},sort_keys=True))
+          PY
