@@ -58,7 +58,8 @@ paths:
     get:
       operationId: getTopCandidates
       summary: Use this operation to show the strongest long and short candidates.
-        Returns compact strict rankings and separately labelled WATCH_ONLY fallbacks.
+        Returns compact strict rankings and separately labelled WATCH_ONLY fallbacks,
+        including candidate-level context-only Coinalyze derivatives availability and freshness.
       parameters:
       - in: query
         name: limit
@@ -1270,6 +1271,24 @@ components:
           type: array
           items:
             type: string
+        derivatives:
+          $ref: '#/components/schemas/DerivativesContext'
+        derivatives_status:
+          type: string
+          enum:
+          - GOOD
+          - PARTIAL
+          - UNAVAILABLE
+          description: Candidate-level derivatives context coverage; never a swing eligibility gate.
+        derivatives_data_as_of:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          description: Timestamp of the swing candidate snapshot carrying this derivatives context.
+        derivatives_context_only:
+          type: boolean
+          description: Always true. OI/funding/liquidations do not mutate swing core scores or execution eligibility.
     TopCandidatesResponse:
       type: object
       required:
@@ -1856,6 +1875,25 @@ components:
           type: number
         is_bybit_specific:
           type: boolean
+        availability:
+          type: object
+          properties:
+            current_oi:
+              type: boolean
+            funding:
+              type: boolean
+            oi_history:
+              type: boolean
+            liquidations:
+              type: boolean
+          additionalProperties: true
+        endpoint_errors:
+          type: array
+          items:
+            type: string
+        strict_score_mutation_applied:
+          type: boolean
+          description: False for swing context-only enrichment.
       additionalProperties: true
     DayTradeMarketRegime:
       type: object
