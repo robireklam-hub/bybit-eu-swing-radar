@@ -3,7 +3,8 @@ import logging
 import os
 from datetime import datetime, timezone
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from starlette.requests import Request
 
 from app.config import settings
 from app.providers.bybit import BybitClient
