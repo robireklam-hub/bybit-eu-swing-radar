@@ -3,6 +3,7 @@ from pathlib import Path
 from research.derivatives_positioning_shadow import classify_symbol, spec
 
 
+# Connector-authored commit intentionally finalizes the PR head after route patching.
 def test_classifier_consumes_dedicated_liquidation_row_shape() -> None:
     row = classify_symbol(
         "BTCUSDC",
