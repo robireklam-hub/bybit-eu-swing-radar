@@ -202,6 +202,9 @@ def build_context_snapshot(
     }
     payloads: dict[str, dict[str, Any]] = {}
     for name in LAYER_MAX_AGE_SECONDS:
+        if layer_meta[name]["status"] in {"FUTURE_REJECTED", "INVALID_TIMESTAMP"}:
+            payloads[name] = {}
+            continue
         record = records.get(name)
         payload = (record or {}).get("payload") if record else None
         payloads[name] = dict(payload) if isinstance(payload, Mapping) else {}
