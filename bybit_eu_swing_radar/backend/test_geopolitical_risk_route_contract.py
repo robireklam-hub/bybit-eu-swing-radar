@@ -28,7 +28,19 @@ def test_provider_contract_is_fixed_gdelt_attention_only():
     assert 'GDELT_DOC_HTTP_URL = "http://api.gdeltproject.org/api/v2/doc/doc"' in text
     assert '"mode": "TimelineVolRaw"' in text
     assert '"timespan": "24h"' in text
-    assert "Semaphore(2)" in text
+
+
+def test_gdelt_requests_are_serialized_paced_and_429_retry_is_bounded():
+    path = Path(__file__).resolve().parent / "app" / "research_geopolitical_risk_api.py"
+    text = path.read_text()
+    assert "GDELT_REQUEST_SPACING_SECONDS = 6.0" in text
+    assert "GDELT_MAX_RATE_LIMIT_RETRIES = 2" in text
+    assert "GDELT_RATE_LIMIT_BACKOFF_SECONDS = (12.0, 24.0)" in text
+    assert "response.status_code == 429" in text
+    assert "await asyncio.sleep(_retry_delay(response, attempt))" in text
+    assert "await asyncio.sleep(GDELT_REQUEST_SPACING_SECONDS)" in text
+    assert "asyncio.gather" not in text
+    assert '"rate_limit_retries"' in text
 
 
 def test_http_fallback_is_connect_only_and_explicitly_degraded():
@@ -37,7 +49,7 @@ def test_http_fallback_is_connect_only_and_explicitly_degraded():
     assert "except (httpx.ConnectError, httpx.ConnectTimeout)" in text
     assert 'transport="HTTP"' in text
     assert '"PLAINTEXT_PROVIDER_FALLBACK"' in text
-    assert 'return name, payload, _status(\n                "PARTIAL"' in text
+    assert 'return name, payload, _status(\n                    "PARTIAL"' in text
 
 
 def test_geopolitical_layer_does_not_read_trade_outcomes_or_live_strategy_state():
