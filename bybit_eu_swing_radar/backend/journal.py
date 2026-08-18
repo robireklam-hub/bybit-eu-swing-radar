@@ -3,6 +3,7 @@
 The journal implementation lives in ``journal_core`` unchanged. This facade
 keeps schema DDL out of the normal worker hot path once all production journal
 relations already exist. It does not change signal lifecycle or outcome logic.
+The facade is deliberately small so journal behavior remains easy to audit.
 """
 from __future__ import annotations
 
