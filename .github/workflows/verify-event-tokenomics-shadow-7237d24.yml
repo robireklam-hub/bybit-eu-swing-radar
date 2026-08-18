@@ -1,0 +1,29 @@
+name: Verify production event tokenomics shadow 7237d24
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-production-event-tokenomics:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 7237d249b059aa5003bcdf3c6f48af7674b22164
+    steps:
+      - name: Check out exact production commit
+        uses: actions/checkout@v7
+        with:
+          ref: 7237d249b059aa5003bcdf3c6f48af7674b22164
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Verify exact-SHA production event tokenomics shadow
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_event_tokenomics_shadow_smoke.py
