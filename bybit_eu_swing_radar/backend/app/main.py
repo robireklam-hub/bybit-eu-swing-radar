@@ -423,3 +423,9 @@ attach_event_tokenomics_research(app, require_api_key)
 from app.research_btc_macro_cycle_etf_api import attach_btc_macro_cycle_etf_research
 
 attach_btc_macro_cycle_etf_research(app, require_api_key)
+
+# Research-only relative-strength shadow. It ranks the bounded Bybit EU USDC
+# universe using closed daily price history and has no live strategy mutation.
+from app.research_relative_strength_api import attach_relative_strength_research
+
+attach_relative_strength_research(app, require_api_key)
