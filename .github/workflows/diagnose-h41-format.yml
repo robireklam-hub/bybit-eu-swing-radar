@@ -1,0 +1,35 @@
+name: Diagnose Federal Reserve H41 format
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose-h41:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Fetch and summarize official H41 CSV structure
+        run: |
+          python - <<'PY'
+          import csv, io, urllib.request
+          url = 'https://www.federalreserve.gov/datadownload/Output.aspx?filetype=csv&from=&label=include&lastobs=100&layout=seriescolumn&rel=H41&series=3ab1b33ad80c27bc5cc4f8122b7a6440&to=&type=package'
+          req = urllib.request.Request(url, headers={'User-Agent':'bybit-eu-research-format-diagnostic/1'})
+          with urllib.request.urlopen(req, timeout=30) as r:
+              text = r.read().decode('utf-8', errors='replace')
+          print('CONTENT_TYPE=', r.headers.get('content-type'))
+          rows = list(csv.reader(io.StringIO(text)))
+          print('ROW_COUNT=', len(rows))
+          for i, row in enumerate(rows[:20]):
+              print('ROW', i, repr(row[:8]))
+          matches = []
+          for i, row in enumerate(rows):
+              if any('RESPPMA_N.WW' in str(cell) for cell in row):
+                  matches.append((i, row[:8]))
+          print('RESPPMA_MATCHES=', repr(matches[:10]))
+          PY
