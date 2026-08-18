@@ -9,7 +9,7 @@ def _capture() -> dict:
         "live_strategy_mutated": False,
         "promotion_allowed": False,
         "persisted": True,
-        "captured_at": "2026-08-18T06:00:00+00:00",
+        "captured_at": "2026-08-18T06:00:01+00:00",
         "captured_hour": "2026-08-18T06:00:00+00:00",
         "source_commit_sha": "abc",
         "spec": {"version": "event-tokenomics-shadow-v1"},
@@ -33,7 +33,7 @@ def test_validate_capture_accepts_missing_optional_keys() -> None:
     assert reason == "ok"
 
 
-def test_smoke_requires_persisted_status_visibility() -> None:
+def test_smoke_accepts_concurrent_same_hour_exact_sha_overwrite() -> None:
     capture = _capture()
 
     def fetch(url: str, api_key: str, timeout: float, method: str = "GET") -> dict:
@@ -46,8 +46,33 @@ def test_smoke_requires_persisted_status_visibility() -> None:
                 "research_only": True,
                 "promotion_allowed": False,
                 "snapshot_count": 1,
-                "latest": {"captured_at": capture["captured_at"]},
+                "latest": {
+                    "captured_at": "2026-08-18T06:00:02+00:00",
+                    "captured_hour": capture["captured_hour"],
+                    "source_commit_sha": "abc",
+                },
             }
         raise AssertionError(url)
 
     assert run_smoke("https://example", "key", "abc", fetch=fetch, sleep=lambda _: None) == 0
+
+
+def test_smoke_rejects_wrong_sha_even_in_same_hour() -> None:
+    capture = _capture()
+
+    def fetch(url: str, api_key: str, timeout: float, method: str = "GET") -> dict:
+        if url.endswith("/version"):
+            return {"commit_sha": "abc"}
+        if url.endswith("/capture"):
+            return capture
+        return {
+            "research_only": True,
+            "promotion_allowed": False,
+            "snapshot_count": 1,
+            "latest": {
+                "captured_hour": capture["captured_hour"],
+                "source_commit_sha": "older",
+            },
+        }
+
+    assert run_smoke("https://example", "key", "abc", fetch=fetch, sleep=lambda _: None) == 1

@@ -118,7 +118,16 @@ def run_smoke(
     if status.get("research_only") is not True or status.get("promotion_allowed") is not False:
         print("FAIL phase=status reason=research_contract_invalid")
         return 1
-    if int(status.get("snapshot_count") or 0) < 1 or latest.get("captured_at") != capture.get("captured_at"):
+    # Snapshots are intentionally idempotent per UTC hour. A concurrent scheduled
+    # capture may overwrite captured_at inside the same row between POST /capture
+    # and GET /status, so exact microsecond equality is not a valid persistence
+    # contract. The persisted row must instead be the same captured hour and exact
+    # production SHA.
+    if (
+        int(status.get("snapshot_count") or 0) < 1
+        or latest.get("captured_hour") != capture.get("captured_hour")
+        or latest.get("source_commit_sha") != expected_sha
+    ):
         print("FAIL phase=status reason=persisted_snapshot_not_visible")
         return 1
 
