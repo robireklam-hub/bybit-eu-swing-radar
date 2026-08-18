@@ -1,0 +1,31 @@
+name: Verify sector rotation production bcbf174
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/verify-sector-rotation-bcbf174.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: bcbf1740d61443de5e603bd98eee3c0a9903cb39
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: bcbf1740d61443de5e603bd98eee3c0a9903cb39
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Exact-main sector rotation production smoke
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_sector_rotation_smoke.py
