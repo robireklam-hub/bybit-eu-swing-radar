@@ -1,0 +1,87 @@
+name: Inspect v0.7.3 gate research state 6a80c53
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/verify-v073-gate-state-6a80c53.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 6a80c53f17eebd4972a527055f258b953ca6b44a
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 6a80c53f17eebd4972a527055f258b953ca6b44a
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Read existing v0.7.3 diagnostic dataset
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, time
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+
+          base=os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key=os.environ['PRODUCTION_RADAR_API_KEY']
+          expected=os.environ['EXPECTED_SHA']
+          def get(path, params=None, auth=True):
+              url=base+path
+              if params: url += '?' + urlencode(params)
+              headers={'Accept':'application/json','User-Agent':'v073-gate-state/1'}
+              if auth: headers['X-Radar-Key']=key
+              with urlopen(Request(url,headers=headers),timeout=45) as r:
+                  return json.loads(r.read().decode())
+          for i in range(40):
+              try:
+                  v=get('/version',auth=False)
+                  if v.get('commit_sha')==expected: break
+              except Exception: pass
+              if i==39: raise SystemExit('FAIL exact SHA not serving')
+              time.sleep(4)
+          status=get('/v1/day-trade/backtest/diagnostics/v073/status')
+          wf_all=get('/v1/day-trade/backtest/diagnostics/v073/waterfall',{'side':'both','split':'all','primary_only':'true'})
+          wf_val=get('/v1/day-trade/backtest/diagnostics/v073/waterfall',{'side':'both','split':'VALIDATION','primary_only':'true'})
+          edge_val=get('/v1/day-trade/backtest/diagnostics/v073/edge',{'side':'both','split':'VALIDATION','primary_only':'true'})
+          job=status.get('job') or {}
+          def compact_wf(p):
+              return {
+                  'sweep_count':p.get('sweep_count'),
+                  'waterfall':p.get('waterfall'),
+                  'first_failures':(p.get('first_failures') or [])[:12],
+              }
+          cohorts=[]
+          for item in edge_val.get('cohorts') or []:
+              stats=item.get('stats') or {}
+              cohorts.append({
+                  'cohort':item.get('cohort'),
+                  'n':stats.get('sample_size') or stats.get('count'),
+                  'mean_net_r':stats.get('mean_net_r'),
+                  'win_rate_pct':stats.get('win_rate_pct'),
+                  'median_net_r':stats.get('median_net_r'),
+              })
+          out={
+              'status':{
+                  'exists':status.get('exists'),'progress_pct':status.get('progress_pct'),
+                  'job_status':job.get('status'),'job_id':job.get('id'),
+                  'total_symbols':job.get('total_symbols'),'completed_symbols':job.get('completed_symbols'),
+                  'failed_symbols':job.get('failed_symbols'),'started_at':job.get('started_at'),'completed_at':job.get('completed_at'),
+                  'warnings':status.get('warnings'),
+              },
+              'all_primary':compact_wf(wf_all),
+              'validation_primary':compact_wf(wf_val),
+              'validation_edge_cohorts':cohorts,
+              'four_hour_context_ab':edge_val.get('four_hour_context_ab'),
+          }
+          print('V073_GATE_STATE='+json.dumps(out,sort_keys=True,default=str))
+          PY
