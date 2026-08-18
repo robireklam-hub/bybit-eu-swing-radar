@@ -1,0 +1,71 @@
+name: Inspect swing liquidity forward exact main 6a80c53
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    if: github.head_ref == 'ops/inspect-liquidity-forward-6a80c53'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Read durable swing-liquidity forward state
+        shell: bash
+        run: |
+          python -u - <<'PY'
+          import json, os
+          from datetime import datetime, timezone
+          from urllib.request import Request, urlopen
+
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key = os.environ['PRODUCTION_RADAR_API_KEY']
+          req = Request(
+              base + '/v1/research/swing-liquidity/forward-status',
+              headers={'Accept':'application/json','X-Radar-Key':key,'User-Agent':'liquidity-forward-inspect/1'},
+          )
+          with urlopen(req, timeout=20) as response:
+              payload = json.loads(response.read().decode())
+
+          last = payload.get('last_capture_at')
+          age = None
+          if last:
+              dt = datetime.fromisoformat(str(last).replace('Z','+00:00')).astimezone(timezone.utc)
+              age = (datetime.now(timezone.utc) - dt).total_seconds()
+
+          safe = {
+              'study': payload.get('study'),
+              'research_only': payload.get('research_only'),
+              'live_strategy_mutated': payload.get('live_strategy_mutated'),
+              'promotion_allowed': payload.get('promotion_allowed'),
+              'capture_count': payload.get('capture_count'),
+              'candidate_observations': payload.get('candidate_observations'),
+              'orderbook_errors': payload.get('orderbook_errors'),
+              'first_capture_at': payload.get('first_capture_at'),
+              'last_capture_at': last,
+              'last_capture_age_seconds': age,
+              'turnover_tiers': payload.get('turnover_tiers'),
+              'spread_tiers': payload.get('spread_tiers'),
+              'development_target_matured_events': payload.get('development_target_matured_events'),
+              'validation_target_matured_events': payload.get('validation_target_matured_events'),
+          }
+          print('SWING_LIQUIDITY_FORWARD_INSPECTION=' + json.dumps(safe, sort_keys=True), flush=True)
+
+          if payload.get('study') != 'swing-liquidity-validation-v1':
+              raise SystemExit('FAIL unexpected study')
+          if payload.get('research_only') is not True or payload.get('live_strategy_mutated') is not False or payload.get('promotion_allowed') is not False:
+              raise SystemExit('FAIL research/live invariants changed')
+          if int(payload.get('capture_count') or 0) <= 0 or int(payload.get('candidate_observations') or 0) <= 0:
+              raise SystemExit('FAIL no durable forward data')
+          print('SWING LIQUIDITY FORWARD STATE INSPECTED.', flush=True)
+          PY
