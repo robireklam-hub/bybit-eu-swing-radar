@@ -24,47 +24,67 @@ jobs:
         with:
           ref: b54fbd01e086d1f7d1b57d6324d32241e11e2d89
 
+      - name: Install Railway CLI
+        run: bash <(curl -fsSL https://railway.com/install.sh) -y
+
+      - name: Link target recorder service
+        run: |
+          railway link --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" >/dev/null
+          railway service link "$RECORDER_SERVICE" >/dev/null
+
       - name: Set recorder service instance configuration via Railway API
         shell: bash
         run: |
-          body=$(cat <<JSON
-          {"query":"mutation serviceInstanceUpdate($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) { serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input) }","variables":{"serviceId":"$RECORDER_SERVICE_ID","environmentId":"$ENVIRONMENT_ID","input":{"startCommand":"python -m research.microstructure.standalone","restartPolicyType":"ON_FAILURE","restartPolicyMaxRetries":10}}}
-          JSON
+          python3 - <<'PY'
+          import json, os, urllib.request
+          query = '''
+          mutation serviceInstanceUpdate($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) {
+            serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input)
+          }
+          '''
+          payload = {
+            "query": query,
+            "variables": {
+              "serviceId": os.environ["RECORDER_SERVICE_ID"],
+              "environmentId": os.environ["ENVIRONMENT_ID"],
+              "input": {
+                "startCommand": "python -m research.microstructure.standalone",
+                "restartPolicyType": "ON_FAILURE",
+                "restartPolicyMaxRetries": 10,
+              },
+            },
+          }
+          req = urllib.request.Request(
+            "https://backboard.railway.com/graphql/v2",
+            data=json.dumps(payload).encode(),
+            headers={
+              "Authorization": f"Bearer {os.environ['RAILWAY_API_TOKEN']}",
+              "Content-Type": "application/json",
+            },
+            method="POST",
           )
-          response=$(curl -fsS -X POST 'https://backboard.railway.com/graphql/v2' \
-            -H "Authorization: Bearer $RAILWAY_API_TOKEN" \
-            -H 'Content-Type: application/json' \
-            --data "$body")
-          if printf '%s' "$response" | grep -q '"errors"'; then
-            echo "FAIL Railway GraphQL serviceInstanceUpdate returned errors"
-            printf '%s\n' "$response" | sed -E 's/[A-Za-z0-9_-]{24,}/[redacted]/g'
-            exit 1
-          fi
-          if ! printf '%s' "$response" | grep -q '"serviceInstanceUpdate":true'; then
-            echo "FAIL Railway GraphQL serviceInstanceUpdate did not confirm success"
-            printf '%s\n' "$response" | sed -E 's/[A-Za-z0-9_-]{24,}/[redacted]/g'
-            exit 1
-          fi
-          echo "Recorder service instance configuration updated."
+          with urllib.request.urlopen(req, timeout=20) as r:
+            result = json.load(r)
+          if result.get("errors"):
+            raise SystemExit("Railway serviceInstanceUpdate returned GraphQL errors")
+          if result.get("data", {}).get("serviceInstanceUpdate") is not True:
+            raise SystemExit("Railway serviceInstanceUpdate did not confirm success")
+          print("Recorder service instance configuration updated.")
+          PY
 
       - name: Deploy exact backend source
         run: |
-          docker run --rm \
-            -e RAILWAY_API_TOKEN="$RAILWAY_API_TOKEN" \
-            -v "$PWD:/workspace" -w /workspace \
-            ghcr.io/railwayapp/cli:latest \
-            railway up bybit_eu_swing_radar/backend \
-              --service "$RECORDER_SERVICE_ID" \
-              --environment "$ENVIRONMENT_ID" \
-              --project "$PROJECT_ID" \
-              --path-as-root --detach
+          railway up bybit_eu_swing_radar/backend \
+            --service "$RECORDER_SERVICE_ID" \
+            --environment "$ENVIRONMENT_ID" \
+            --project "$PROJECT_ID" \
+            --path-as-root --detach
 
       - name: Wait for successful recorder deployment
         shell: bash
         run: |
           for i in $(seq 1 60); do
-            status=$(docker run --rm -e RAILWAY_API_TOKEN="$RAILWAY_API_TOKEN" ghcr.io/railwayapp/cli:latest \
-              railway service status --service "$RECORDER_SERVICE_ID" --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" --json 2>/dev/null || true)
+            status=$(railway service status --service "$RECORDER_SERVICE_ID" --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" --json 2>/dev/null || true)
             printf '%s\n' "$status" >/tmp/status.json
             if printf '%s' "$status" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"SUCCESS"'; then
               echo "MICROSTRUCTURE RECORDER SERVICE DEPLOYMENT SUCCESS."
@@ -74,8 +94,8 @@ jobs:
               deployment_id=$(printf '%s' "$status" | sed -nE 's/.*"deploymentId"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p')
               echo "FAIL recorder deployment terminal state"
               if [ -n "$deployment_id" ]; then
-                docker run --rm -e RAILWAY_API_TOKEN="$RAILWAY_API_TOKEN" ghcr.io/railwayapp/cli:latest railway logs "$deployment_id" --build --lines 120 || true
-                docker run --rm -e RAILWAY_API_TOKEN="$RAILWAY_API_TOKEN" ghcr.io/railwayapp/cli:latest railway logs "$deployment_id" --deployment --lines 120 || true
+                railway logs "$deployment_id" --build --lines 120 || true
+                railway logs "$deployment_id" --deployment --lines 120 || true
               fi
               exit 1
             fi
