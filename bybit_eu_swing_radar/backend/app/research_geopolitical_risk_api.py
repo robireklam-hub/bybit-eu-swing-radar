@@ -22,6 +22,10 @@ from research.geopolitical_risk_shadow import (
 
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 GDELT_DOC_HTTP_URL = "http://api.gdeltproject.org/api/v2/doc/doc"
+GDELT_REQUEST_SPACING_SECONDS = 6.0
+GDELT_MAX_RATE_LIMIT_RETRIES = 2
+GDELT_RATE_LIMIT_BACKOFF_SECONDS = (12.0, 24.0)
+GDELT_MAX_RETRY_AFTER_SECONDS = 60.0
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS research_geopolitical_risk_snapshots (
@@ -63,6 +67,7 @@ def _status(
     reason: str | None = None,
     url: str = GDELT_DOC_URL,
     transport: str = "HTTPS",
+    rate_limit_retries: int = 0,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "status": status,
@@ -73,30 +78,54 @@ def _status(
         "url": url,
         "transport": transport,
         "transport_security": "TLS" if transport == "HTTPS" else "PLAINTEXT_PROVIDER_FALLBACK",
+        "rate_limit_retries": int(rate_limit_retries),
+        "request_spacing_seconds": GDELT_REQUEST_SPACING_SECONDS,
     }
     if reason:
         payload["reason"] = reason
     return payload
 
 
+def _retry_delay(response: httpx.Response, attempt: int) -> float:
+    """Return a bounded provider-friendly delay for a 429 retry."""
+    retry_after = response.headers.get("Retry-After")
+    if retry_after not in (None, ""):
+        try:
+            seconds = float(retry_after)
+        except (TypeError, ValueError):
+            seconds = 0.0
+        if seconds > 0:
+            return min(seconds, GDELT_MAX_RETRY_AFTER_SECONDS)
+    index = min(max(int(attempt), 0), len(GDELT_RATE_LIMIT_BACKOFF_SECONDS) - 1)
+    return GDELT_RATE_LIMIT_BACKOFF_SECONDS[index]
+
+
 async def _provider_request(
     client: httpx.AsyncClient,
-    semaphore: asyncio.Semaphore,
     url: str,
     params: Mapping[str, str],
-) -> dict[str, Any]:
-    async with semaphore:
+) -> tuple[dict[str, Any], int]:
+    """Fetch one GDELT query with bounded 429-only retries.
+
+    Other HTTP errors remain terminal. Connection errors are intentionally
+    propagated so `_fetch_topic` can apply the separately documented official
+    HTTP transport fallback only for connect-level failures.
+    """
+    for attempt in range(GDELT_MAX_RATE_LIMIT_RETRIES + 1):
         response = await client.get(url, params=params)
-    response.raise_for_status()
-    payload = response.json()
-    if not isinstance(payload, dict):
-        raise ValueError("Provider returned non-object JSON")
-    return payload
+        if response.status_code == 429 and attempt < GDELT_MAX_RATE_LIMIT_RETRIES:
+            await asyncio.sleep(_retry_delay(response, attempt))
+            continue
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Provider returned non-object JSON")
+        return payload, attempt
+    raise RuntimeError("Unreachable GDELT retry state")
 
 
 async def _fetch_topic(
     client: httpx.AsyncClient,
-    semaphore: asyncio.Semaphore,
     name: str,
     definition: Mapping[str, str],
 ) -> tuple[str, dict[str, Any], dict[str, Any]]:
@@ -109,17 +138,33 @@ async def _fetch_topic(
     }
 
     try:
-        payload = await _provider_request(client, semaphore, GDELT_DOC_URL, params)
+        payload, rate_limit_retries = await _provider_request(client, GDELT_DOC_URL, params)
         points = extract_timeline_points(payload)
         if not points:
-            return name, payload, _status("PARTIAL", reason="No valid TimelineVolRaw bins returned")
-        return name, payload, _status("LIVE", bins=len(points))
+            return name, payload, _status(
+                "PARTIAL",
+                reason="No valid TimelineVolRaw bins returned",
+                rate_limit_retries=rate_limit_retries,
+            )
+        reason = (
+            "Recovered after bounded GDELT 429 backoff"
+            if rate_limit_retries > 0
+            else None
+        )
+        return name, payload, _status(
+            "LIVE",
+            bins=len(points),
+            reason=reason,
+            rate_limit_retries=rate_limit_retries,
+        )
     except (httpx.ConnectError, httpx.ConnectTimeout) as https_exc:
         # GDELT officially supports DOC 2.0 over both HTTPS and HTTP. HTTP is
         # used only when the TLS endpoint cannot be connected to from the
         # runtime network, and the downgrade remains explicit in provenance.
         try:
-            payload = await _provider_request(client, semaphore, GDELT_DOC_HTTP_URL, params)
+            payload, rate_limit_retries = await _provider_request(
+                client, GDELT_DOC_HTTP_URL, params
+            )
             points = extract_timeline_points(payload)
             if not points:
                 return name, payload, _status(
@@ -129,13 +174,17 @@ async def _fetch_topic(
                     ),
                     url=GDELT_DOC_HTTP_URL,
                     transport="HTTP",
+                    rate_limit_retries=rate_limit_retries,
                 )
             return name, payload, _status(
                 "PARTIAL",
                 bins=len(points),
-                reason=f"HTTPS {type(https_exc).__name__}; official HTTP transport fallback used",
+                reason=(
+                    f"HTTPS {type(https_exc).__name__}; official HTTP transport fallback used"
+                ),
                 url=GDELT_DOC_HTTP_URL,
                 transport="HTTP",
+                rate_limit_retries=rate_limit_retries,
             )
         except Exception as http_exc:
             return name, {}, _status(
@@ -145,26 +194,29 @@ async def _fetch_topic(
                 ),
             )
     except Exception as exc:
-        return name, {}, _status("ERROR", reason=f"{type(exc).__name__}: {str(exc)[:180]}")
+        return name, {}, _status(
+            "ERROR", reason=f"{type(exc).__name__}: {str(exc)[:180]}"
+        )
 
 
 async def build_current_snapshot() -> dict[str, Any]:
     now = datetime.now(timezone.utc)
-    timeout = httpx.Timeout(30.0, connect=10.0)
-    limits = httpx.Limits(max_connections=3, max_keepalive_connections=2)
-    semaphore = asyncio.Semaphore(2)
+    timeout = httpx.Timeout(35.0, connect=10.0)
+    limits = httpx.Limits(max_connections=2, max_keepalive_connections=1)
+    results: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
     async with httpx.AsyncClient(
         timeout=timeout,
         limits=limits,
         follow_redirects=True,
         headers={"User-Agent": "bybit-eu-geopolitical-risk-shadow/1"},
     ) as client:
-        results = await asyncio.gather(
-            *(
-                _fetch_topic(client, semaphore, name, definition)
-                for name, definition in TOPICS.items()
-            )
-        )
+        # GDELT explicitly rate-limits its hosted APIs. Five fixed research
+        # queries per hour are therefore deliberately serialized and paced,
+        # rather than submitted as a burst via asyncio.gather.
+        for index, (name, definition) in enumerate(TOPICS.items()):
+            if index:
+                await asyncio.sleep(GDELT_REQUEST_SPACING_SECONDS)
+            results.append(await _fetch_topic(client, name, definition))
 
     topic_payloads: dict[str, dict[str, Any]] = {}
     source_status: dict[str, dict[str, Any]] = {}
