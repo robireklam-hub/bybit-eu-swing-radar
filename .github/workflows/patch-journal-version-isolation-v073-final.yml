@@ -4,6 +4,11 @@ on:
   push:
     branches:
       - "fix/journal-version-isolation-v073-final"
+      - "fix/journal-version-isolation-v073-final2"
+    paths:
+      - ".github/workflows/patch-journal-version-isolation-v073-final.yml"
+  pull_request:
+    branches: [main]
     paths:
       - ".github/workflows/patch-journal-version-isolation-v073-final.yml"
 
@@ -14,11 +19,11 @@ jobs:
   patch:
     runs-on: ubuntu-latest
     env:
-      TARGET_BRANCH: ${{ github.ref_name }}
+      TARGET_BRANCH: ${{ github.event.pull_request.head.ref || github.ref_name }}
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.ref_name }}
+          ref: ${{ github.event.pull_request.head.ref || github.ref_name }}
           fetch-depth: 0
       - name: Apply version isolation and self-remove
         shell: bash
