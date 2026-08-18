@@ -277,3 +277,9 @@ def attach_derivatives_positioning_research(app: FastAPI, require_api_key: Calla
                 status_code=503,
                 detail=f"Research derivatives-positioning status unavailable: {type(exc).__name__}",
             ) from exc
+
+    # Research-only liquidation context collector. It is attached under the
+    # existing research router and never enters live strategy/scoring/execution.
+    from app.research_liquidation_context_api import attach_liquidation_context_research
+
+    attach_liquidation_context_research(app, require_api_key)

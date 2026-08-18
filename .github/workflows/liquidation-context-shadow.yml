@@ -1,0 +1,38 @@
+name: Liquidation context shadow
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "bybit_eu_swing_radar/backend/research/liquidation_context_shadow.py"
+      - "bybit_eu_swing_radar/backend/app/research_liquidation_context_api.py"
+      - "bybit_eu_swing_radar/backend/app/research_derivatives_positioning_api.py"
+      - "bybit_eu_swing_radar/backend/scripts/production_liquidation_context_smoke.py"
+      - ".github/workflows/liquidation-context-shadow.yml"
+  schedule:
+    - cron: "34 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  capture-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: ${{ github.sha }}
+    steps:
+      - name: Check out exact commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Capture and verify liquidation context
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_liquidation_context_smoke.py
