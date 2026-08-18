@@ -75,3 +75,19 @@ def test_event_smoke_rejects_wrong_maturity_horizon():
     payload["events"][0]["matures_at"] = (trigger + timedelta(days=9)).isoformat()
 
     assert any("wrong_maturity_horizon" in failure for failure in validate_event_payload(payload))
+
+
+def test_event_smoke_rejects_multiple_first_triggers_for_same_symbol_side():
+    first = _event()
+    second = dict(first)
+    later_trigger = datetime.fromisoformat(first["trigger_close_at"]) + timedelta(hours=4)
+    second["trigger_bar_start_at"] = (later_trigger - timedelta(hours=4)).isoformat()
+    second["trigger_close_at"] = later_trigger.isoformat()
+    second["matures_at"] = (later_trigger + timedelta(days=10)).isoformat()
+    second["pretrigger_captured_at"] = (later_trigger - timedelta(minutes=30)).isoformat()
+    second["source_capture_at"] = second["pretrigger_captured_at"]
+    second["event_id"] = f"BTCUSDC:long:{later_trigger.isoformat()}"
+
+    failures = validate_event_payload(_payload(events=[first, second]))
+
+    assert any("duplicate_symbol_side_first_trigger" in failure for failure in failures)

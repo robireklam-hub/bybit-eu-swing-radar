@@ -106,6 +106,7 @@ def validate_event_payload(payload: dict[str, Any]) -> list[str]:
         failures.append(str(exc))
 
     ids: set[str] = set()
+    symbol_sides: set[tuple[str, str]] = set()
     for index, event in enumerate(events):
         prefix = f"event[{index}]"
         if not isinstance(event, dict):
@@ -118,6 +119,18 @@ def validate_event_payload(payload: dict[str, Any]) -> list[str]:
         forbidden = sorted(FORBIDDEN_EVENT_KEYS.intersection(str(key).lower() for key in event))
         if forbidden:
             failures.append(f"{prefix}_forbidden_keys:" + ",".join(forbidden))
+
+        symbol = str(event.get("symbol") or "").upper()
+        side = str(event.get("side") or "").lower()
+        if not symbol or side not in {"long", "short"}:
+            failures.append(f"{prefix}_invalid_symbol_side")
+        else:
+            symbol_side = (symbol, side)
+            if symbol_side in symbol_sides:
+                failures.append(f"{prefix}_duplicate_symbol_side_first_trigger")
+            else:
+                symbol_sides.add(symbol_side)
+
         event_id = event.get("event_id")
         if not isinstance(event_id, str) or not event_id:
             failures.append(f"{prefix}_missing_event_id")
