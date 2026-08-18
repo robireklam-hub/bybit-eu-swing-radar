@@ -1,0 +1,53 @@
+name: Patch day-worker source SHA metadata
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.head_ref == 'ops/day-worker-source-sha'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+      - name: Apply minimal source SHA metadata patch and self-remove
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('bybit_eu_swing_radar/backend/day_worker.py')
+          text = path.read_text()
+          old_constants = '''DATABASE_URL = os.getenv("DATABASE_URL", "")
+DAY_STRATEGY_VERSION = "0.7.3"'''
+          new_constants = '''DATABASE_URL = os.getenv("DATABASE_URL", "")
+SOURCE_COMMIT_SHA = os.getenv("RAILWAY_GIT_COMMIT_SHA") or None
+DAY_STRATEGY_VERSION = "0.7.3"'''
+          old_status = '''            "worker": {
+                "status": "ok",
+                "strategy_mode": "DAY_TRADE",
+                "duration_seconds": round(elapsed, 2),'''
+          new_status = '''            "worker": {
+                "status": "ok",
+                "strategy_mode": "DAY_TRADE",
+                "source_commit_sha": SOURCE_COMMIT_SHA,
+                "duration_seconds": round(elapsed, 2),'''
+          if text.count(old_constants) != 1 or text.count(old_status) != 1:
+              raise SystemExit('day_worker source contract changed; refusing blind patch')
+          path.write_text(text.replace(old_constants, new_constants, 1).replace(old_status, new_status, 1))
+
+          Path('bybit_eu_swing_radar/backend/test_day_worker_source_commit.py').write_text('''from pathlib import Path\n\n\nBACKEND = Path(__file__).resolve().parent\n\n\ndef test_day_worker_persists_railway_source_commit_identity():\n    text = (BACKEND / "day_worker.py").read_text(encoding="utf-8")\n    assert 'SOURCE_COMMIT_SHA = os.getenv("RAILWAY_GIT_COMMIT_SHA") or None' in text\n    assert '"source_commit_sha": SOURCE_COMMIT_SHA' in text\n\n\ndef test_source_commit_metadata_does_not_change_strategy_version():\n    text = (BACKEND / "day_worker.py").read_text(encoding="utf-8")\n    assert 'DAY_STRATEGY_VERSION = "0.7.3"' in text\n''')
+          Path('.github/workflows/patch-day-worker-source-sha.yml').unlink()
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bybit_eu_swing_radar/backend/day_worker.py bybit_eu_swing_radar/backend/test_day_worker_source_commit.py .github/workflows/patch-day-worker-source-sha.yml
+          git diff --cached --check
+          git commit -m "Expose day-worker source commit SHA"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
