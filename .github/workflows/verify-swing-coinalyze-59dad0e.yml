@@ -1,0 +1,31 @@
+name: Verify swing Coinalyze semantics 59dad0e
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 59dad0eb20087856413e8234c2bf993f5f3b48a2
+    steps:
+      - name: Check out exact production commit
+        uses: actions/checkout@v7
+        with:
+          ref: 59dad0eb20087856413e8234c2bf993f5f3b48a2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Verify exact-SHA swing Coinalyze candidate semantics
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_coinalyze_smoke.py
