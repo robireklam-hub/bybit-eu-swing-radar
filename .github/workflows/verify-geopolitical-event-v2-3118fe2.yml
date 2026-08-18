@@ -1,0 +1,29 @@
+name: Verify geopolitical Event v2 production 3118fe2
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 3118fe2281e134db72c4066abcc65fa75b47ba4a
+    steps:
+      - name: Check out exact merged main
+        uses: actions/checkout@v7
+        with:
+          ref: 3118fe2281e134db72c4066abcc65fa75b47ba4a
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Run exact-main geopolitical Event v2 production smoke
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_geopolitical_event_v2_smoke.py
