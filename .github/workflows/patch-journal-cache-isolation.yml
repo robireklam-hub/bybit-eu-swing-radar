@@ -1,0 +1,291 @@
+name: Patch journal cache isolation
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.head_ref == 'ops/journal-cache-isolation'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ops/journal-cache-isolation
+      - name: Isolate journal persistence from live cache persistence
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('bybit_eu_swing_radar/backend/day_worker.py')
+          text = path.read_text()
+
+          marker = '''DAY_PROSPECTIVE_FUNNEL_INLINE_ENABLED = os.getenv(
+              "DAY_PROSPECTIVE_FUNNEL_INLINE_ENABLED", "false"
+          ).strip().lower() in {"1", "true", "yes", "on"}
+'''
+          replacement = '''DAY_JOURNAL_PERSIST_TIMEOUT_SECONDS = min(
+              max(env_float("DAY_JOURNAL_PERSIST_TIMEOUT_SECONDS", 8.0), 1.0),
+              30.0,
+          )
+          DAY_PROSPECTIVE_FUNNEL_INLINE_ENABLED = os.getenv(
+              "DAY_PROSPECTIVE_FUNNEL_INLINE_ENABLED", "false"
+          ).strip().lower() in {"1", "true", "yes", "on"}
+'''
+          if marker not in text:
+              raise SystemExit('constant marker not found')
+          text = text.replace(marker, replacement, 1)
+
+          start = text.index('async def persist_day_results(')
+          end = text.index('\n\nasync def run() -> None:', start)
+          new_func = r'''async def persist_day_results(
+              scan: dict[str, Any],
+              setups: list[dict[str, Any]],
+              status: dict[str, Any],
+              bars_by_symbol: dict[str, list[Bar]],
+              analyses: list[DayAnalysis],
+          ) -> dict[str, Any]:
+              print("Day worker persistence: journal-start", flush=True)
+              journal_status: dict[str, Any]
+              journal_connection: asyncpg.Connection | None = None
+              try:
+                  journal_connection = await asyncpg.connect(
+                      DATABASE_URL,
+                      timeout=15,
+                      command_timeout=DAY_JOURNAL_PERSIST_TIMEOUT_SECONDS,
+                  )
+
+                  async def persist_journal_once() -> dict[str, Any]:
+                      assert journal_connection is not None
+                      async with journal_connection.transaction():
+                          return await persist_day_journal(
+                              journal_connection,
+                              setups,
+                              bars_by_symbol,
+                              scan,
+                              status,
+                          )
+
+                  journal_status = await asyncio.wait_for(
+                      persist_journal_once(),
+                      timeout=DAY_JOURNAL_PERSIST_TIMEOUT_SECONDS,
+                  )
+                  print("Day worker persistence: journal-complete", flush=True)
+              except TimeoutError:
+                  journal_status = {
+                      "enabled": True,
+                      "status": "DEGRADED",
+                      "strategy_version": DAY_STRATEGY_VERSION,
+                      "new_signals": 0,
+                      "evaluated_signals": 0,
+                      "closed_signals": 0,
+                      "active_signals": 0,
+                      "reason": (
+                          "JOURNAL_PERSIST_TIMEOUT_AFTER_"
+                          f"{DAY_JOURNAL_PERSIST_TIMEOUT_SECONDS:g}S"
+                      ),
+                  }
+                  print(
+                      f"Day worker persistence: journal-degraded reason={journal_status['reason']}",
+                      flush=True,
+                  )
+              except Exception as exc:
+                  journal_status = {
+                      "enabled": True,
+                      "status": "DEGRADED",
+                      "strategy_version": DAY_STRATEGY_VERSION,
+                      "new_signals": 0,
+                      "evaluated_signals": 0,
+                      "closed_signals": 0,
+                      "active_signals": 0,
+                      "reason": f"JOURNAL_PERSIST_{type(exc).__name__}",
+                  }
+                  print(
+                      f"Day worker persistence: journal-degraded reason={journal_status['reason']}",
+                      flush=True,
+                  )
+              finally:
+                  if journal_connection is not None:
+                      try:
+                          await asyncio.wait_for(journal_connection.close(), timeout=2.0)
+                      except Exception:
+                          try:
+                              journal_connection.terminate()
+                          except Exception:
+                              pass
+
+              scan["journal"] = journal_status
+              status["journal"] = journal_status
+
+              print("Day worker persistence: cache-start", flush=True)
+              connection = await asyncpg.connect(DATABASE_URL, timeout=15, command_timeout=15)
+              try:
+                  async with connection.transaction():
+                      if DAY_PROSPECTIVE_FUNNEL_INLINE_ENABLED:
+                          try:
+                              async with connection.transaction():
+                                  funnel_status = await asyncio.wait_for(
+                                      persist_v073_prospective_funnel(
+                                          connection,
+                                          analyses,
+                                          captured_at=datetime.fromisoformat(scan["data_as_of"]),
+                                          source_commit_sha=SOURCE_COMMIT_SHA,
+                                          volume_confirmation_ratio=DAY_TRIGGER_VOLUME_RATIO,
+                                          live_setups=setups,
+                                      ),
+                                      timeout=DAY_PROSPECTIVE_FUNNEL_TIMEOUT_SECONDS,
+                                  )
+                          except TimeoutError:
+                              funnel_status = {
+                                  "status": "DEGRADED",
+                                  "research_only": True,
+                                  "label_free": True,
+                                  "outcome_labels_stored": False,
+                                  "spec_version": "v073-prospective-funnel-v1",
+                                  "strategy_version": DAY_STRATEGY_VERSION,
+                                  "captured_at": scan["data_as_of"],
+                                  "source_commit_sha": SOURCE_COMMIT_SHA,
+                                  "reason": (
+                                      "PROSPECTIVE_FUNNEL_TIMEOUT_AFTER_"
+                                      f"{DAY_PROSPECTIVE_FUNNEL_TIMEOUT_SECONDS:g}S"
+                                  ),
+                              }
+                          except Exception as exc:
+                              funnel_status = {
+                                  "status": "DEGRADED",
+                                  "research_only": True,
+                                  "label_free": True,
+                                  "outcome_labels_stored": False,
+                                  "spec_version": "v073-prospective-funnel-v1",
+                                  "strategy_version": DAY_STRATEGY_VERSION,
+                                  "captured_at": scan["data_as_of"],
+                                  "source_commit_sha": SOURCE_COMMIT_SHA,
+                                  "reason": str(exc),
+                              }
+                      else:
+                          funnel_status = {
+                              "status": "DISABLED",
+                              "enabled": False,
+                              "research_only": True,
+                              "label_free": True,
+                              "outcome_labels_stored": False,
+                              "spec_version": "v073-prospective-funnel-v1",
+                              "strategy_version": DAY_STRATEGY_VERSION,
+                              "captured_at": scan["data_as_of"],
+                              "source_commit_sha": SOURCE_COMMIT_SHA,
+                              "reason": "INLINE_RECORDER_DISABLED_FOR_LIVE_WORKER_ISOLATION",
+                          }
+                      scan["prospective_funnel"] = funnel_status
+                      status["prospective_funnel"] = funnel_status
+
+                      await upsert_cache(connection, "day_trade_scan", scan)
+                      await upsert_cache(connection, "day_trade_status", status)
+
+                      best_by_symbol: dict[str, dict[str, Any]] = {}
+                      for setup in setups:
+                          current = best_by_symbol.get(setup["symbol"])
+                          if current is None or setup["setup_score"] > current["setup_score"]:
+                              best_by_symbol[setup["symbol"]] = setup
+                      for setup in best_by_symbol.values():
+                          await upsert_cache(
+                              connection,
+                              f"day_trade_setup:{setup['symbol']}",
+                              setup,
+                          )
+
+                      audit_by_symbol: dict[str, dict[str, Any]] = {}
+                      for setup in setups:
+                          record = audit_by_symbol.setdefault(
+                              setup["symbol"],
+                              {
+                                  "strategy_mode": "DAY_TRADE",
+                                  "strategy_version": DAY_STRATEGY_VERSION,
+                                  "data_as_of": scan["data_as_of"],
+                                  "data_as_of_budapest": scan["data_as_of_budapest"],
+                                  "symbol": setup["symbol"],
+                                  "long": None,
+                                  "short": None,
+                                  "notes": [
+                                      "Compact audit payload; no ranking or fallback transformation is applied.",
+                                      "Both sides come from the same cached day-trade worker snapshot.",
+                                      "Barrier provenance is emitted only for confirmed 15m pivots outside the trigger window.",
+                                  ],
+                              },
+                          )
+                          record[setup["side"]] = compact_day_audit_side(setup)
+
+                      for symbol, audit_payload in audit_by_symbol.items():
+                          await upsert_cache(
+                              connection,
+                              f"day_trade_audit:{symbol}",
+                              audit_payload,
+                          )
+                  print("Day worker persistence: cache-complete", flush=True)
+                  return journal_status
+              finally:
+                  await connection.close()
+          '''
+          text = text[:start] + new_func + text[end:]
+          path.write_text(text)
+
+          test = Path('bybit_eu_swing_radar/backend/test_prospective_funnel_timeout.py')
+          t = test.read_text()
+          addition = r'''
+
+          @pytest.mark.asyncio
+          async def test_journal_timeout_does_not_block_live_cache_persistence(monkeypatch):
+              connections = [_Connection(), _Connection()]
+              cache_writes = []
+
+              async def fake_connect(*args, **kwargs):
+                  return connections.pop(0)
+
+              async def hanging_journal(*args, **kwargs):
+                  await asyncio.sleep(1)
+                  return {"enabled": True, "active_signals": 0}
+
+              async def must_not_run(*args, **kwargs):
+                  raise AssertionError("inline prospective recorder must remain disabled")
+
+              async def fake_upsert(_connection, key, payload):
+                  cache_writes.append((key, payload))
+
+              monkeypatch.setattr(day_worker.asyncpg, "connect", fake_connect)
+              monkeypatch.setattr(day_worker, "persist_day_journal", hanging_journal)
+              monkeypatch.setattr(day_worker, "persist_v073_prospective_funnel", must_not_run)
+              monkeypatch.setattr(day_worker, "upsert_cache", fake_upsert)
+              monkeypatch.setattr(day_worker, "DAY_JOURNAL_PERSIST_TIMEOUT_SECONDS", 0.01)
+              monkeypatch.setattr(day_worker, "DAY_PROSPECTIVE_FUNNEL_INLINE_ENABLED", False)
+
+              scan = {
+                  "data_as_of": "2026-08-18T15:15:00+00:00",
+                  "data_as_of_budapest": "2026-08-18T17:15:00+02:00",
+              }
+              status = {}
+
+              journal = await day_worker.persist_day_results(scan, [], status, {}, [])
+
+              assert journal["status"] == "DEGRADED"
+              assert journal["reason"] == "JOURNAL_PERSIST_TIMEOUT_AFTER_0.01S"
+              assert status["journal"] == journal
+              assert status["prospective_funnel"]["status"] == "DISABLED"
+              assert {key for key, _ in cache_writes} >= {"day_trade_scan", "day_trade_status"}
+
+
+          def test_journal_persist_timeout_is_bounded_by_configuration():
+              assert 1.0 <= day_worker.DAY_JOURNAL_PERSIST_TIMEOUT_SECONDS <= 30.0
+          '''
+          if 'test_journal_timeout_does_not_block_live_cache_persistence' not in t:
+              t += addition
+          test.write_text(t)
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bybit_eu_swing_radar/backend/day_worker.py bybit_eu_swing_radar/backend/test_prospective_funnel_timeout.py
+          git diff --cached --check
+          git commit -m "Ops: isolate journal persistence from live cache"
+          git push origin HEAD:ops/journal-cache-isolation
