@@ -31,7 +31,6 @@ import asyncpg
 import httpx
 
 from journal import persist_day_journal
-from research.prospective_funnel_v073 import persist_v073_prospective_funnel
 from sweep_research import SweepResearchConfig, latest_bar_sweep_setup
 
 from worker import (
@@ -92,13 +91,7 @@ DAY_MIN_EXPANSION_SCORE = env_float("DAY_MIN_EXPANSION_SCORE", 55.0)
 DAY_MIN_DIRECTION_SCORE = env_float("DAY_MIN_DIRECTION_SCORE", 35.0)
 DAY_MIN_QUALITY_SCORE = env_float("DAY_MIN_QUALITY_SCORE", 65.0)
 DAY_TRIGGER_VOLUME_RATIO = env_float("DAY_TRIGGER_VOLUME_RATIO", 1.3)
-DAY_PROSPECTIVE_FUNNEL_TIMEOUT_SECONDS = min(
-    max(env_float("DAY_PROSPECTIVE_FUNNEL_TIMEOUT_SECONDS", 8.0), 1.0),
-    30.0,
-)
-DAY_PROSPECTIVE_FUNNEL_INLINE_ENABLED = os.getenv(
-    "DAY_PROSPECTIVE_FUNNEL_INLINE_ENABLED", "false"
-).strip().lower() in {"1", "true", "yes", "on"}
+PROSPECTIVE_FUNNEL_SPEC_VERSION = "v073-prospective-funnel-v1"
 DAY_BARRIER_LOOKBACK_15M = min(max(env_int("DAY_BARRIER_LOOKBACK_15M", 96), 32), 240)
 DAY_BARRIER_PIVOT_LEFT = min(max(env_int("DAY_BARRIER_PIVOT_LEFT", 2), 1), 5)
 DAY_BARRIER_PIVOT_RIGHT = min(max(env_int("DAY_BARRIER_PIVOT_RIGHT", 2), 1), 5)
@@ -1211,7 +1204,6 @@ async def persist_day_results(
     setups: list[dict[str, Any]],
     status: dict[str, Any],
     bars_by_symbol: dict[str, list[Bar]],
-    analyses: list[DayAnalysis],
 ) -> dict[str, Any]:
     connection = await asyncpg.connect(DATABASE_URL, timeout=30)
     try:
@@ -1226,62 +1218,20 @@ async def persist_day_results(
             scan["journal"] = journal_status
             status["journal"] = journal_status
 
-            if DAY_PROSPECTIVE_FUNNEL_INLINE_ENABLED:
-                try:
-                    # Research-only sidecar: opt-in only. The default live worker
-                    # path skips this recorder so research cannot block production.
-                    async with connection.transaction():
-                        funnel_status = await asyncio.wait_for(
-                            persist_v073_prospective_funnel(
-                                connection,
-                                analyses,
-                                captured_at=datetime.fromisoformat(scan["data_as_of"]),
-                                source_commit_sha=SOURCE_COMMIT_SHA,
-                                volume_confirmation_ratio=DAY_TRIGGER_VOLUME_RATIO,
-                                live_setups=setups,
-                            ),
-                            timeout=DAY_PROSPECTIVE_FUNNEL_TIMEOUT_SECONDS,
-                        )
-                except TimeoutError:
-                    funnel_status = {
-                        "status": "DEGRADED",
-                        "research_only": True,
-                        "label_free": True,
-                        "outcome_labels_stored": False,
-                        "spec_version": "v073-prospective-funnel-v1",
-                        "strategy_version": DAY_STRATEGY_VERSION,
-                        "captured_at": scan["data_as_of"],
-                        "source_commit_sha": SOURCE_COMMIT_SHA,
-                        "reason": (
-                            "PROSPECTIVE_FUNNEL_TIMEOUT_AFTER_"
-                            f"{DAY_PROSPECTIVE_FUNNEL_TIMEOUT_SECONDS:g}S"
-                        ),
-                    }
-                except Exception as exc:
-                    funnel_status = {
-                        "status": "DEGRADED",
-                        "research_only": True,
-                        "label_free": True,
-                        "outcome_labels_stored": False,
-                        "spec_version": "v073-prospective-funnel-v1",
-                        "strategy_version": DAY_STRATEGY_VERSION,
-                        "captured_at": scan["data_as_of"],
-                        "source_commit_sha": SOURCE_COMMIT_SHA,
-                        "reason": str(exc),
-                    }
-            else:
-                funnel_status = {
-                    "status": "DISABLED",
-                    "enabled": False,
-                    "research_only": True,
-                    "label_free": True,
-                    "outcome_labels_stored": False,
-                    "spec_version": "v073-prospective-funnel-v1",
-                    "strategy_version": DAY_STRATEGY_VERSION,
-                    "captured_at": scan["data_as_of"],
-                    "source_commit_sha": SOURCE_COMMIT_SHA,
-                    "reason": "INLINE_RECORDER_DISABLED_FOR_LIVE_WORKER_ISOLATION",
-                }
+            funnel_status = {
+                "status": "EXTERNALIZED",
+                "enabled": False,
+                "research_only": True,
+                "label_free": True,
+                "outcome_labels_stored": False,
+                "spec_version": PROSPECTIVE_FUNNEL_SPEC_VERSION,
+                "strategy_version": DAY_STRATEGY_VERSION,
+                "captured_at": scan["data_as_of"],
+                "source_commit_sha": SOURCE_COMMIT_SHA,
+                "reason": "STANDALONE_RECORDER_OWNS_CAPTURE",
+                "execution_mode": "STANDALONE_RAILWAY_CRON",
+                "mutation_scope": "NONE",
+            }
             scan["prospective_funnel"] = funnel_status
             status["prospective_funnel"] = funnel_status
 
@@ -1625,7 +1575,6 @@ async def run() -> None:
             all_candidates,
             status,
             bars_by_symbol,
-            analyses,
         )
         print(
             "Day worker complete: "

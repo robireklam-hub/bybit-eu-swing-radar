@@ -1,7 +1,7 @@
 name: Production v0.7.3 prospective funnel smoke
 
-# Trusted main-only production verification. Pull requests are covered by Backend tests;
-# this workflow obtains production credentials only after a successful push-to-main CI run.
+# Trusted main-only provisioning + production verification. Pull requests never
+# receive Railway or production API credentials.
 on:
   workflow_run:
     workflows: ["Backend tests"]
@@ -11,8 +11,6 @@ permissions:
   contents: read
   statuses: write
 
-# Keep push-to-main verification isolated from pull_request Backend-test completions.
-# A PR-origin workflow_run must never cancel an in-flight production verification.
 concurrency:
   group: production-v073-prospective-funnel-${{ github.event.workflow_run.event }}-${{ github.event.workflow_run.head_branch }}
   cancel-in-progress: true
@@ -25,12 +23,11 @@ jobs:
       github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.head_sha != ''
     runs-on: ubuntu-latest
-    timeout-minutes: 18
+    timeout-minutes: 22
     env:
       PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
       PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
       EXPECTED_API_SHA: ${{ github.event.workflow_run.head_sha }}
-      PROSPECTIVE_FUNNEL_FEATURE_SHA: 327d353edee364209b36e4f486ccd68ef7faed05
       RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
       RAILWAY_PROJECT_ID: 846f5088-4e8b-45fe-84d9-0728542b2c36
       RAILWAY_ENVIRONMENT_ID: 2be04d3c-82b3-487d-930c-a4fbc7d483d8
@@ -47,28 +44,30 @@ jobs:
               sha: context.payload.workflow_run.head_sha,
               state: 'pending',
               context: 'production/v073-prospective-funnel',
-              description: 'Prospective funnel production verification running',
+              description: 'Standalone prospective funnel verification running',
               target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
             })
 
-      - name: Check out tested main commit with history
+      - name: Check out tested main commit
         uses: actions/checkout@v7
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
-      - name: Snapshot Railway day-worker scheduler state
+      - name: Provision exact-main standalone prospective worker
+        id: provision
         continue-on-error: true
         working-directory: bybit_eu_swing_radar/backend
-        run: python -u scripts/railway_day_worker_scheduler_diag.py
+        run: python -u scripts/provision_prospective_funnel_worker.py
 
-      - name: Run read-only prospective funnel production smoke
+      - name: Verify standalone prospective funnel production capture
         id: funnel-smoke
+        if: steps.provision.outcome == 'success'
         continue-on-error: true
         working-directory: bybit_eu_swing_radar/backend
         run: python -u scripts/production_v073_prospective_funnel_smoke.py
@@ -77,30 +76,23 @@ jobs:
         if: always()
         uses: actions/github-script@v7
         env:
+          PROVISION_OUTCOME: ${{ steps.provision.outcome }}
           SMOKE_OUTCOME: ${{ steps.funnel-smoke.outcome }}
         with:
           script: |
-            const outcome = process.env.SMOKE_OUTCOME;
-            const state = outcome === 'success'
-              ? 'success'
-              : outcome === 'cancelled'
-                ? 'error'
-                : 'failure';
-            const description = outcome === 'success'
-              ? 'Prospective funnel production verified'
-              : outcome === 'cancelled'
-                ? 'Prospective funnel verification cancelled'
-                : 'Prospective funnel production verification failed';
+            const ok = process.env.PROVISION_OUTCOME === 'success' && process.env.SMOKE_OUTCOME === 'success';
             await github.rest.repos.createCommitStatus({
               owner: context.repo.owner,
               repo: context.repo.repo,
               sha: context.payload.workflow_run.head_sha,
-              state,
+              state: ok ? 'success' : 'failure',
               context: 'production/v073-prospective-funnel',
-              description,
+              description: ok
+                ? 'Standalone prospective funnel production verified'
+                : 'Standalone prospective funnel verification failed',
               target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
             })
 
-      - name: Fail workflow when production smoke failed
-        if: steps.funnel-smoke.outcome != 'success'
+      - name: Fail workflow when provisioning or smoke failed
+        if: steps.provision.outcome != 'success' || steps.funnel-smoke.outcome != 'success'
         run: exit 1

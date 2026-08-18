@@ -321,9 +321,34 @@ def _analysis_snapshot_rows(
     return output
 
 
+async def _ensure_prospective_schema(connection: Any) -> None:
+    schema_complete = bool(
+        await connection.fetchval(
+            """
+            SELECT
+                to_regclass('public.day_trade_v073_prospective_funnel_meta') IS NOT NULL
+                AND to_regclass('public.day_trade_v073_prospective_funnel') IS NOT NULL
+                AND to_regclass('public.idx_day_trade_v073_prospective_funnel_captured') IS NOT NULL
+                AND to_regclass('public.idx_day_trade_v073_prospective_funnel_event') IS NOT NULL
+                AND to_regclass('public.idx_day_trade_v073_prospective_funnel_symbol_side') IS NOT NULL
+            """
+        )
+    )
+    if schema_complete:
+        return
+    transaction_factory = getattr(connection, "transaction", None)
+    if transaction_factory is None:
+        await connection.execute(PROSPECTIVE_SCHEMA_SQL)
+        return
+    async with transaction_factory():
+        await connection.execute("SET LOCAL lock_timeout = '5s'")
+        await connection.execute("SET LOCAL statement_timeout = '10s'")
+        await connection.execute(PROSPECTIVE_SCHEMA_SQL)
+
+
 async def _ensure_prospective_boundary(connection: Any, captured_at: datetime) -> datetime:
     captured_at = _as_utc(captured_at)
-    await connection.execute(PROSPECTIVE_SCHEMA_SQL)
+    await _ensure_prospective_schema(connection)
     await connection.execute(
         """
         INSERT INTO day_trade_v073_prospective_funnel_meta (
