@@ -24,6 +24,7 @@ H41_WALCL_URL = (
 )
 H41_WALCL_SERIES = "RESPPMA_N.WW"
 NYFED_RRP_URL = "https://markets.newyorkfed.org/api/rp/reverserepo/propositions/search.json"
+USD_PER_BILLION = 1_000_000_000.0
 
 SUPPORTED_SERIES = {"WALCL", "RRPONTSYD"}
 
@@ -102,6 +103,7 @@ def _is_overnight_operation(row: Mapping[str, Any]) -> bool:
 
 
 def parse_nyfed_rrp(payload: Mapping[str, Any]) -> list[tuple[str, float]]:
+    """Return aggregated overnight RRP accepted amounts in billions of USD."""
     repo = payload.get("repo") or {}
     operations = repo.get("operations") or [] if isinstance(repo, Mapping) else []
     daily: defaultdict[str, float] = defaultdict(float)
@@ -110,10 +112,10 @@ def parse_nyfed_rrp(payload: Mapping[str, Any]) -> list[tuple[str, float]]:
         if not isinstance(row, Mapping) or not _is_overnight_operation(row):
             continue
         date = str(row.get("operationDate") or "").strip()
-        amount = _safe_float(row.get("totalAmtAccepted"))
-        if not date or amount is None:
+        amount_usd = _safe_float(row.get("totalAmtAccepted"))
+        if not date or amount_usd is None:
             continue
-        daily[date] += amount
+        daily[date] += amount_usd / USD_PER_BILLION
 
     points = sorted(daily.items(), key=lambda item: item[0])
     if not points:
@@ -179,6 +181,7 @@ async def fetch_official_liquidity_fallback(
             "source_series_id": "NYFED_RRP_OPERATIONS",
             "observation_frequency": "D",
             "units": "billions_usd",
+            "raw_amount_units": "usd",
             "fallback_from": "FRED_CSV_TIMEOUT_OR_ERROR",
             "url": NYFED_RRP_URL,
         }
