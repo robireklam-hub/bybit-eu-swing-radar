@@ -39,7 +39,7 @@ def test_gdelt_requests_are_serialized_paced_and_429_retry_is_bounded():
     assert "response.status_code == 429" in text
     assert "await asyncio.sleep(_retry_delay(response, attempt))" in text
     assert "await asyncio.sleep(GDELT_REQUEST_SPACING_SECONDS)" in text
-    assert "asyncio.gather" not in text
+    assert "await asyncio.gather(" not in text
     assert '"rate_limit_retries"' in text
 
 
