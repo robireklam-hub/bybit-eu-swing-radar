@@ -1,0 +1,66 @@
+name: Diagnose current research 586be
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  coinalyze-semantic-smoke:
+    if: github.head_ref == 'diag/research-current-586be'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 586be4804cd5e740e22795e396715f7e635c2d6a
+    steps:
+      - name: Check out exact current main
+        uses: actions/checkout@v7
+        with:
+          ref: 586be4804cd5e740e22795e396715f7e635c2d6a
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Verify swing candidate Coinalyze semantics
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_coinalyze_smoke.py
+
+  liquidity-forward-state:
+    if: github.head_ref == 'diag/research-current-586be'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+    steps:
+      - name: Inspect durable swing-liquidity state
+        run: |
+          python - <<'PY'
+          import json, os
+          from urllib.request import Request, urlopen
+          base=os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key=os.environ['PRODUCTION_RADAR_API_KEY']
+          req=Request(base+'/v1/research/swing-liquidity/forward-status',headers={'Accept':'application/json','X-Radar-Key':key,'User-Agent':'liquidity-readonly-diag/1'})
+          with urlopen(req, timeout=20) as r: p=json.load(r)
+          safe={k:p.get(k) for k in ['research_only','live_strategy_mutated','promotion_allowed','study','capture_count','first_capture_at','last_capture_at','candidate_observations','orderbook_errors','turnover_tiers','spread_tiers','development_target_matured_events','validation_target_matured_events']}
+          print('SWING_LIQUIDITY_FORWARD_STATE='+json.dumps(safe,sort_keys=True))
+          errs=[]
+          if p.get('research_only') is not True: errs.append('research_only_not_true')
+          if p.get('live_strategy_mutated') is not False: errs.append('live_strategy_mutated_not_false')
+          if p.get('promotion_allowed') is not False: errs.append('promotion_allowed_not_false')
+          if p.get('study') != 'swing-liquidity-validation-v1': errs.append('unexpected_study')
+          if int(p.get('capture_count') or 0) <= 0: errs.append('no_captures')
+          if int(p.get('candidate_observations') or 0) <= 0: errs.append('no_observations')
+          tiers=p.get('turnover_tiers') or {}
+          low=sum(int(tiers.get(k) or 0) for k in ['LT_25K','25K_50K','50K_100K','<25k','25k-50k','50k-100k'])
+          high=sum(int(tiers.get(k) or 0) for k in ['100K_250K','250K_1M','GE_1M','100-250k','250k-1m','>=1m'])
+          if low <= 0: errs.append('missing_below_100k_research_exposure')
+          if high <= 0: errs.append('missing_current_gate_comparator_exposure')
+          if errs:
+              print('FAIL '+','.join(errs)); raise SystemExit(1)
+          print('SWING LIQUIDITY FORWARD STATE VERIFIED (READ-ONLY; NO PROMOTION).')
+          PY
