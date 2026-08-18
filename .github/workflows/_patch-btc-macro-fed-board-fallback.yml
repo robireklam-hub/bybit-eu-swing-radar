@@ -1,0 +1,82 @@
+name: Patch BTC macro official Fed Board fallback
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+env:
+  DATABASE_URL: postgresql://test:test@localhost:5432/test
+  RADAR_API_KEY: test-radar-key
+  COINALYZE_API_KEY: test-coinalyze-key
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: fix/btc-macro-fed-board-fallback
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install backend test dependencies
+        working-directory: bybit_eu_swing_radar/backend
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install pytest pytest-asyncio
+      - name: Add official Federal Reserve Board fallback
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('bybit_eu_swing_radar/backend/app/research_btc_macro_cycle_etf_api.py')
+          text = path.read_text()
+          anchor = 'FARSIDE_URL = "https://farside.co.uk/bitcoin-etf-flow-all-data/"\n'
+          constants = '''FARSIDE_URL = "https://farside.co.uk/bitcoin-etf-flow-all-data/"\nFED_H15_TABLE_URL = "https://www.federalreserve.gov/datadownload/DownloadTable.aspx?filetype=csv&label=include&lastobs=120&layout=seriescolumn&rel=H15&series=2dbf56a690d90872e08d4edbf48df0a4"\nFED_H10_TABLE_URL = "https://www.federalreserve.gov/datadownload/DownloadTable.aspx?filetype=csv&label=include&lastobs=120&layout=seriescolumn&rel=H10&series=847be2166a425bda9b4d92465f797544"\nFED_BOARD_FALLBACKS = {\n    "DGS10": (FED_H15_TABLE_URL, "RIFLGFCY10_N.B", "D"),\n    "DTWEXBGS": (FED_H10_TABLE_URL, "JRXWTFB_N.M", "M"),\n}\n'''
+          if 'FED_BOARD_FALLBACKS' not in text:
+              text = text.replace(anchor, constants, 1)
+          marker = '\n\nasync def _fetch_cycle(client: httpx.AsyncClient)'
+          helper = '''\n\ndef parse_fed_board_table(text: str, series_code: str) -> list[tuple[str, float]]:\n    rows: list[list[str]] = []\n    stripped = text.lstrip()\n    if stripped.startswith("<"):\n        parser = _TableParser()\n        parser.feed(text)\n        rows = parser.rows\n    else:\n        rows = [list(row) for row in csv.reader(io.StringIO(text))]\n    header = next((row for row in rows if row and row[0].strip().lower() == "series"), None)\n    data = next((row for row in rows if row and row[0].strip() == series_code), None)\n    if header is None or data is None:\n        raise ValueError(f"Federal Reserve Board series not found: {series_code}")\n    points: list[tuple[str, float]] = []\n    for index in range(2, min(len(header), len(data))):\n        date = header[index].strip()\n        raw = data[index].strip().replace(",", "")\n        if not date or raw in {"", "ND", "NA", "."}:\n            continue\n        try:\n            points.append((date, float(raw)))\n        except ValueError:\n            continue\n    if not points:\n        raise ValueError(f"Federal Reserve Board series has no usable observations: {series_code}")\n    return points\n\n\nasync def _fetch_fed_board_fallback(\n    client: httpx.AsyncClient, name: str, requested_fred_series: str\n) -> tuple[str, dict[str, Any], dict[str, Any]]:\n    url, board_series, frequency = FED_BOARD_FALLBACKS[requested_fred_series]\n    response = await client.get(url, timeout=httpx.Timeout(12.0, connect=5.0))\n    response.raise_for_status()\n    points = parse_fed_board_table(response.text, board_series)\n    summary = summarize_series(points)\n    return name, {\n        "series_id": requested_fred_series,\n        "source_series_id": board_series,\n        "observation_frequency": frequency,\n        **summary,\n    }, _source_status(\n        "LIVE",\n        provider="Federal Reserve Board Data Download Program",\n        official=True,\n        requested_fred_series=requested_fred_series,\n        source_series_id=board_series,\n        observation_frequency=frequency,\n        fallback_from="FRED_CSV_TIMEOUT_OR_ERROR",\n        url=url,\n    )\n'''
+          if 'def parse_fed_board_table' not in text:
+              text = text.replace(marker, helper + marker, 1)
+          old = '''async def _fetch_fred_series(client: httpx.AsyncClient, name: str, series_id: str) -> tuple[str, dict[str, Any], dict[str, Any]]:\n    response = await client.get(FRED_CSV_URL, params={"id": series_id})\n    response.raise_for_status()\n    points = parse_fred_csv(response.text, series_id)\n    summary = summarize_series(points)\n    return name, {"series_id": series_id, **summary}, _source_status(\n        "LIVE", provider="FRED / Federal Reserve Bank of St. Louis", series_id=series_id,\n        url=f"https://fred.stlouisfed.org/series/{series_id}",\n    )\n'''
+          new = '''async def _fetch_fred_series(client: httpx.AsyncClient, name: str, series_id: str) -> tuple[str, dict[str, Any], dict[str, Any]]:\n    try:\n        response = await client.get(\n            FRED_CSV_URL,\n            params={"id": series_id},\n            timeout=httpx.Timeout(5.0, connect=3.0),\n        )\n        response.raise_for_status()\n        points = parse_fred_csv(response.text, series_id)\n        summary = summarize_series(points)\n        return name, {"series_id": series_id, **summary}, _source_status(\n            "LIVE", provider="FRED / Federal Reserve Bank of St. Louis", series_id=series_id,\n            url=f"https://fred.stlouisfed.org/series/{series_id}",\n        )\n    except Exception:\n        if series_id not in FED_BOARD_FALLBACKS:\n            raise\n        return await _fetch_fed_board_fallback(client, name, series_id)\n'''
+          if old not in text and 'FRED_CSV_TIMEOUT_OR_ERROR' not in text:
+              raise SystemExit('FRED fetch block not found')
+          text = text.replace(old, new)
+          path.write_text(text)
+          PY
+      - name: Add fallback tests
+        run: |
+          cat >> bybit_eu_swing_radar/backend/test_research_btc_macro_cycle_etf_api.py <<'PY'
+
+
+def test_parse_fed_board_daily_table() -> None:
+    from app.research_btc_macro_cycle_etf_api import parse_fed_board_table
+    text = "Series,Series Description,2026-07-29,2026-07-30\nRIFLGFCY10_N.B,10-year Treasury,4.67,4.68\n"
+    assert parse_fed_board_table(text, "RIFLGFCY10_N.B") == [("2026-07-29", 4.67), ("2026-07-30", 4.68)]
+
+
+def test_parse_fed_board_monthly_html_table() -> None:
+    from app.research_btc_macro_cycle_etf_api import parse_fed_board_table
+    html = "<table><tr><th>Series</th><th>Series Description</th><th>2026-05</th><th>2026-06</th></tr><tr><td>JRXWTFB_N.M</td><td>Nominal Broad Dollar Index</td><td>118.7792</td><td>120.0835</td></tr></table>"
+    assert parse_fed_board_table(html, "JRXWTFB_N.M") == [("2026-05", 118.7792), ("2026-06", 120.0835)]
+PY
+      - name: Run targeted tests and compile
+        working-directory: bybit_eu_swing_radar/backend
+        run: |
+          python -m pytest -q test_btc_macro_cycle_etf_shadow.py test_research_btc_macro_cycle_etf_api.py test_production_btc_macro_cycle_etf_shadow_smoke.py
+          python -m compileall -q app/research_btc_macro_cycle_etf_api.py
+      - name: Commit validated fallback
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add bybit_eu_swing_radar/backend/app/research_btc_macro_cycle_etf_api.py bybit_eu_swing_radar/backend/test_research_btc_macro_cycle_etf_api.py
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Fix: add official Fed Board macro fallback"
+          git pull --rebase origin fix/btc-macro-fed-board-fallback
+          git push origin HEAD:fix/btc-macro-fed-board-fallback
