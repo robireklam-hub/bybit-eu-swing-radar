@@ -17,6 +17,7 @@ REPO = "robireklam-hub/bybit-eu-swing-radar"
 ROOT_DIRECTORY = "/bybit_eu_swing_radar/backend"
 START_COMMAND = "python prospective_funnel_worker.py"
 CRON_SCHEDULE = "2-57/5 * * * *"
+RAILWAY_REGION = "europe-west4-drams3a"
 REQUIRED_VARIABLES = (
     "BYBIT_BASE_URL",
     "COINALYZE_API_KEY",
@@ -151,6 +152,9 @@ def _configure_service(environment_id: str, service_id: str) -> None:
                 "cronSchedule": CRON_SCHEDULE,
                 "restartPolicyType": "NEVER",
                 "restartPolicyMaxRetries": 0,
+                "multiRegionConfig": {
+                    RAILWAY_REGION: {"numReplicas": 1},
+                },
             },
         },
     )
@@ -199,6 +203,7 @@ def main() -> int:
     print("PROSPECTIVE_SERVICE_ID=" + service_id, flush=True)
     print("PROSPECTIVE_SERVICE_CREATED=" + str(created).lower(), flush=True)
     print("PROSPECTIVE_DEPLOYMENT_ID=" + deployment_id, flush=True)
+    print("PROSPECTIVE_REGION=" + RAILWAY_REGION, flush=True)
     print("VARIABLE_NAMES_COPIED=" + json.dumps(sorted(source_vars)), flush=True)
 
     final_status = "UNKNOWN"
@@ -220,6 +225,7 @@ def main() -> int:
                 "service_id": service_id,
                 "deployment_id": deployment_id,
                 "commit_sha": commit_sha,
+                "region": RAILWAY_REGION,
                 "created": created,
             },
             sort_keys=True,
