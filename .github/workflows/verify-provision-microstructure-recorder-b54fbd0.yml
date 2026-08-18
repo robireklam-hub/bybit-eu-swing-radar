@@ -1,4 +1,4 @@
-name: Fix and deploy standalone microstructure recorder b54fbd0
+name: Cut over to standalone microstructure recorder b54fbd0
 
 on:
   pull_request:
@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  deploy:
+  cutover:
     if: github.head_ref == 'ops/provision-microstructure-recorder-b54fbd0'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -16,9 +16,10 @@ jobs:
       RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
       PROJECT_ID: 846f5088-4e8b-45fe-84d9-0728542b2c36
       ENVIRONMENT_ID: 2be04d3c-82b3-487d-930c-a4fbc7d483d8
-      RECORDER_SERVICE_ID: 61664eb1-4a59-4947-bae9-18410a2221b8
-      RECORDER_SERVICE: microstructure-recorder
-      TARGET_SHA: b54fbd01e086d1f7d1b57d6324d32241e11e2d89
+      API_SERVICE_ID: 6b92a19d-a178-4eab-9b8a-9fed1855319b
+      EXPECTED_SHA: b54fbd01e086d1f7d1b57d6324d32241e11e2d89
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -29,87 +30,16 @@ jobs:
           bash <(curl -fsSL https://railway.com/install.sh) -y
           echo "$HOME/.railway/bin" >> "$GITHUB_PATH"
 
-      - name: Link target recorder service
-        run: |
-          railway link --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" >/dev/null
-          railway service link "$RECORDER_SERVICE" >/dev/null
+      - name: Link production project
+        run: railway link --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" >/dev/null
 
-      - name: Set recorder service instance configuration via Railway API
-        shell: bash
+      - name: Switch API recorder owner to external
         run: |
-          python3 - <<'PY'
-          import json, os
-          query = '''
-          mutation serviceInstanceUpdate($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) {
-            serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input)
-          }
-          '''
-          payload = {
-            "query": query,
-            "variables": {
-              "serviceId": os.environ["RECORDER_SERVICE_ID"],
-              "environmentId": os.environ["ENVIRONMENT_ID"],
-              "input": {
-                "startCommand": "python -m research.microstructure.standalone",
-                "restartPolicyType": "ON_FAILURE",
-                "restartPolicyMaxRetries": 10,
-              },
-            },
-          }
-          with open('/tmp/railway-mutation.json', 'w') as f:
-              json.dump(payload, f)
-          PY
-          code=$(curl -sS -o /tmp/railway-response.json -w '%{http_code}' \
-            -X POST 'https://backboard.railway.com/graphql/v2' \
-            -H "Authorization: Bearer $RAILWAY_API_TOKEN" \
-            -H 'Content-Type: application/json' \
-            -H 'User-Agent: bybit-eu-trading-radar-ops/1' \
-            --data-binary @/tmp/railway-mutation.json)
-          if [ "$code" != "200" ]; then
-            echo "FAIL Railway GraphQL HTTP status=$code"
-            exit 1
-          fi
-          python3 - <<'PY'
-          import json
-          with open('/tmp/railway-response.json') as f:
-              result = json.load(f)
-          if result.get('errors'):
-              messages = [str(item.get('message') or 'GraphQL error')[:300] for item in result['errors']]
-              raise SystemExit('Railway serviceInstanceUpdate errors: ' + ' | '.join(messages))
-          if result.get('data', {}).get('serviceInstanceUpdate') is not True:
-              raise SystemExit('Railway serviceInstanceUpdate did not confirm success')
-          print('Recorder service instance configuration updated.')
-          PY
+          railway variable set MICROSTRUCTURE_RECORDER_OWNER=external \
+            --service "$API_SERVICE_ID" \
+            --environment "$ENVIRONMENT_ID" >/dev/null
+          echo "API recorder owner set to external; Railway deployment triggered."
 
-      - name: Deploy exact backend source
-        run: |
-          railway up bybit_eu_swing_radar/backend \
-            --service "$RECORDER_SERVICE_ID" \
-            --environment "$ENVIRONMENT_ID" \
-            --project "$PROJECT_ID" \
-            --path-as-root --detach
-
-      - name: Wait for successful recorder deployment
-        shell: bash
-        run: |
-          for i in $(seq 1 60); do
-            status=$(railway service status --service "$RECORDER_SERVICE_ID" --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" --json 2>/dev/null || true)
-            printf '%s\n' "$status" >/tmp/status.json
-            if printf '%s' "$status" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"SUCCESS"'; then
-              echo "MICROSTRUCTURE RECORDER SERVICE DEPLOYMENT SUCCESS."
-              exit 0
-            fi
-            if printf '%s' "$status" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"(FAILED|CRASHED|REMOVED)"'; then
-              deployment_id=$(printf '%s' "$status" | sed -nE 's/.*"deploymentId"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p')
-              echo "FAIL recorder deployment terminal state"
-              if [ -n "$deployment_id" ]; then
-                railway logs "$deployment_id" --build --lines 120 || true
-                railway logs "$deployment_id" --deployment --lines 120 || true
-              fi
-              exit 1
-            fi
-            sleep 5
-          done
-          echo "FAIL recorder deployment timeout"
-          cat /tmp/status.json || true
-          exit 1
+      - name: Verify exact-SHA external recorder and readiness
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_external_smoke.py
