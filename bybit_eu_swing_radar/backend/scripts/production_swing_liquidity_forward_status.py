@@ -12,6 +12,8 @@ from urllib.request import Request, urlopen
 STATUS_PATH = "/v1/research/swing-liquidity/forward-status"
 EXPECTED_STUDY = "swing-liquidity-validation-v1"
 MAX_CAPTURE_AGE_SECONDS = 20 * 60
+BELOW_100K_TIERS = frozenset(("LT_25K", "25K_50K", "50K_100K", "<25k", "25k-50k", "50k-100k"))
+AT_OR_ABOVE_100K_TIERS = frozenset(("100K_250K", "250K_1M", "GE_1M", "100-250k", "250k-1m", ">=1m"))
 
 
 def parse_timestamp(value: Any) -> datetime:
@@ -34,6 +36,18 @@ def fetch_json(url: str, api_key: str, timeout: float) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("response JSON is not an object")
     return payload
+
+
+def _has_positive_tier_count(tiers: dict[str, Any], accepted: frozenset[str]) -> bool:
+    for name, raw_count in tiers.items():
+        if name not in accepted:
+            continue
+        try:
+            if int(raw_count) > 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
 
 
 def validate_status(payload: dict[str, Any], *, now: datetime | None = None) -> list[str]:
@@ -74,6 +88,11 @@ def validate_status(payload: dict[str, Any], *, now: datetime | None = None) -> 
     spread_tiers = payload.get("spread_tiers")
     if not isinstance(turnover_tiers, dict) or not turnover_tiers:
         errors.append("missing_turnover_tier_coverage")
+    else:
+        if not _has_positive_tier_count(turnover_tiers, BELOW_100K_TIERS):
+            errors.append("missing_below_100k_research_exposure")
+        if not _has_positive_tier_count(turnover_tiers, AT_OR_ABOVE_100K_TIERS):
+            errors.append("missing_current_gate_comparator_exposure")
     if not isinstance(spread_tiers, dict) or not spread_tiers:
         errors.append("missing_spread_tier_coverage")
     return errors
