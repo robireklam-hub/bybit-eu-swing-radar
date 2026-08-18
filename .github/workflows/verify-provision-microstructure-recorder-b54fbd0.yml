@@ -1,0 +1,94 @@
+name: Provision standalone microstructure recorder b54fbd0
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  provision:
+    if: github.head_ref == 'ops/provision-microstructure-recorder-b54fbd0'
+    runs-on: ubuntu-latest
+    container: ghcr.io/railwayapp/cli:latest
+    timeout-minutes: 15
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN || secrets.RAILWAY_PROJECT_TOKEN }}
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PROJECT_ID: 846f5088-4e8b-45fe-84d9-0728542b2c36
+      ENVIRONMENT_ID: 2be04d3c-82b3-487d-930c-a4fbc7d483d8
+      API_SERVICE_ID: 6b92a19d-a178-4eab-9b8a-9fed1855319b
+      RECORDER_SERVICE: microstructure-recorder
+      TARGET_SHA: b54fbd01e086d1f7d1b57d6324d32241e11e2d89
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: b54fbd01e086d1f7d1b57d6324d32241e11e2d89
+
+      - name: Verify Railway authentication is configured
+        run: |
+          if [ -z "${RAILWAY_TOKEN:-}" ] && [ -z "${RAILWAY_API_TOKEN:-}" ]; then
+            echo "FAIL no supported Railway token secret is configured"
+            exit 1
+          fi
+          echo "Railway credential present; value redacted."
+
+      - name: Link production project
+        run: railway link --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID"
+
+      - name: Ensure empty recorder service exists
+        run: |
+          if railway service status --service "$RECORDER_SERVICE" --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" --json >/tmp/existing.json 2>/dev/null; then
+            echo "Recorder service already exists."
+          else
+            railway add --service "$RECORDER_SERVICE" --json >/tmp/created.json
+            echo "Recorder service created."
+          fi
+
+      - name: Copy only required database variable
+        run: |
+          api_vars="$(railway variable list --service "$API_SERVICE_ID" --environment "$ENVIRONMENT_ID" --kv)"
+          database_url="$(printf '%s\n' "$api_vars" | sed -n 's/^DATABASE_URL=//p' | head -n 1)"
+          if [ -z "$database_url" ]; then
+            echo "FAIL DATABASE_URL is unavailable on API service"
+            exit 1
+          fi
+          printf '%s' "$database_url" | railway variable set DATABASE_URL --stdin --service "$RECORDER_SERVICE" --environment "$ENVIRONMENT_ID" --skip-deploys >/dev/null
+          unset api_vars database_url
+          echo "DATABASE_URL copied without logging its value."
+
+      - name: Configure recorder variables
+        run: |
+          railway variable set \
+            MICROSTRUCTURE_RECORDER_ENABLED=true \
+            MICROSTRUCTURE_SYMBOLS=BTCUSDC,ETHUSDC,SOLUSDC \
+            MICROSTRUCTURE_BUCKET_SECONDS=5 \
+            MICROSTRUCTURE_DEPTH=50 \
+            MICROSTRUCTURE_SOURCE_COMMIT_SHA="$TARGET_SHA" \
+            --service "$RECORDER_SERVICE" \
+            --environment "$ENVIRONMENT_ID" \
+            --skip-deploys >/dev/null
+
+      - name: Configure standalone start and restart policy
+        run: |
+          railway environment edit --environment "$ENVIRONMENT_ID" --service-config "$RECORDER_SERVICE" startCommand "python -m research.microstructure.standalone" --message "Configure standalone microstructure recorder start command" >/dev/null
+          railway environment edit --environment "$ENVIRONMENT_ID" --service-config "$RECORDER_SERVICE" restartPolicyType "ON_FAILURE" --message "Configure microstructure recorder restart policy" >/dev/null
+          railway environment edit --environment "$ENVIRONMENT_ID" --service-config "$RECORDER_SERVICE" restartPolicyMaxRetries "10" --message "Configure microstructure recorder retry ceiling" >/dev/null
+
+      - name: Deploy exact backend source to recorder service
+        run: railway up --service "$RECORDER_SERVICE" --path-as-root bybit_eu_swing_radar/backend --detach
+
+      - name: Wait for recorder deployment success
+        run: |
+          for i in $(seq 1 45); do
+            railway service status --service "$RECORDER_SERVICE" --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" --json >/tmp/recorder-status.json || true
+            if grep -Eq '"status"[[:space:]]*:[[:space:]]*"SUCCESS"' /tmp/recorder-status.json; then
+              echo "MICROSTRUCTURE RECORDER SERVICE DEPLOYMENT SUCCESS."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "FAIL recorder service did not reach SUCCESS"
+          cat /tmp/recorder-status.json || true
+          exit 1
