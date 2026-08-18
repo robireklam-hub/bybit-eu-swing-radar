@@ -100,15 +100,22 @@ def test_build_context_joins_fresh_layers_without_scoring() -> None:
     assert "score" not in sol
 
 
-def test_future_layer_is_explicitly_rejected_not_treated_as_neutral() -> None:
+def test_future_layer_is_explicitly_rejected_and_not_joined() -> None:
     records = _records()
     records["market_regime"] = _record(
         "2026-08-18T08:01:00+00:00",
-        {"symbols": [{"symbol": "BTCUSDC", "regime": "TREND", "direction": "BULL"}]},
+        {
+            "global_regime": "TREND",
+            "dominant_direction": "BULL",
+            "symbols": [{"symbol": "BTCUSDC", "regime": "TREND", "direction": "BULL"}],
+        },
     )
     snapshot = build_context_snapshot(records, captured_at=NOW)
     assert snapshot["layers"]["market_regime"]["status"] == "FUTURE_REJECTED"
     assert snapshot["data_quality"] == "PARTIAL"
+    assert snapshot["global_context"]["market_regime"]["global_regime"] is None
+    btc = next(row for row in snapshot["symbols"] if row["symbol"] == "BTCUSDC")
+    assert btc["market_regime"] is None
 
 
 def test_missing_layer_remains_missing() -> None:
