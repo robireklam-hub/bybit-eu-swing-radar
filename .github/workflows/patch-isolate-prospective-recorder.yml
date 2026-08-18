@@ -1,0 +1,71 @@
+name: Patch isolate prospective recorder
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.head_ref == 'fix/isolate-prospective-recorder-live-worker'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: fix/isolate-prospective-recorder-live-worker
+          fetch-depth: 0
+      - name: Isolate inline research recorder from live worker
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('bybit_eu_swing_radar/backend/day_worker.py')
+          text = path.read_text()
+
+          timeout_block = '''DAY_PROSPECTIVE_FUNNEL_TIMEOUT_SECONDS = min(\n    max(env_float("DAY_PROSPECTIVE_FUNNEL_TIMEOUT_SECONDS", 8.0), 1.0),\n    30.0,\n)\n'''
+          enabled_block = timeout_block + '''DAY_PROSPECTIVE_FUNNEL_INLINE_ENABLED = os.getenv(\n    "DAY_PROSPECTIVE_FUNNEL_INLINE_ENABLED", "false"\n).strip().lower() in {"1", "true", "yes", "on"}\n'''
+          if timeout_block not in text:
+              raise SystemExit('timeout constant anchor not found')
+          if 'DAY_PROSPECTIVE_FUNNEL_INLINE_ENABLED' not in text:
+              text = text.replace(timeout_block, enabled_block, 1)
+
+          old = '''            try:\n                # Research-only sidecar: isolate recorder SQL in a savepoint so\n                # any research failure cannot abort live journal/cache persistence.\n                async with connection.transaction():\n                    funnel_status = await asyncio.wait_for(\n                        persist_v073_prospective_funnel(\n                            connection,\n                            analyses,\n                            captured_at=datetime.fromisoformat(scan["data_as_of"]),\n                            source_commit_sha=SOURCE_COMMIT_SHA,\n                            volume_confirmation_ratio=DAY_TRIGGER_VOLUME_RATIO,\n                            live_setups=setups,\n                        ),\n                        timeout=DAY_PROSPECTIVE_FUNNEL_TIMEOUT_SECONDS,\n                    )\n            except TimeoutError:\n                funnel_status = {\n                    "status": "DEGRADED",\n                    "research_only": True,\n                    "label_free": True,\n                    "outcome_labels_stored": False,\n                    "spec_version": "v073-prospective-funnel-v1",\n                    "strategy_version": DAY_STRATEGY_VERSION,\n                    "captured_at": scan["data_as_of"],\n                    "source_commit_sha": SOURCE_COMMIT_SHA,\n                    "reason": (\n                        "PROSPECTIVE_FUNNEL_TIMEOUT_AFTER_"\n                        f"{DAY_PROSPECTIVE_FUNNEL_TIMEOUT_SECONDS:g}S"\n                    ),\n                }\n            except Exception as exc:\n                funnel_status = {\n                    "status": "DEGRADED",\n                    "research_only": True,\n                    "label_free": True,\n                    "outcome_labels_stored": False,\n                    "spec_version": "v073-prospective-funnel-v1",\n                    "strategy_version": DAY_STRATEGY_VERSION,\n                    "captured_at": scan["data_as_of"],\n                    "source_commit_sha": SOURCE_COMMIT_SHA,\n                    "reason": str(exc),\n                }\n            scan["prospective_funnel"] = funnel_status\n            status["prospective_funnel"] = funnel_status\n'''
+          new = '''            if DAY_PROSPECTIVE_FUNNEL_INLINE_ENABLED:\n                try:\n                    # Research-only sidecar: opt-in only. The default live worker\n                    # path skips this recorder so research cannot block production.\n                    async with connection.transaction():\n                        funnel_status = await asyncio.wait_for(\n                            persist_v073_prospective_funnel(\n                                connection,\n                                analyses,\n                                captured_at=datetime.fromisoformat(scan["data_as_of"]),\n                                source_commit_sha=SOURCE_COMMIT_SHA,\n                                volume_confirmation_ratio=DAY_TRIGGER_VOLUME_RATIO,\n                                live_setups=setups,\n                            ),\n                            timeout=DAY_PROSPECTIVE_FUNNEL_TIMEOUT_SECONDS,\n                        )\n                except TimeoutError:\n                    funnel_status = {\n                        "status": "DEGRADED",\n                        "research_only": True,\n                        "label_free": True,\n                        "outcome_labels_stored": False,\n                        "spec_version": "v073-prospective-funnel-v1",\n                        "strategy_version": DAY_STRATEGY_VERSION,\n                        "captured_at": scan["data_as_of"],\n                        "source_commit_sha": SOURCE_COMMIT_SHA,\n                        "reason": (\n                            "PROSPECTIVE_FUNNEL_TIMEOUT_AFTER_"\n                            f"{DAY_PROSPECTIVE_FUNNEL_TIMEOUT_SECONDS:g}S"\n                        ),\n                    }\n                except Exception as exc:\n                    funnel_status = {\n                        "status": "DEGRADED",\n                        "research_only": True,\n                        "label_free": True,\n                        "outcome_labels_stored": False,\n                        "spec_version": "v073-prospective-funnel-v1",\n                        "strategy_version": DAY_STRATEGY_VERSION,\n                        "captured_at": scan["data_as_of"],\n                        "source_commit_sha": SOURCE_COMMIT_SHA,\n                        "reason": str(exc),\n                    }\n            else:\n                funnel_status = {\n                    "status": "DISABLED",\n                    "enabled": False,\n                    "research_only": True,\n                    "label_free": True,\n                    "outcome_labels_stored": False,\n                    "spec_version": "v073-prospective-funnel-v1",\n                    "strategy_version": DAY_STRATEGY_VERSION,\n                    "captured_at": scan["data_as_of"],\n                    "source_commit_sha": SOURCE_COMMIT_SHA,\n                    "reason": "INLINE_RECORDER_DISABLED_FOR_LIVE_WORKER_ISOLATION",\n                }\n            scan["prospective_funnel"] = funnel_status\n            status["prospective_funnel"] = funnel_status\n'''
+          if old not in text:
+              raise SystemExit('sidecar block anchor not found')
+          text = text.replace(old, new, 1)
+
+          run_anchor = '''async def run() -> None:\n    if not DATABASE_URL:\n        raise RuntimeError("DATABASE_URL is not configured")\n\n    started = datetime.now(timezone.utc)\n'''
+          run_new = '''async def run() -> None:\n    if not DATABASE_URL:\n        raise RuntimeError("DATABASE_URL is not configured")\n\n    print(\n        f"Day worker starting: strategy={DAY_STRATEGY_VERSION}, "\n        f"source_commit_sha={SOURCE_COMMIT_SHA or 'UNKNOWN'}",\n        flush=True,\n    )\n    started = datetime.now(timezone.utc)\n'''
+          if run_anchor not in text:
+              raise SystemExit('run start anchor not found')
+          text = text.replace(run_anchor, run_new, 1)
+
+          persist_anchor = '''        journal_status = await persist_day_results(\n            scan,\n            all_candidates,\n            status,\n            bars_by_symbol,\n            analyses,\n        )\n'''
+          persist_new = '''        print(\n            f"Day worker pre-persist: fast={len(fast_results)}, "\n            f"deep={len(analyses)}, candidates={len(all_candidates)}",\n            flush=True,\n        )\n        journal_status = await persist_day_results(\n            scan,\n            all_candidates,\n            status,\n            bars_by_symbol,\n            analyses,\n        )\n'''
+          if persist_anchor not in text:
+              raise SystemExit('persist anchor not found')
+          text = text.replace(persist_anchor, persist_new, 1)
+          path.write_text(text)
+
+          test_path = Path('bybit_eu_swing_radar/backend/test_prospective_funnel_timeout.py')
+          test = test_path.read_text()
+          anchor = '''    monkeypatch.setattr(day_worker, "DAY_PROSPECTIVE_FUNNEL_TIMEOUT_SECONDS", 0.01)\n'''
+          replacement = anchor + '''    monkeypatch.setattr(day_worker, "DAY_PROSPECTIVE_FUNNEL_INLINE_ENABLED", True)\n'''
+          if anchor not in test:
+              raise SystemExit('timeout test anchor not found')
+          test = test.replace(anchor, replacement, 1)
+          test += '''\n\n@pytest.mark.asyncio\nasync def test_inline_recorder_disabled_skips_research_and_persists_live_caches(monkeypatch):\n    connection = _Connection()\n    cache_writes = []\n\n    async def fake_connect(*args, **kwargs):\n        return connection\n\n    async def fake_journal(*args, **kwargs):\n        return {"new_signals": 0, "active_signals": 0}\n\n    async def must_not_run(*args, **kwargs):\n        raise AssertionError("inline prospective recorder must not run when disabled")\n\n    async def fake_upsert(_connection, key, payload):\n        cache_writes.append((key, payload))\n\n    monkeypatch.setattr(day_worker.asyncpg, "connect", fake_connect)\n    monkeypatch.setattr(day_worker, "persist_day_journal", fake_journal)\n    monkeypatch.setattr(day_worker, "persist_v073_prospective_funnel", must_not_run)\n    monkeypatch.setattr(day_worker, "upsert_cache", fake_upsert)\n    monkeypatch.setattr(day_worker, "DAY_PROSPECTIVE_FUNNEL_INLINE_ENABLED", False)\n\n    scan = {\n        "data_as_of": "2026-08-18T15:00:00+00:00",\n        "data_as_of_budapest": "2026-08-18T17:00:00+02:00",\n    }\n    status = {}\n\n    journal = await day_worker.persist_day_results(scan, [], status, {}, [])\n\n    assert journal == {"new_signals": 0, "active_signals": 0}\n    funnel = status["prospective_funnel"]\n    assert funnel["status"] == "DISABLED"\n    assert funnel["enabled"] is False\n    assert funnel["reason"] == "INLINE_RECORDER_DISABLED_FOR_LIVE_WORKER_ISOLATION"\n    assert scan["prospective_funnel"] == funnel\n    assert {key for key, _ in cache_writes} >= {"day_trade_scan", "day_trade_status"}\n'''
+          test_path.write_text(test)
+          PY
+
+          rm .github/workflows/patch-isolate-prospective-recorder.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add bybit_eu_swing_radar/backend/day_worker.py bybit_eu_swing_radar/backend/test_prospective_funnel_timeout.py .github/workflows/patch-isolate-prospective-recorder.yml
+          git diff --cached --check
+          git commit -m 'Fix: isolate prospective recorder from live worker'
+          git push origin HEAD:fix/isolate-prospective-recorder-live-worker
