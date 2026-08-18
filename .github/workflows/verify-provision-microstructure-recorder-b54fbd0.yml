@@ -34,9 +34,9 @@ jobs:
       - name: Link production project
         run: railway link --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" >/dev/null
 
-      - name: Move standalone recorder to EU West
+      - name: Move standalone recorder exclusively to EU West
         run: |
-          railway scale europe-west4-drams3a=1 us-west=0 \
+          railway scale europe-west4-drams3a=1 sfo=0 \
             --service "$STANDALONE_SERVICE_ID" \
             --environment "$ENVIRONMENT_ID" --json
 
@@ -49,21 +49,19 @@ jobs:
             --environment "$ENVIRONMENT_ID" >/dev/null
           echo "Standalone recorder enabled in EU West; API remains owner until cutover."
 
-      - name: Wait for standalone deployment to settle
+      - name: Wait for new standalone deployment
         run: |
+          sleep 12
           for i in $(seq 1 60); do
             status=$(railway service status --service "$STANDALONE_SERVICE_ID" --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" --json 2>/dev/null || true)
+            echo "$status" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("RECORDER_DEPLOY_STATUS="+str(d.get("status"))+" deployment="+str(d.get("deploymentId")))' || true
             if printf '%s' "$status" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"SUCCESS"'; then
               echo "Standalone recorder deployment is SUCCESS."
               exit 0
             fi
-            if printf '%s' "$status" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"(FAILED|CRASHED|REMOVED)"'; then
-              echo "FAIL standalone recorder deployment terminal state"
-              exit 1
-            fi
             sleep 5
           done
-          echo "FAIL standalone recorder deployment timeout"
+          echo "FAIL standalone recorder deployment did not reach SUCCESS"
           exit 1
 
       - name: Switch API recorder owner to external
