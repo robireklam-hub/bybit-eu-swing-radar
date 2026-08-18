@@ -18,6 +18,8 @@ ROOT_DIRECTORY = "/bybit_eu_swing_radar/backend"
 START_COMMAND = "python prospective_funnel_worker.py"
 CRON_SCHEDULE = "2-57/5 * * * *"
 RAILWAY_REGION = "europe-west4-drams3a"
+DEPLOYMENT_POLL_SECONDS = 5
+DEPLOYMENT_MAX_WAIT_SECONDS = 900
 REQUIRED_VARIABLES = (
     "BYBIT_BASE_URL",
     "COINALYZE_API_KEY",
@@ -207,7 +209,8 @@ def main() -> int:
     print("VARIABLE_NAMES_COPIED=" + json.dumps(sorted(source_vars)), flush=True)
 
     final_status = "UNKNOWN"
-    for attempt in range(90):
+    max_attempts = max(1, DEPLOYMENT_MAX_WAIT_SECONDS // DEPLOYMENT_POLL_SECONDS)
+    for attempt in range(max_attempts):
         final_status = _deployment_status(deployment_id)
         if attempt % 6 == 0:
             print("DEPLOYMENT_STATUS=" + final_status, flush=True)
@@ -215,9 +218,14 @@ def main() -> int:
             break
         if final_status in {"FAILED", "CRASHED", "REMOVED", "CANCELLED"}:
             raise RuntimeError("Standalone prospective deployment ended: " + final_status)
-        time.sleep(5)
+        time.sleep(DEPLOYMENT_POLL_SECONDS)
     if final_status != "SUCCESS":
-        raise RuntimeError("Standalone prospective deployment did not reach SUCCESS")
+        raise RuntimeError(
+            "Standalone prospective deployment did not reach SUCCESS within "
+            + str(DEPLOYMENT_MAX_WAIT_SECONDS)
+            + "s; final_status="
+            + final_status
+        )
 
     STATE_FILE.write_text(
         json.dumps(
