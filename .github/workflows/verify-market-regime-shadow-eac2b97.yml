@@ -1,0 +1,29 @@
+name: Verify production market regime shadow eac2b97
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-production-market-regime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: eac2b97d07b26d359d28ee28c2d61f42da5621da
+    steps:
+      - name: Check out exact production commit
+        uses: actions/checkout@v7
+        with:
+          ref: eac2b97d07b26d359d28ee28c2d61f42da5621da
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Verify exact-SHA production market regime shadow
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_market_regime_shadow_smoke.py
