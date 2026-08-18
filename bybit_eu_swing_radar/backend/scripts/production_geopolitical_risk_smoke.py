@@ -13,7 +13,7 @@ from urllib.request import Request, urlopen
 EXPECTED_SPEC = "geopolitical-risk-shadow-v1"
 MAX_POLLS = 45
 POLL_INTERVAL_SECONDS = 5
-MIN_LIVE_TOPICS = 4
+MIN_USABLE_TOPICS = 4
 
 
 def fetch_json(url: str, api_key: str, timeout: float, method: str = "GET") -> dict[str, Any]:
@@ -58,17 +58,29 @@ def validate_capture(payload: dict[str, Any], expected_sha: str) -> tuple[bool, 
         return False, "snapshot_not_persisted"
     if payload.get("data_quality") not in {"COMPLETE", "PARTIAL"}:
         return False, "no_usable_provider_coverage"
+
     coverage = payload.get("coverage") or {}
-    if int(coverage.get("live_topic_count") or 0) < MIN_LIVE_TOPICS:
-        return False, "insufficient_live_topics"
-    topics = payload.get("topics") or {}
     statuses = coverage.get("source_status") or {}
+    topics = payload.get("topics") or {}
+    usable = 0
     for name, status in statuses.items():
-        if status.get("status") != "LIVE":
+        state = status.get("status")
+        if state not in {"LIVE", "PARTIAL"}:
             continue
         row = topics.get(name) or {}
-        if int((row.get("lookback_24h") or {}).get("bins") or 0) < 1:
-            return False, f"live_topic_without_bins:{name}"
+        bins = int((row.get("lookback_24h") or {}).get("bins") or 0)
+        if bins < 1:
+            continue
+        if state == "PARTIAL":
+            if status.get("transport") != "HTTP":
+                return False, f"unexpected_partial_transport:{name}"
+            if status.get("transport_security") != "PLAINTEXT_PROVIDER_FALLBACK":
+                return False, f"http_fallback_not_explicit:{name}"
+            if "fallback" not in str(status.get("reason") or "").lower():
+                return False, f"http_fallback_reason_missing:{name}"
+        usable += 1
+    if usable < MIN_USABLE_TOPICS:
+        return False, "insufficient_usable_topics"
     if "risk_score" in payload or "trade_direction" in payload or "decision" in payload:
         return False, "forbidden_signal_field_present"
     return True, "ok"

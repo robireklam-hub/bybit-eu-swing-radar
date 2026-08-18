@@ -41,6 +41,10 @@ Only provider bins at or before `captured_at` are used.
 - Provider failures and missing bins remain explicit and are never interpreted as zero geopolitical risk.
 - Media attention can reflect reporting intensity, source mix, terminology, duplicate coverage, and editorial focus; it must not be treated as verified event severity.
 
+## Provider transport
+
+HTTPS is always attempted first. If and only if the GDELT HTTPS endpoint fails at the connection layer, the collector may use GDELT's officially supported HTTP DOC 2.0 endpoint. A successful HTTP fallback is recorded as `PARTIAL` with `transport=HTTP` and `transport_security=PLAINTEXT_PROVIDER_FALLBACK`; it is never represented as full-quality `LIVE` coverage. Non-connect HTTP errors, invalid payloads, and missing timeline bins do not silently downgrade to HTTP.
+
 ## Persistence and routes
 
 Snapshots are idempotent per UTC hour in `research_geopolitical_risk_snapshots`.

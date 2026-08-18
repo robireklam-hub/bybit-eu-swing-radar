@@ -25,9 +25,19 @@ def test_provider_contract_is_fixed_gdelt_attention_only():
     path = Path(__file__).resolve().parent / "app" / "research_geopolitical_risk_api.py"
     text = path.read_text()
     assert 'GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"' in text
+    assert 'GDELT_DOC_HTTP_URL = "http://api.gdeltproject.org/api/v2/doc/doc"' in text
     assert '"mode": "TimelineVolRaw"' in text
     assert '"timespan": "24h"' in text
     assert "Semaphore(2)" in text
+
+
+def test_http_fallback_is_connect_only_and_explicitly_degraded():
+    path = Path(__file__).resolve().parent / "app" / "research_geopolitical_risk_api.py"
+    text = path.read_text()
+    assert "except (httpx.ConnectError, httpx.ConnectTimeout)" in text
+    assert 'transport="HTTP"' in text
+    assert '"PLAINTEXT_PROVIDER_FALLBACK"' in text
+    assert 'return name, payload, _status(\n                "PARTIAL"' in text
 
 
 def test_geopolitical_layer_does_not_read_trade_outcomes_or_live_strategy_state():
