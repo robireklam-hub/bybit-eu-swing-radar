@@ -1,0 +1,52 @@
+name: Diag Railway current main 4363c01
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    if: github.head_ref == 'diag/railway-main-4363c01'
+    runs-on: ubuntu-latest
+    container: ghcr.io/railwayapp/cli:latest
+    steps:
+      - name: Inspect failed current-main deployments
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          RAILWAY_PROJECT_ID: 846f5088-4e8b-45fe-84d9-0728542b2c36
+          RAILWAY_ENVIRONMENT_ID: 2be04d3c-82b3-487d-930c-a4fbc7d483d8
+          API_SERVICE_ID: 6b92a19d-a178-4eab-9b8a-9fed1855319b
+          API_DEPLOYMENT_ID: fbb31b73-249b-48e5-af69-9e14c5fa7465
+          PROSPECTIVE_SERVICE_ID: 1f9dab4d-6088-426f-ad52-228e809ecd26
+          PROSPECTIVE_DEPLOYMENT_ID: 8b193456-6604-4f09-b75b-2299c3b7166d
+        shell: sh
+        run: |
+          set -eu
+          redact() {
+            sed -E \
+              -e 's#postgres(ql)?://[^[:space:]"\\]+#postgresql://***#Ig' \
+              -e 's#((api[_-]?key|token|secret)[=:][[:space:]]*)[^[:space:],"}]+#\1***#Ig'
+          }
+          for spec in "api:$API_SERVICE_ID:$API_DEPLOYMENT_ID" "prospective:$PROSPECTIVE_SERVICE_ID:$PROSPECTIVE_DEPLOYMENT_ID"; do
+            name=$(echo "$spec" | cut -d: -f1)
+            service=$(echo "$spec" | cut -d: -f2)
+            deployment=$(echo "$spec" | cut -d: -f3)
+            railway link --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --service "$service" >/tmp/link-$name.txt
+            railway deployment list --service "$service" --environment "$RAILWAY_ENVIRONMENT_ID" --limit 8 --json >"/tmp/deployments-$name.json" || true
+            railway logs "$deployment" --build --lines 220 --json >"/tmp/build-$name.json" 2>"/tmp/build-$name.err" || true
+            railway logs "$deployment" --deployment --lines 260 --json >"/tmp/runtime-$name.json" 2>"/tmp/runtime-$name.err" || true
+            echo "===== $name DEPLOYMENT SUMMARY ====="
+            grep -E '"id":|"status":|"createdAt":|"commitHash":|"buildOnly":|"reason":' "/tmp/deployments-$name.json" | head -140 | redact || true
+            for path in "/tmp/build-$name.json" "/tmp/build-$name.err" "/tmp/runtime-$name.json" "/tmp/runtime-$name.err"; do
+              echo "===== $path ====="
+              if [ -s "$path" ]; then
+                tail -c 30000 "$path" | redact
+              else
+                echo EMPTY
+              fi
+            done
+          done
