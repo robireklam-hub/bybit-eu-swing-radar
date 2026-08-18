@@ -1,6 +1,7 @@
 from app import research_liquidation_context_api as api
 
 
+# Connector-authored commit intentionally finalizes the PR head after route wiring.
 def test_regime_symbols_accepts_list_and_caps_to_usdc() -> None:
     payload = {
         "symbols": [
