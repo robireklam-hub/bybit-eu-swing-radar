@@ -1,7 +1,7 @@
 """Standalone long-running microstructure recorder process for Railway.
 
 The service retries the PostgreSQL advisory singleton lock until it becomes the
-active writer.  Runtime status is persisted separately so the API can report the
+active writer. Runtime status is persisted separately so the API can report the
 external collector state after cutover.
 """
 from __future__ import annotations
@@ -23,7 +23,9 @@ RESTART_RETRY_SECONDS = 5.0
 
 def _service_metadata() -> tuple[str | None, str | None, str | None]:
     return (
-        os.getenv("RAILWAY_GIT_COMMIT_SHA") or None,
+        os.getenv("RAILWAY_GIT_COMMIT_SHA")
+        or os.getenv("MICROSTRUCTURE_SOURCE_COMMIT_SHA")
+        or None,
         os.getenv("RAILWAY_SERVICE_ID") or None,
         os.getenv("RAILWAY_SERVICE_NAME") or None,
     )
