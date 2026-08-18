@@ -3,6 +3,8 @@ name: Patch market regime shadow v1 routes
 on:
   push:
     branches: [research/market-regime-shadow-v1]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: write
