@@ -71,3 +71,7 @@ The day-trade status payload exposes a `prospective_funnel` summary with:
 ## Validation policy
 
 This dataset is observability evidence only. Do not tune thresholds merely to increase sample count. Any future feature or strategy change must be preregistered and validated with discovery/validation separation and untouched forward/out-of-sample evidence.
+## Standalone production isolation
+
+Production capture is owned exclusively by the `prospective-funnel-worker` Railway cron service. The live `day_worker.py` contains no prospective-recorder import, call, timeout, or enable flag; it only emits an `EXTERNALIZED` marker. The standalone recorder writes only the prospective research tables and `day_trade_prospective_funnel_status`. Exact live STRICT provenance is read from the authoritative `day_trade_scan` cache rather than inferred from the research recomputation.
+

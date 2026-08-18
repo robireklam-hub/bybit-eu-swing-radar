@@ -149,7 +149,7 @@ async def persist_standalone_capture(
     *,
     captured_at: datetime,
 ) -> dict[str, Any]:
-    connection = await asyncpg.connect(live.DATABASE_URL, timeout=30)
+    connection = await asyncpg.connect(live.DATABASE_URL, timeout=30, command_timeout=20)
     try:
         authoritative_live_setups, live_scan_as_of = await _load_authoritative_live_setups(connection)
         async with connection.transaction():
