@@ -1,0 +1,32 @@
+name: Signal Context Freeze
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "57 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  capture-signal-context:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: ${{ github.sha }}
+    steps:
+      - name: Check out exact commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Capture and verify immutable pre-signal context
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_signal_context_freeze_smoke.py

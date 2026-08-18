@@ -230,3 +230,9 @@ def attach_cross_layer_context_research(
                 status_code=503,
                 detail=f"Research cross-layer status unavailable: {type(exc).__name__}",
             ) from exc
+
+    # Keep the signal-time freeze integration inside the research-only router
+    # chain so live strategy and journal writer modules remain untouched.
+    from app.research_signal_context_freeze_api import attach_signal_context_freeze_research
+
+    attach_signal_context_freeze_research(app, require_api_key)
