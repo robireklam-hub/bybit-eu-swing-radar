@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 import asyncpg
@@ -10,6 +11,7 @@ from fastapi import Depends, FastAPI, HTTPException
 
 from app.config import settings
 from app.providers.bybit import BybitClient
+from research.swing_liquidity_event_builder import build_first_trigger_event
 
 STUDY = "swing-liquidity-validation-v1"
 FORBIDDEN_LABEL_KEYS = {
@@ -100,6 +102,40 @@ def compact_orderbook_payload(symbol: str, payload: dict[str, Any]) -> dict[str,
         "bids": result.get("b") or [],
         "asks": result.get("a") or [],
     }
+
+
+def compact_closed_4h_candles(
+    payload: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Normalize only fully closed Bybit 4H spot candles for label-blind trigger construction."""
+    result = payload.get("result") or {}
+    rows = result.get("list") if isinstance(result, dict) else None
+    if not isinstance(rows, list):
+        raise RuntimeError("Bybit kline result list is unavailable")
+    cutoff = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    candles: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, list) or len(row) < 5:
+            continue
+        try:
+            start_at = datetime.fromtimestamp(int(row[0]) / 1000.0, tz=timezone.utc)
+            close = float(row[4])
+        except (TypeError, ValueError, OSError):
+            continue
+        close_at = start_at + timedelta(hours=4)
+        if close_at > cutoff:
+            continue
+        candles.append(
+            {
+                "start_at": start_at.isoformat(),
+                "close_at": close_at.isoformat(),
+                "close": close,
+            }
+        )
+    candles.sort(key=lambda item: item["close_at"])
+    return candles
 
 
 def _parse_timestamp(value: Any, field: str) -> datetime:
@@ -248,6 +284,100 @@ async def persist_forward_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def load_forward_snapshots() -> list[dict[str, Any]]:
+    """Load only the durable, label-blind covariate rows needed by event construction."""
+    conn = await asyncpg.connect(settings.database_url)
+    try:
+        await conn.execute(SCHEMA_SQL)
+        rows = await conn.fetch(
+            """
+            SELECT captured_at, symbol, side, candidate
+            FROM swing_liquidity_forward_observations
+            ORDER BY captured_at ASC, symbol ASC, side ASC
+            """
+        )
+    finally:
+        await conn.close()
+    snapshots: list[dict[str, Any]] = []
+    for row in rows:
+        candidate = row["candidate"]
+        if isinstance(candidate, str):
+            candidate = json.loads(candidate)
+        if not isinstance(candidate, dict):
+            continue
+        snapshots.append(
+            {
+                "captured_at": row["captured_at"].isoformat(),
+                "symbol": str(row["symbol"]).upper(),
+                "side": str(row["side"]).lower(),
+                "candidate": candidate,
+            }
+        )
+    return snapshots
+
+
+def build_events_from_snapshots_and_klines(
+    snapshots: list[dict[str, Any]],
+    klines_by_symbol: dict[str, dict[str, Any]],
+    *,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Construct independent label-blind first-trigger events from durable snapshots plus closed 4H bars."""
+    cutoff = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for snapshot in snapshots:
+        symbol = str(snapshot.get("symbol") or "").upper()
+        side = str(snapshot.get("side") or "").lower()
+        if symbol and side in {"long", "short"}:
+            grouped[(symbol, side)].append(snapshot)
+
+    events: list[dict[str, Any]] = []
+    for (symbol, side), rows in sorted(grouped.items()):
+        payload = klines_by_symbol.get(symbol)
+        if not isinstance(payload, dict):
+            continue
+        candles = compact_closed_4h_candles(payload, now=cutoff)
+        event = build_first_trigger_event(rows, candles, symbol=symbol, side=side)
+        if event is not None:
+            events.append(event)
+    events.sort(key=lambda item: (item["trigger_close_at"], item["symbol"], item["side"]))
+    return events
+
+
+async def forward_event_status(client: BybitClient) -> dict[str, Any]:
+    snapshots = await load_forward_snapshots()
+    symbols = sorted({str(row.get("symbol") or "").upper() for row in snapshots if row.get("symbol")})
+    klines: dict[str, dict[str, Any]] = {}
+    errors: dict[str, str] = {}
+    for symbol in symbols:
+        try:
+            klines[symbol] = await client.kline(symbol, interval="240", limit=300, category="spot")
+        except Exception as exc:
+            errors[symbol] = type(exc).__name__
+
+    checked_at = datetime.now(timezone.utc)
+    events = build_events_from_snapshots_and_klines(snapshots, klines, now=checked_at)
+    matured = [event for event in events if datetime.fromisoformat(event["matures_at"]) <= checked_at]
+    return {
+        "research_only": True,
+        "label_blind": True,
+        "outcome_visible": False,
+        "live_strategy_mutated": False,
+        "promotion_allowed": False,
+        "study": STUDY,
+        "builder_version": "swing-liquidity-event-builder-v1",
+        "checked_at": checked_at.isoformat(),
+        "durable_snapshot_rows": len(snapshots),
+        "symbol_count": len(symbols),
+        "kline_symbol_count": len(klines),
+        "kline_errors": errors,
+        "event_count": len(events),
+        "matured_event_count": len(matured),
+        "events": events,
+        "note": "Events are label-blind trigger metadata only; no future outcome/R/MFE/MAE is read here.",
+    }
+
+
 async def forward_status() -> dict[str, Any]:
     conn = await asyncpg.connect(settings.database_url)
     try:
@@ -337,3 +467,11 @@ def attach_research_swing_liquidity_routes(
     )
     async def research_swing_liquidity_forward_status() -> dict[str, Any]:
         return await forward_status()
+
+    @app.get(
+        "/v1/research/swing-liquidity/forward-event-status",
+        dependencies=[Depends(require_api_key)],
+        include_in_schema=False,
+    )
+    async def research_swing_liquidity_forward_event_status() -> dict[str, Any]:
+        return await forward_event_status(client)
