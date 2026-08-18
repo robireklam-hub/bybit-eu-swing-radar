@@ -1,0 +1,94 @@
+name: Verify day worker source SHA cb69b05
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.head_ref == 'verify/day-worker-source-sha-cb69b05'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: cb69b0595a47b9a860c0988591db4a7d557d3a97
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: cb69b0595a47b9a860c0988591db4a7d557d3a97
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Verify exact day-worker provenance and journal isolation
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, time
+          from datetime import datetime, timezone
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key = os.environ['PRODUCTION_RADAR_API_KEY']
+          expected = os.environ['EXPECTED_SHA']
+
+          def get(path, params=None, auth=True, timeout=30):
+              url = base + path
+              if params:
+                  url += '?' + urlencode(params)
+              headers = {'Accept':'application/json','User-Agent':'day-worker-provenance-verifier/1'}
+              if auth:
+                  headers['X-Radar-Key'] = key
+              with urlopen(Request(url, headers=headers), timeout=timeout) as r:
+                  return json.loads(r.read().decode())
+
+          verified = None
+          for attempt in range(120):
+              try:
+                  version = get('/version', auth=False, timeout=15)
+                  day = get('/v1/day-trade/status')
+                  journal = get('/v1/day-trade/journal/summary', {'days':365,'signal_class':'all'})
+              except Exception as exc:
+                  print(f'poll={attempt+1} transient={type(exc).__name__}')
+                  time.sleep(5)
+                  continue
+
+              api_sha = version.get('commit_sha')
+              worker = day.get('worker') or {}
+              worker_sha = worker.get('source_commit_sha')
+              latest = journal.get('latest_run') or {}
+              overall = journal.get('overall') or {}
+              active = int(latest.get('active_signal_count') or 0)
+              open_count = int(overall.get('open_count') or 0)
+              print(f'poll={attempt+1} api_sha={api_sha} worker_sha={worker_sha} run_at={latest.get("run_at")} active={active} open={open_count}')
+
+              if api_sha == expected and worker_sha == expected:
+                  if str(latest.get('strategy_version') or '') != '0.7.3':
+                      raise SystemExit('FAIL latest journal run is not v0.7.3')
+                  if active != open_count:
+                      raise SystemExit(f'FAIL active/open mismatch: {active}!={open_count}')
+                  verified = {
+                      'api_sha': api_sha,
+                      'worker_sha': worker_sha,
+                      'worker_status': worker.get('status'),
+                      'latest_run_at': latest.get('run_at'),
+                      'active_signal_count': active,
+                      'open_count': open_count,
+                      'triggered_trade_count': latest.get('triggered_trade_count'),
+                      'shadow_trigger_count': latest.get('shadow_trigger_count'),
+                      'new_signal_count': latest.get('new_signal_count'),
+                  }
+                  break
+              time.sleep(5)
+
+          if verified is None:
+              raise SystemExit('FAIL exact merged day-worker SHA not observed')
+          print('DAY_WORKER_PROVENANCE=' + json.dumps(verified, sort_keys=True))
+          print('DAY-WORKER EXACT-SHA PROVENANCE AND JOURNAL ISOLATION VERIFIED.')
+          PY
