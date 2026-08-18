@@ -1,0 +1,97 @@
+name: Diagnose empty v0.7.3 journal 56713e0
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/diagnose-journal-zero-56713e0.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 56713e035dda39fed9f46335ba1a35c7caa38e9e
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 56713e035dda39fed9f46335ba1a35c7caa38e9e
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Read production day-worker and journal state
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+
+          base = os.environ["PRODUCTION_RADAR_API_BASE_URL"].rstrip("/")
+          key = os.environ["PRODUCTION_RADAR_API_KEY"]
+          expected = os.environ["EXPECTED_SHA"]
+
+          def get(path, params=None, auth=True):
+              url = base + path
+              if params:
+                  url += "?" + urlencode(params)
+              headers = {"Accept":"application/json","User-Agent":"journal-zero-diagnostic/1"}
+              if auth:
+                  headers["X-Radar-Key"] = key
+              with urlopen(Request(url, headers=headers), timeout=40) as r:
+                  return json.loads(r.read().decode())
+
+          version = get("/version", auth=False)
+          if version.get("commit_sha") != expected:
+              raise SystemExit(f"FAIL exact SHA mismatch: {version.get('commit_sha')}")
+
+          day = get("/v1/day-trade/status")
+          journal = get("/v1/day-trade/journal/summary", {"days":365,"signal_class":"all"})
+          scan = get("/v1/day-trade/scan", {"direction":"both","limit":20,"min_score":0,"include_watchlist":"true"})
+          data = get("/v1/data-status")
+
+          latest_run = journal.get("latest_run") or {}
+          day_worker = day.get("worker") or {}
+          out = {
+              "version": version,
+              "day_status": {
+                  "data_as_of": day.get("data_as_of"),
+                  "data_quality": day.get("data_quality"),
+                  "strategy_version": day.get("strategy_version"),
+                  "worker": day_worker,
+                  "coverage": day.get("coverage"),
+              },
+              "journal": {
+                  "strategy_version": journal.get("strategy_version"),
+                  "evidence_status": journal.get("evidence_status"),
+                  "strict_closed_sample": journal.get("strict_closed_sample"),
+                  "overall": journal.get("overall"),
+                  "latest_run": latest_run,
+                  "warnings": journal.get("warnings"),
+              },
+              "scan_counts": {
+                  "strict_longs": len(scan.get("strict_longs") or []),
+                  "strict_shorts": len(scan.get("strict_shorts") or []),
+                  "watch_only_longs": len(scan.get("watch_only_longs") or []),
+                  "watch_only_shorts": len(scan.get("watch_only_shorts") or []),
+                  "data_as_of": scan.get("data_as_of"),
+                  "data_quality": scan.get("data_quality"),
+              },
+              "data_status_worker": data.get("worker"),
+          }
+          print("JOURNAL_ZERO_DIAGNOSTIC=" + json.dumps(out, sort_keys=True, default=str))
+
+          if not latest_run:
+              print("DIAGNOSIS=NO_JOURNAL_RUN")
+          elif latest_run.get("new_signal_count", 0) == 0 and latest_run.get("triggered_trade_count", 0) == 0 and latest_run.get("shadow_trigger_count", 0) == 0:
+              print("DIAGNOSIS=JOURNAL_RUNNING_BUT_NO_TRIGGERED_SIGNALS")
+          elif latest_run.get("new_signal_count", 0) == 0:
+              print("DIAGNOSIS=TRIGGERS_EXIST_BUT_NO_INSERTS")
+          else:
+              print("DIAGNOSIS=JOURNAL_HAS_SIGNALS")
+          PY
