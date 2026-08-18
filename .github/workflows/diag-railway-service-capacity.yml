@@ -1,0 +1,36 @@
+name: Diagnose Railway service capacity
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/diag-railway-service-capacity.yml'
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Read Railway project service inventory
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          endpoint='https://backboard.railway.com/graphql/v2'
+          token=os.environ['RAILWAY_API_TOKEN']
+          project_id='846f5088-4e8b-45fe-84d9-0728542b2c36'
+          env_id='2be04d3c-82b3-487d-930c-a4fbc7d483d8'
+          day_service='b740fd25-f72b-4392-b156-7aa3b0c5ffd4'
+          def gql(query, variables):
+              req=urllib.request.Request(endpoint,data=json.dumps({'query':query,'variables':variables}).encode(),headers={'Authorization':'Bearer '+token,'Content-Type':'application/json','Accept':'application/json','User-Agent':'railway-capacity-diag/1'})
+              with urllib.request.urlopen(req,timeout=25) as r: payload=json.loads(r.read().decode())
+              if payload.get('errors'): raise RuntimeError(json.dumps(payload['errors']))
+              return payload['data']
+          q='query project($id:String!){project(id:$id){id name services{edges{node{id name}}}}}'
+          data=gql(q,{'id':project_id})['project']
+          services=sorted([{'id':e['node']['id'],'name':e['node']['name']} for e in data['services']['edges']],key=lambda x:x['name'])
+          vq='query variables($projectId:String!,$environmentId:String!,$serviceId:String,$unrendered:Boolean){variables(projectId:$projectId,environmentId:$environmentId,serviceId:$serviceId,unrendered:$unrendered)}'
+          vars_=gql(vq,{'projectId':project_id,'environmentId':env_id,'serviceId':day_service,'unrendered':True})['variables'] or {}
+          print('SERVICE_COUNT='+str(len(services)))
+          print('SERVICES='+json.dumps(services,sort_keys=True))
+          print('DAY_WORKER_VARIABLE_NAMES='+json.dumps(sorted(vars_.keys())))
+          PY
