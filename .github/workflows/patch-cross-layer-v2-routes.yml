@@ -1,0 +1,40 @@
+name: Temporary patch Cross-Layer v2 routes
+
+on:
+  push:
+    branches:
+      - "research/cross-layer-context-v2"
+    paths:
+      - ".github/workflows/patch-cross-layer-v2-routes.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+      - name: Attach hidden Cross-Layer v2 routes and self-remove
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          main = Path("bybit_eu_swing_radar/backend/app/main.py")
+          text = main.read_text()
+          attach = "attach_cross_layer_context_v2_research(app, require_api_key)"
+          if attach not in text:
+              text = text.rstrip() + "\n\n# Research-only Cross-Layer Context v2. V1 remains immutable; V2 adds sourced\n# sector rotation plus BTC/ETH on-chain context without live mutation.\nfrom app.research_cross_layer_context_v2_api import attach_cross_layer_context_v2_research\n\nattach_cross_layer_context_v2_research(app, require_api_key)\n"
+              main.write_text(text)
+          Path(".github/workflows/patch-cross-layer-v2-routes.yml").unlink()
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bybit_eu_swing_radar/backend/app/main.py .github/workflows/patch-cross-layer-v2-routes.yml
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Research: attach Cross-Layer Context v2 routes"
+          git push origin HEAD:${GITHUB_REF_NAME}
