@@ -170,3 +170,10 @@ def attach_sweep_effect_research(
                 status_code=503,
                 detail=f"Research sweep-effect status unavailable: {type(exc).__name__}",
             ) from exc
+
+    # Keep research route integration out of live strategy modules. The sweep
+    # research router is already attached by app.main, so it can safely attach
+    # the independent Cross-Layer Context research router as well.
+    from app.research_cross_layer_context_api import attach_cross_layer_context_research
+
+    attach_cross_layer_context_research(app, require_api_key)
