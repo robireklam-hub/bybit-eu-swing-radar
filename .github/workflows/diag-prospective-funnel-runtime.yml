@@ -20,14 +20,14 @@ jobs:
           RAILWAY_PROJECT_ID: 846f5088-4e8b-45fe-84d9-0728542b2c36
           RAILWAY_ENVIRONMENT_ID: 2be04d3c-82b3-487d-930c-a4fbc7d483d8
           PROSPECTIVE_SERVICE_ID: 1f9dab4d-6088-426f-ad52-228e809ecd26
-          FAILED_DEPLOYMENT_ID: 7c283565-0928-4fee-be11-4bc57955b338
+          TARGET_DEPLOYMENT_ID: 6e88a0c4-cdfb-453d-a6d2-bed507636d0c
         shell: sh
         run: |
           set -eu
           railway link --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --service "$PROSPECTIVE_SERVICE_ID" >/tmp/link.txt
           railway deployment list --service "$PROSPECTIVE_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --limit 8 --json >/tmp/deployments.json
-          railway logs "$FAILED_DEPLOYMENT_ID" --build --lines 160 --json >/tmp/build.json 2>/tmp/build.err || true
-          railway logs "$FAILED_DEPLOYMENT_ID" --deployment --lines 240 --json >/tmp/runtime.json 2>/tmp/runtime.err || true
+          railway logs "$TARGET_DEPLOYMENT_ID" --build --lines 120 --json >/tmp/build.json 2>/tmp/build.err || true
+          railway logs "$TARGET_DEPLOYMENT_ID" --deployment --lines 240 --json >/tmp/runtime.json 2>/tmp/runtime.err || true
 
           redact() {
             sed -E \
@@ -36,7 +36,7 @@ jobs:
           }
 
           echo '===== DEPLOYMENT SUMMARY ====='
-          grep -E '"id":|"status":|"createdAt":|"commitHash":|"buildOnly":|"reason":' /tmp/deployments.json | head -120 | redact || true
+          grep -E '"id":|"status":|"createdAt":|"commitHash":|"buildOnly":|"reason":|multiRegionConfig|europe-west4-drams3a|"sfo"' /tmp/deployments.json | head -180 | redact || true
           for path in /tmp/build.json /tmp/build.err /tmp/runtime.json /tmp/runtime.err; do
             echo "===== $path ====="
             if [ -s "$path" ]; then
