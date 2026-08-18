@@ -22,9 +22,10 @@ def _payload(**overrides):
     return payload, now
 
 
-def test_validate_status_accepts_fresh_durable_capture():
+def test_validate_status_accepts_fresh_exact_durable_capture():
     payload, now = _payload()
-    assert validate_status(payload, now=now) == []
+    expected = datetime.fromisoformat(payload["last_capture_at"])
+    assert validate_status(payload, now=now, expected_capture_at=expected) == []
 
 
 def test_validate_status_rejects_stale_or_empty_state():
@@ -55,10 +56,24 @@ def test_validate_status_requires_both_preregistered_turnover_exposures():
     assert "missing_current_gate_comparator_exposure" in errors
 
 
+def test_validate_status_rejects_previous_fresh_capture_when_exact_capture_expected():
+    payload, now = _payload(last_capture_at=(datetime(2026, 8, 17, 23, 55, tzinfo=timezone.utc)).isoformat())
+    expected = datetime(2026, 8, 17, 23, 58, tzinfo=timezone.utc)
+    errors = validate_status(payload, now=now, expected_capture_at=expected)
+    assert any(error.startswith("exact_capture_not_persisted:") for error in errors)
+
+
 def test_run_check_requires_research_only_nonpromotion_contract():
     payload, now = _payload(promotion_allowed=True)
 
     def fetch(url, api_key, timeout):
         return payload
 
-    assert run_check("https://example.test", "secret", fetch=fetch, now=now) == 1
+    expected = datetime.fromisoformat(payload["last_capture_at"])
+    assert run_check(
+        "https://example.test",
+        "secret",
+        fetch=fetch,
+        now=now,
+        expected_capture_at=expected,
+    ) == 1
