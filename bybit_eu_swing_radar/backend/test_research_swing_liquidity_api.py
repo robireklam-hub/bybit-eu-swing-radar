@@ -41,9 +41,18 @@ def _snapshot(**overrides):
 
 def test_validate_usdc_symbol_is_strictly_usdc_spot_shape():
     assert validate_usdc_symbol("btcusdc") == "BTCUSDC"
+    assert validate_usdc_symbol("lausdc") == "LAUSDC"
     for value in ("BTCUSDT", "USDC", "BTC-USDC", "", "X" * 31 + "USDC"):
         with pytest.raises(HTTPException):
             validate_usdc_symbol(value)
+
+
+def test_forward_snapshot_accepts_short_base_usdc_symbol():
+    snapshot = _snapshot()
+    snapshot["candidates"][0]["symbol"] = "LAUSDC"
+    snapshot["orderbooks"] = {"LAUSDC": {}}
+    _, _, candidates = validate_forward_snapshot(snapshot)
+    assert candidates[0]["symbol"] == "LAUSDC"
 
 
 def test_compact_orderbook_payload_is_explicitly_read_only_research():
