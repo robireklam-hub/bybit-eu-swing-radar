@@ -63,6 +63,7 @@ The day-trade status payload exposes a `prospective_funnel` summary with:
 - prospective boundary
 - current-run snapshot counts
 - cumulative distinct sweep events
+- cumulative `exact_live_strict_trigger_events`
 - latest gate pass counts
 - latest first-failed-gate counts
 - source commit SHA
