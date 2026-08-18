@@ -1,0 +1,42 @@
+name: Swing liquidity event semantic smoke
+
+on:
+  workflow_run:
+    workflows: ["Backend tests"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: swing-liquidity-event-semantic-smoke-production
+  cancel-in-progress: true
+
+jobs:
+  semantic-smoke:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_sha != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+
+    steps:
+      - name: Check out tested main commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Verify label-blind swing liquidity event construction
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_event_smoke.py
