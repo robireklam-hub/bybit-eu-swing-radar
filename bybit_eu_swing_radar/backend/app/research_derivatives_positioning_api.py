@@ -49,6 +49,33 @@ def _decode(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _regime_symbol_map(snapshot: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Normalize market-regime v1 symbols from its canonical list payload.
+
+    Dict input is accepted too so stored/derived representations remain
+    schema-tolerant, but canonical market-regime-shadow-v1 emits a list.
+    """
+    raw = snapshot.get("symbols")
+    result: dict[str, dict[str, Any]] = {}
+    if isinstance(raw, Mapping):
+        for symbol, item in raw.items():
+            if isinstance(item, Mapping):
+                normalized = str(symbol).upper()
+                if normalized:
+                    row = dict(item)
+                    row.setdefault("symbol", normalized)
+                    result[normalized] = row
+        return result
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, Mapping):
+                continue
+            symbol = str(item.get("symbol") or "").upper()
+            if symbol:
+                result[symbol] = dict(item)
+    return result
+
+
 def _extract_liquidation_context(value: Any, wanted: set[str]) -> dict[str, dict[str, Any]]:
     """Collect cached symbol-level Coinalyze contexts without assuming scan schema."""
     result: dict[str, dict[str, Any]] = {}
@@ -86,10 +113,10 @@ async def _load_inputs(connection: asyncpg.Connection) -> tuple[list[str], dict[
     if regime_row is None:
         raise RuntimeError("market-regime-shadow-v1 snapshot is unavailable")
     regime_snapshot = _decode(regime_row["payload"])
-    regime_symbols = regime_snapshot.get("symbols") or {}
-    if not isinstance(regime_symbols, dict) or not regime_symbols:
+    regime_symbols = _regime_symbol_map(regime_snapshot)
+    if not regime_symbols:
         raise RuntimeError("market-regime-shadow-v1 symbol coverage is empty")
-    symbols = [str(symbol).upper() for symbol in regime_symbols.keys()][:8]
+    symbols = list(regime_symbols.keys())[:8]
 
     keys = [f"day_trade_flow:{symbol}" for symbol in symbols]
     flow_rows = await connection.fetch(
@@ -116,12 +143,12 @@ async def build_current_snapshot() -> dict[str, Any]:
     finally:
         await connection.close()
 
-    regime_symbols = regime_snapshot.get("symbols") or {}
+    regime_symbols = _regime_symbol_map(regime_snapshot)
     rows = [
         classify_symbol(
             symbol,
             flow_map.get(symbol),
-            regime_symbols.get(symbol) if isinstance(regime_symbols, dict) else None,
+            regime_symbols.get(symbol),
             liquidation_map.get(symbol),
         )
         for symbol in symbols
@@ -131,8 +158,11 @@ async def build_current_snapshot() -> dict[str, Any]:
         captured_at=datetime.now(timezone.utc),
         source_commit_sha=os.getenv("RAILWAY_GIT_COMMIT_SHA") or None,
     )
+    regime_spec = regime_snapshot.get("spec") or {}
     snapshot["upstream"] = {
-        "market_regime_spec_version": regime_snapshot.get("spec_version") or "market-regime-shadow-v1",
+        "market_regime_spec_version": (
+            regime_spec.get("version") if isinstance(regime_spec, Mapping) else None
+        ) or "market-regime-shadow-v1",
         "market_regime_captured_at": regime_snapshot.get("captured_at"),
         "flow_cache_symbols": sorted(flow_map.keys()),
         "liquidation_cache_symbols": sorted(liquidation_map.keys()),
