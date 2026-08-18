@@ -11,8 +11,10 @@ permissions:
   contents: read
   statuses: write
 
+# Keep push-to-main verification isolated from pull_request Backend-test completions.
+# A PR-origin workflow_run must never cancel an in-flight production verification.
 concurrency:
-  group: production-v073-prospective-funnel-smoke
+  group: production-v073-prospective-funnel-${{ github.event.workflow_run.event }}-${{ github.event.workflow_run.head_branch }}
   cancel-in-progress: true
 
 jobs:
@@ -29,6 +31,10 @@ jobs:
       PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
       EXPECTED_API_SHA: ${{ github.event.workflow_run.head_sha }}
       PROSPECTIVE_FUNNEL_FEATURE_SHA: 327d353edee364209b36e4f486ccd68ef7faed05
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      RAILWAY_PROJECT_ID: 846f5088-4e8b-45fe-84d9-0728542b2c36
+      RAILWAY_ENVIRONMENT_ID: 2be04d3c-82b3-487d-930c-a4fbc7d483d8
+      DAY_RADAR_SERVICE_ID: b740fd25-f72b-4392-b156-7aa3b0c5ffd4
 
     steps:
       - name: Mark production funnel verification pending
@@ -56,6 +62,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Snapshot Railway day-worker scheduler state
+        continue-on-error: true
+        working-directory: bybit_eu_swing_radar/backend
+        run: python -u scripts/railway_day_worker_scheduler_diag.py
+
       - name: Run read-only prospective funnel production smoke
         id: funnel-smoke
         continue-on-error: true
@@ -69,16 +80,24 @@ jobs:
           SMOKE_OUTCOME: ${{ steps.funnel-smoke.outcome }}
         with:
           script: |
-            const ok = process.env.SMOKE_OUTCOME === 'success';
+            const outcome = process.env.SMOKE_OUTCOME;
+            const state = outcome === 'success'
+              ? 'success'
+              : outcome === 'cancelled'
+                ? 'error'
+                : 'failure';
+            const description = outcome === 'success'
+              ? 'Prospective funnel production verified'
+              : outcome === 'cancelled'
+                ? 'Prospective funnel verification cancelled'
+                : 'Prospective funnel production verification failed';
             await github.rest.repos.createCommitStatus({
               owner: context.repo.owner,
               repo: context.repo.repo,
               sha: context.payload.workflow_run.head_sha,
-              state: ok ? 'success' : 'failure',
+              state,
               context: 'production/v073-prospective-funnel',
-              description: ok
-                ? 'Prospective funnel production verified'
-                : 'Prospective funnel production verification failed',
+              description,
               target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
             })
 
