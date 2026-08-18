@@ -1,0 +1,40 @@
+name: Cross-layer context v2
+
+on:
+  schedule:
+    - cron: "14 * * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "bybit_eu_swing_radar/backend/research/cross_layer_context_v2.py"
+      - "bybit_eu_swing_radar/backend/app/research_cross_layer_context_v2_api.py"
+      - "bybit_eu_swing_radar/backend/scripts/production_cross_layer_context_v2_smoke.py"
+      - "bybit_eu_swing_radar/backend/app/main.py"
+      - ".github/workflows/cross-layer-context-v2.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cross-layer-context-v2
+  cancel-in-progress: true
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Capture and verify Cross-Layer Context v2
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_cross_layer_context_v2_smoke.py
