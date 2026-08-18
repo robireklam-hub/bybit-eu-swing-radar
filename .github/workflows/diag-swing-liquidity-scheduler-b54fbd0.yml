@@ -1,0 +1,79 @@
+name: Diagnose swing liquidity scheduler b54fbd0
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  diagnose:
+    if: github.head_ref == 'diag/swing-liquidity-scheduler-b54fbd0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      EXPECTED_SHA: b54fbd01e086d1f7d1b57d6324d32241e11e2d89
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      BYBIT_EU_PUBLIC_BASE_URL: https://api.bybit.eu
+      SWING_LIQUIDITY_SHADOW_OUTPUT: swing-liquidity-shadow.json
+    steps:
+      - name: Inspect recent scheduled workflow runs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsSL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/workflows/swing-liquidity-shadow.yml/runs?event=schedule&per_page=12" \
+            -o /tmp/runs.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          data=json.loads(Path('/tmp/runs.json').read_text())
+          runs=data.get('workflow_runs') or []
+          print('SCHEDULED_RUN_COUNT='+str(len(runs)))
+          for r in runs:
+              print('SCHEDULED_RUN='+json.dumps({
+                  'id':r.get('id'),'status':r.get('status'),'conclusion':r.get('conclusion'),
+                  'created_at':r.get('created_at'),'run_started_at':r.get('run_started_at'),
+                  'updated_at':r.get('updated_at'),'head_sha':r.get('head_sha'),'event':r.get('event')
+              },sort_keys=True))
+          PY
+
+      - uses: actions/checkout@v7
+        with:
+          ref: b54fbd01e086d1f7d1b57d6324d32241e11e2d89
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Run one exact-main forward capture
+        working-directory: bybit_eu_swing_radar/backend
+        run: python research/swing_liquidity_shadow.py
+
+      - name: Bind exact capture
+        working-directory: bybit_eu_swing_radar/backend
+        run: |
+          python - <<'PY' >> "$GITHUB_ENV"
+          import json
+          from pathlib import Path
+          payload=json.loads(Path('swing-liquidity-shadow.json').read_text())
+          captured_at=payload.get('captured_at')
+          if not captured_at: raise SystemExit('captured_at missing')
+          print(f'EXPECTED_SWING_LIQUIDITY_CAPTURE_AT={captured_at}')
+          print('CAPTURE_SUMMARY='+json.dumps({
+              'captured_at':captured_at,
+              'candidate_count':payload.get('candidate_count'),
+              'orderbook_count':len(payload.get('orderbooks') or {}),
+              'orderbook_error_count':len(payload.get('orderbook_errors') or {}),
+          },sort_keys=True))
+          PY
+
+      - name: Verify durable progression
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_forward_status.py
