@@ -1,3 +1,5 @@
+"""Regression coverage for bounded research-sidecar execution."""
+
 import asyncio
 
 import pytest
