@@ -1,0 +1,54 @@
+name: Diagnose day worker runtime logs 25c30af
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose-logs:
+    if: github.head_ref == 'diag/day-worker-cron-state-25c30af'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      CURRENT_DEPLOYMENT_ID: c82a3a4a-7f2f-4e46-b4cd-0bb4de98f71f
+      PREVIOUS_DEPLOYMENT_ID: 856db25a-3fac-4b4c-94d7-9677c7fd31a0
+    steps:
+      - name: Read Railway runtime logs
+        shell: bash
+        run: |
+          python -u - <<'PY'
+          import json, os
+          from urllib.request import Request, urlopen
+
+          endpoint='https://backboard.railway.com/graphql/v2'
+          token=os.environ['RAILWAY_API_TOKEN']
+
+          def gql(query, variables):
+              req=Request(endpoint,data=json.dumps({'query':query,'variables':variables}).encode(),headers={
+                  'Authorization':'Bearer '+token,
+                  'Content-Type':'application/json',
+                  'Accept':'application/json',
+                  'User-Agent':'day-worker-runtime-log-diag/1',
+              })
+              with urlopen(req,timeout=30) as r:
+                  payload=json.loads(r.read().decode())
+              if payload.get('errors'):
+                  raise RuntimeError(json.dumps([{'message':e.get('message'),'path':e.get('path')} for e in payload['errors']]))
+              return payload.get('data') or {}
+
+          q='query deploymentLogs($deploymentId:String!,$limit:Int){deploymentLogs(deploymentId:$deploymentId,limit:$limit){timestamp message severity}}'
+          for label, dep in [('CURRENT',os.environ['CURRENT_DEPLOYMENT_ID']),('PREVIOUS',os.environ['PREVIOUS_DEPLOYMENT_ID'])]:
+              data=gql(q,{'deploymentId':dep,'limit':300})
+              rows=data.get('deploymentLogs') or []
+              safe=[{
+                  'timestamp':r.get('timestamp'),
+                  'severity':r.get('severity'),
+                  'message':r.get('message'),
+              } for r in rows]
+              print(label+'_RUNTIME_LOG_COUNT='+str(len(safe)),flush=True)
+              print(label+'_RUNTIME_LOGS='+json.dumps(safe,sort_keys=True,default=str),flush=True)
+          PY
