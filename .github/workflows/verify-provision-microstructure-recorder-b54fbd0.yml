@@ -1,4 +1,4 @@
-name: Diagnose Railway regions for microstructure recorder b54fbd0
+name: Retry standalone microstructure recorder in EU West b54fbd0
 
 on:
   pull_request:
@@ -8,70 +8,83 @@ permissions:
   contents: read
 
 jobs:
-  diagnose:
+  retry-cutover:
     if: github.head_ref == 'ops/provision-microstructure-recorder-b54fbd0'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     env:
       RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PROJECT_ID: 846f5088-4e8b-45fe-84d9-0728542b2c36
       ENVIRONMENT_ID: 2be04d3c-82b3-487d-930c-a4fbc7d483d8
       API_SERVICE_ID: 6b92a19d-a178-4eab-9b8a-9fed1855319b
       STANDALONE_SERVICE_ID: 61664eb1-4a59-4947-bae9-18410a2221b8
+      EXPECTED_SHA: b54fbd01e086d1f7d1b57d6324d32241e11e2d89
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
     steps:
-      - name: Query service instance region metadata
-        shell: bash
+      - uses: actions/checkout@v7
+        with:
+          ref: b54fbd01e086d1f7d1b57d6324d32241e11e2d89
+
+      - name: Install Railway CLI
         run: |
-          python3 - <<'PY'
-          import json, os
-          query = '''
-          query EnvironmentServices($environmentId: String!) {
-            environment(id: $environmentId) {
-              serviceInstances {
-                edges {
-                  node {
-                    serviceId
-                    serviceName
-                    region
-                    numReplicas
-                    latestDeployment { id status meta }
-                  }
-                }
-              }
-            }
-            regions { name country location }
-          }
-          '''
-          with open('/tmp/query.json','w') as f:
-              json.dump({"query":query,"variables":{"environmentId":os.environ["ENVIRONMENT_ID"]}}, f)
-          PY
-          code=$(curl -sS -o /tmp/response.json -w '%{http_code}' \
-            -X POST 'https://backboard.railway.com/graphql/v2' \
-            -H "Authorization: Bearer $RAILWAY_API_TOKEN" \
-            -H 'Content-Type: application/json' \
-            -H 'User-Agent: bybit-eu-trading-radar-ops/1' \
-            --data-binary @/tmp/query.json)
-          if [ "$code" != "200" ]; then echo "FAIL GraphQL HTTP=$code"; exit 1; fi
-          python3 - <<'PY'
-          import json, os
-          with open('/tmp/response.json') as f: result=json.load(f)
-          if result.get('errors'):
-              raise SystemExit('GraphQL errors: ' + ' | '.join(str(x.get('message')) for x in result['errors']))
-          nodes=result['data']['environment']['serviceInstances']['edges']
-          wanted={os.environ['API_SERVICE_ID'], os.environ['STANDALONE_SERVICE_ID']}
-          for edge in nodes:
-              n=edge['node']
-              if n.get('serviceId') not in wanted: continue
-              meta=n.get('latestDeployment',{}).get('meta') or {}
-              manifest=meta.get('serviceManifest') or {}
-              deploy=manifest.get('deploy') or {}
-              safe={
-                'serviceId':n.get('serviceId'),
-                'serviceName':n.get('serviceName'),
-                'region':n.get('region'),
-                'numReplicas':n.get('numReplicas'),
-                'deploymentStatus':n.get('latestDeployment',{}).get('status'),
-                'multiRegionConfig':deploy.get('multiRegionConfig'),
-              }
-              print('SERVICE_REGION=' + json.dumps(safe,sort_keys=True))
-          print('AVAILABLE_REGIONS=' + json.dumps(result['data'].get('regions'),sort_keys=True))
-          PY
+          bash <(curl -fsSL https://railway.com/install.sh) -y
+          echo "$HOME/.railway/bin" >> "$GITHUB_PATH"
+
+      - name: Link production project
+        run: railway link --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" >/dev/null
+
+      - name: Move standalone recorder to EU West
+        run: |
+          railway scale europe-west4-drams3a=1 us-west=0 \
+            --service "$STANDALONE_SERVICE_ID" \
+            --environment "$ENVIRONMENT_ID" --json
+
+      - name: Enable standalone recorder on exact source SHA
+        run: |
+          railway variable set \
+            MICROSTRUCTURE_RECORDER_ENABLED=true \
+            "MICROSTRUCTURE_SOURCE_COMMIT_SHA=$EXPECTED_SHA" \
+            --service "$STANDALONE_SERVICE_ID" \
+            --environment "$ENVIRONMENT_ID" >/dev/null
+          echo "Standalone recorder enabled in EU West; API remains owner until cutover."
+
+      - name: Wait for standalone deployment to settle
+        run: |
+          for i in $(seq 1 60); do
+            status=$(railway service status --service "$STANDALONE_SERVICE_ID" --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" --json 2>/dev/null || true)
+            if printf '%s' "$status" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"SUCCESS"'; then
+              echo "Standalone recorder deployment is SUCCESS."
+              exit 0
+            fi
+            if printf '%s' "$status" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"(FAILED|CRASHED|REMOVED)"'; then
+              echo "FAIL standalone recorder deployment terminal state"
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "FAIL standalone recorder deployment timeout"
+          exit 1
+
+      - name: Switch API recorder owner to external
+        run: |
+          railway variable set MICROSTRUCTURE_RECORDER_OWNER=external \
+            --service "$API_SERVICE_ID" \
+            --environment "$ENVIRONMENT_ID" >/dev/null
+          echo "API recorder owner switched to external."
+
+      - name: Verify exact-SHA external recorder and readiness
+        id: verify_external
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_external_smoke.py
+
+      - name: Fail-safe rollback on verification failure
+        if: failure()
+        run: |
+          railway variable set MICROSTRUCTURE_RECORDER_ENABLED=false \
+            --service "$STANDALONE_SERVICE_ID" \
+            --environment "$ENVIRONMENT_ID" >/dev/null || true
+          railway variable set MICROSTRUCTURE_RECORDER_OWNER=api \
+            --service "$API_SERVICE_ID" \
+            --environment "$ENVIRONMENT_ID" >/dev/null || true
+          echo "Fail-safe rollback requested after unsuccessful external verification."
