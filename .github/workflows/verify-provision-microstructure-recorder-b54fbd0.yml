@@ -34,11 +34,45 @@ jobs:
       - name: Link production project
         run: railway link --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" >/dev/null
 
-      - name: Move standalone recorder exclusively to EU West
+      - name: Replace standalone recorder region config with EU West only
+        shell: bash
         run: |
-          railway scale europe-west4-drams3a=1 sfo=0 \
-            --service "$STANDALONE_SERVICE_ID" \
-            --environment "$ENVIRONMENT_ID" --json
+          python3 - <<'PY'
+          import json, os
+          query = '''
+          mutation serviceInstanceUpdate($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) {
+            serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input)
+          }
+          '''
+          payload = {
+            "query": query,
+            "variables": {
+              "serviceId": os.environ["STANDALONE_SERVICE_ID"],
+              "environmentId": os.environ["ENVIRONMENT_ID"],
+              "input": {
+                "multiRegionConfig": {"europe-west4-drams3a": {"numReplicas": 1}}
+              },
+            },
+          }
+          with open('/tmp/railway-region.json','w') as f:
+              json.dump(payload, f)
+          PY
+          code=$(curl -sS -o /tmp/railway-region-response.json -w '%{http_code}' \
+            -X POST 'https://backboard.railway.com/graphql/v2' \
+            -H "Authorization: Bearer $RAILWAY_API_TOKEN" \
+            -H 'Content-Type: application/json' \
+            -H 'User-Agent: bybit-eu-trading-radar-ops/1' \
+            --data-binary @/tmp/railway-region.json)
+          test "$code" = "200" || { echo "FAIL Railway GraphQL HTTP=$code"; exit 1; }
+          python3 - <<'PY'
+          import json
+          with open('/tmp/railway-region-response.json') as f: result=json.load(f)
+          if result.get('errors'):
+              raise SystemExit('Railway region update errors: ' + ' | '.join(str(x.get('message')) for x in result['errors']))
+          if result.get('data',{}).get('serviceInstanceUpdate') is not True:
+              raise SystemExit('Railway region update was not confirmed')
+          print('Standalone recorder region config replaced with EU West only.')
+          PY
 
       - name: Enable standalone recorder on exact source SHA
         run: |
@@ -51,7 +85,7 @@ jobs:
 
       - name: Wait for new standalone deployment
         run: |
-          sleep 12
+          sleep 15
           for i in $(seq 1 60); do
             status=$(railway service status --service "$STANDALONE_SERVICE_ID" --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" --json 2>/dev/null || true)
             echo "$status" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("RECORDER_DEPLOY_STATUS="+str(d.get("status"))+" deployment="+str(d.get("deploymentId")))' || true
