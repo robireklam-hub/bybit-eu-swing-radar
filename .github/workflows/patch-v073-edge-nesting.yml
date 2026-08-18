@@ -1,0 +1,45 @@
+name: Patch v0.7.3 diagnostic edge nesting
+
+on:
+  push:
+    branches:
+      - fix/v073-diagnostic-edge-nesting
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: fix/v073-diagnostic-edge-nesting
+          fetch-depth: 0
+      - name: Apply cumulative cohort semantics and tests
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          root = Path('bybit_eu_swing_radar/backend')
+          path = root / 'app/v073_diagnostics_api.py'
+          text = path.read_text()
+          old = '''def _cohort_match(row: dict[str, Any], cohort: str) -> bool:\n    if row.get("base_net_r") is None:\n        return False\n    if cohort == "STRUCTURE_5M":\n        return bool(row.get("pass_structure_5m"))\n    if cohort == "VOLUME_PASS":\n        return bool(\n            row.get("pass_structure_5m")\n            and row.get("pass_volume_confirmation")\n        )\n    if cohort == "STRUCTURE_15M_PASS":\n        return bool(\n            row.get("pass_structure_5m")\n            and row.get("pass_volume_confirmation")\n            and row.get("pass_structure_15m")\n        )\n    if cohort == "LIQUID_EXECUTABLE":\n        return bool(\n            row.get("pass_tradeable")\n            and row.get("pass_side_execution_model")\n        )\n    if cohort == "SCORE_GATES_PASS":\n        return bool(row.get("pass_score_gates"))\n    if cohort == "STRICT_ELIGIBLE":\n        return bool(row.get("pass_strict_eligible"))\n    if cohort == "STRICT_TRADE":\n        return bool(row.get("pass_strict_trade"))\n    return False\n'''
+          new = '''def _cohort_match(row: dict[str, Any], cohort: str) -> bool:\n    if row.get("base_net_r") is None:\n        return False\n\n    structure_5m = bool(row.get("pass_structure_5m"))\n    volume_pass = structure_5m and bool(row.get("pass_volume_confirmation"))\n    structure_15m = volume_pass and bool(row.get("pass_structure_15m"))\n    liquid_executable = bool(\n        structure_15m\n        and row.get("pass_tradeable")\n        and row.get("pass_side_execution_model")\n    )\n    score_gates = liquid_executable and bool(row.get("pass_score_gates"))\n    strict_eligible = score_gates and bool(row.get("pass_strict_eligible"))\n    strict_trade = strict_eligible and bool(row.get("pass_strict_trade"))\n\n    return {\n        "STRUCTURE_5M": structure_5m,\n        "VOLUME_PASS": volume_pass,\n        "STRUCTURE_15M_PASS": structure_15m,\n        "LIQUID_EXECUTABLE": liquid_executable,\n        "SCORE_GATES_PASS": score_gates,\n        "STRICT_ELIGIBLE": strict_eligible,\n        "STRICT_TRADE": strict_trade,\n    }.get(cohort, False)\n'''
+          if old not in text:
+              raise SystemExit('expected _cohort_match block not found')
+          path.write_text(text.replace(old, new))
+
+          test = root / 'test_v073_diagnostic_edge_nesting.py'
+          test.write_text('''from app.v073_diagnostics_api import _cohort_match\n\n\nCOHORTS = [\n    "STRUCTURE_5M",\n    "VOLUME_PASS",\n    "STRUCTURE_15M_PASS",\n    "LIQUID_EXECUTABLE",\n    "SCORE_GATES_PASS",\n    "STRICT_ELIGIBLE",\n    "STRICT_TRADE",\n]\n\n\ndef _row(**overrides):\n    row = {\n        "base_net_r": 0.5,\n        "pass_structure_5m": False,\n        "pass_volume_confirmation": False,\n        "pass_structure_15m": False,\n        "pass_tradeable": False,\n        "pass_side_execution_model": False,\n        "pass_score_gates": False,\n        "pass_strict_eligible": False,\n        "pass_strict_trade": False,\n    }\n    row.update(overrides)\n    return row\n\n\ndef test_later_true_flags_do_not_bypass_earlier_nested_gates():\n    row = _row(\n        pass_tradeable=True,\n        pass_side_execution_model=True,\n        pass_score_gates=True,\n        pass_strict_eligible=True,\n        pass_strict_trade=True,\n    )\n    assert not any(_cohort_match(row, cohort) for cohort in COHORTS)\n\n\ndef test_fully_passing_row_belongs_to_every_nested_cohort():\n    row = _row(\n        pass_structure_5m=True,\n        pass_volume_confirmation=True,\n        pass_structure_15m=True,\n        pass_tradeable=True,\n        pass_side_execution_model=True,\n        pass_score_gates=True,\n        pass_strict_eligible=True,\n        pass_strict_trade=True,\n    )\n    assert [_cohort_match(row, cohort) for cohort in COHORTS] == [True] * len(COHORTS)\n\n\ndef test_membership_is_prefix_only_for_partial_progression():\n    rows = [\n        _row(pass_structure_5m=True),\n        _row(pass_structure_5m=True, pass_volume_confirmation=True),\n        _row(\n            pass_structure_5m=True,\n            pass_volume_confirmation=True,\n            pass_structure_15m=True,\n        ),\n        _row(\n            pass_structure_5m=True,\n            pass_volume_confirmation=True,\n            pass_structure_15m=True,\n            pass_tradeable=True,\n            pass_side_execution_model=True,\n        ),\n        _row(\n            pass_structure_5m=True,\n            pass_volume_confirmation=True,\n            pass_structure_15m=True,\n            pass_tradeable=True,\n            pass_side_execution_model=True,\n            pass_score_gates=True,\n            pass_strict_eligible=True,\n            pass_strict_trade=False,\n        ),\n    ]\n    counts = [sum(_cohort_match(row, cohort) for row in rows) for cohort in COHORTS]\n    assert counts == [5, 4, 3, 2, 1, 1, 0]\n    assert counts == sorted(counts, reverse=True)\n\n\ndef test_rows_without_outcomes_are_not_in_edge_cohorts():\n    row = _row(\n        base_net_r=None,\n        pass_structure_5m=True,\n        pass_volume_confirmation=True,\n        pass_structure_15m=True,\n        pass_tradeable=True,\n        pass_side_execution_model=True,\n        pass_score_gates=True,\n        pass_strict_eligible=True,\n        pass_strict_trade=True,\n    )\n    assert not any(_cohort_match(row, cohort) for cohort in COHORTS)\n''')
+          PY
+      - name: Remove temporary workflow and commit patch
+        run: |
+          rm .github/workflows/patch-v073-edge-nesting.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bybit_eu_swing_radar/backend .github/workflows/patch-v073-edge-nesting.yml
+          git diff --cached --check
+          git commit -m "Fix v0.7.3 diagnostic edge cohort nesting"
+          git push origin HEAD:fix/v073-diagnostic-edge-nesting
