@@ -1,0 +1,35 @@
+name: Verify swing liquidity status 11382b7
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+    steps:
+      - name: Check out exact production commit
+        uses: actions/checkout@v7
+        with:
+          ref: 11382b7c25612fcdfe9e1ce6e89ddc041f438843
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Verify fresh durable swing liquidity forward state
+        working-directory: bybit_eu_swing_radar/backend
+        run: |
+          python - <<'PY'
+          import os
+          from scripts.production_swing_liquidity_forward_status import run_check
+          raise SystemExit(run_check(os.environ['PRODUCTION_RADAR_API_BASE_URL'], os.environ['PRODUCTION_RADAR_API_KEY']))
+          PY
