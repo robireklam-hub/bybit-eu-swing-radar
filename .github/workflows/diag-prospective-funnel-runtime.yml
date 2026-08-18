@@ -1,0 +1,111 @@
+name: Diag prospective funnel runtime
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    if: github.head_ref == 'diag/prospective-funnel-runtime-c462'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect Railway prospective funnel deployments
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          RAILWAY_PROJECT_ID: 846f5088-4e8b-45fe-84d9-0728542b2c36
+          RAILWAY_ENVIRONMENT_ID: 2be04d3c-82b3-487d-930c-a4fbc7d483d8
+          PROSPECTIVE_SERVICE_ID: 1f9dab4d-6088-426f-ad52-228e809ecd26
+        run: |
+          python - <<'PY'
+          import json, os, re
+          from urllib.request import Request, urlopen
+
+          ENDPOINT = "https://backboard.railway.com/graphql/v2"
+          token = os.environ["RAILWAY_API_TOKEN"]
+
+          def gql(query, variables):
+              req = Request(
+                  ENDPOINT,
+                  data=json.dumps({"query": query, "variables": variables}).encode(),
+                  headers={
+                      "Authorization": "Bearer " + token,
+                      "Content-Type": "application/json",
+                      "Accept": "application/json",
+                  },
+              )
+              with urlopen(req, timeout=30) as response:
+                  payload = json.loads(response.read().decode())
+              if payload.get("errors"):
+                  raise RuntimeError(json.dumps([e.get("message") for e in payload["errors"]]))
+              return payload.get("data") or {}
+
+          def safe(text):
+              text = str(text)
+              text = text.replace(token, "***")
+              text = re.sub(r"postgres(?:ql)?://[^\s]+", "postgresql://***", text, flags=re.I)
+              text = re.sub(r"(?i)(api[_-]?key|token|secret)=([^\s]+)", r"\1=***", text)
+              return text[:2000]
+
+          listing = gql(
+              """query deployments($input:DeploymentListInput!,$first:Int){
+                deployments(input:$input,first:$first){edges{node{id status createdAt meta}}}
+              }""",
+              {
+                  "input": {
+                      "projectId": os.environ["RAILWAY_PROJECT_ID"],
+                      "serviceId": os.environ["PROSPECTIVE_SERVICE_ID"],
+                      "environmentId": os.environ["RAILWAY_ENVIRONMENT_ID"],
+                  },
+                  "first": 8,
+              },
+          )
+          nodes = [edge["node"] for edge in ((listing.get("deployments") or {}).get("edges") or [])]
+          print("DEPLOYMENTS=" + json.dumps([
+              {
+                  "id": n.get("id"),
+                  "status": n.get("status"),
+                  "createdAt": n.get("createdAt"),
+                  "meta_keys": sorted((n.get("meta") or {}).keys()) if isinstance(n.get("meta"), dict) else [],
+                  "commitHash": (n.get("meta") or {}).get("commitHash") if isinstance(n.get("meta"), dict) else None,
+              }
+              for n in nodes
+          ], sort_keys=True))
+
+          for node in nodes[:4]:
+              did = node.get("id")
+              status = node.get("status")
+              print(f"--- DEPLOYMENT {did} STATUS={status} ---")
+              for field in ("buildLogs", "deploymentLogs"):
+                  query = f"""query logs($deploymentId:String!,$limit:Int){{
+                    {field}(deploymentId:$deploymentId,limit:$limit){{timestamp message severity}}
+                  }}"""
+                  try:
+                      logs = gql(query, {"deploymentId": did, "limit": 200}).get(field) or []
+                  except Exception as exc:
+                      print(field + "_ERROR=" + safe(type(exc).__name__ + ": " + str(exc)))
+                      continue
+                  interesting = []
+                  for item in logs:
+                      msg = safe(item.get("message", ""))
+                      low = msg.lower()
+                      if any(k in low for k in ("error", "fatal", "traceback", "failed", "exception", "prospective", "python", "no such", "cannot", "module")):
+                          interesting.append({
+                              "timestamp": item.get("timestamp"),
+                              "severity": item.get("severity"),
+                              "message": msg,
+                          })
+                  if not interesting:
+                      interesting = [
+                          {
+                              "timestamp": item.get("timestamp"),
+                              "severity": item.get("severity"),
+                              "message": safe(item.get("message", "")),
+                          }
+                          for item in logs[-30:]
+                      ]
+                  print(field.upper() + "=" + json.dumps(interesting[-60:], sort_keys=True))
+          PY
