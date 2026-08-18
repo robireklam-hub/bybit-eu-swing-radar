@@ -1,0 +1,52 @@
+name: Diagnose microstructure Railway regions b54fbd0
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.head_ref == 'ops/diagnose-microstructure-region-b54fbd0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      ENVIRONMENT_ID: 2be04d3c-82b3-487d-930c-a4fbc7d483d8
+      API_SERVICE_ID: 6b92a19d-a178-4eab-9b8a-9fed1855319b
+      STANDALONE_SERVICE_ID: 61664eb1-4a59-4947-bae9-18410a2221b8
+    steps:
+      - name: Query Railway service instance regions
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os
+          query='''query EnvironmentServices($environmentId: String!) { environment(id: $environmentId) { serviceInstances { edges { node { serviceId serviceName region numReplicas latestDeployment { id status meta } } } } } regions { name country location } }'''
+          with open('/tmp/query.json','w') as f:
+              json.dump({'query':query,'variables':{'environmentId':os.environ['ENVIRONMENT_ID']}},f)
+          PY
+          code=$(curl -sS -o /tmp/response.json -w '%{http_code}' -X POST 'https://backboard.railway.com/graphql/v2' \
+            -H "Authorization: Bearer $RAILWAY_API_TOKEN" -H 'Content-Type: application/json' \
+            -H 'User-Agent: bybit-eu-trading-radar-ops/1' --data-binary @/tmp/query.json)
+          test "$code" = 200 || { echo "FAIL GraphQL HTTP=$code"; exit 1; }
+          python3 - <<'PY'
+          import json, os
+          with open('/tmp/response.json') as f: result=json.load(f)
+          if result.get('errors'):
+              raise SystemExit('GraphQL errors: '+' | '.join(str(x.get('message')) for x in result['errors']))
+          wanted={os.environ['API_SERVICE_ID'],os.environ['STANDALONE_SERVICE_ID']}
+          found=[]
+          for edge in result['data']['environment']['serviceInstances']['edges']:
+              n=edge['node']
+              if n.get('serviceId') not in wanted: continue
+              meta=(n.get('latestDeployment') or {}).get('meta') or {}
+              deploy=((meta.get('serviceManifest') or {}).get('deploy') or {})
+              safe={'serviceId':n.get('serviceId'),'serviceName':n.get('serviceName'),'region':n.get('region'),'numReplicas':n.get('numReplicas'),'deploymentStatus':(n.get('latestDeployment') or {}).get('status'),'multiRegionConfig':deploy.get('multiRegionConfig')}
+              found.append(safe)
+              print('SERVICE_REGION='+json.dumps(safe,sort_keys=True))
+          if {x['serviceId'] for x in found} != wanted:
+              raise SystemExit('FAIL target service region metadata incomplete')
+          print('AVAILABLE_REGIONS='+json.dumps(result['data'].get('regions'),sort_keys=True))
+          PY
