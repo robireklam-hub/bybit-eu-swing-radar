@@ -27,11 +27,18 @@ from research.btc_macro_cycle_etf_shadow import (
 MEMPOOL_TIP_URL = "https://mempool.space/api/blocks/tip/height"
 FRED_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 FARSIDE_URL = "https://farside.co.uk/bitcoin-etf-flow-all-data/"
+FED_H15_TABLE_URL = "https://www.federalreserve.gov/datadownload/DownloadTable.aspx?filetype=csv&label=include&lastobs=120&layout=seriescolumn&rel=H15&series=2dbf56a690d90872e08d4edbf48df0a4"
+FED_H10_TABLE_URL = "https://www.federalreserve.gov/datadownload/DownloadTable.aspx?filetype=csv&label=include&lastobs=120&layout=seriescolumn&rel=H10&series=847be2166a425bda9b4d92465f797544"
+
 FRED_SERIES = {
     "us_10y_yield": "DGS10",
     "broad_usd_index": "DTWEXBGS",
     "fed_total_assets": "WALCL",
     "overnight_reverse_repo": "RRPONTSYD",
+}
+FED_BOARD_FALLBACKS = {
+    "DGS10": (FED_H15_TABLE_URL, "RIFLGFCY10_N.B", "D"),
+    "DTWEXBGS": (FED_H10_TABLE_URL, "JRXWTFB_N.M", "M"),
 }
 
 SCHEMA_SQL = """
@@ -162,6 +169,33 @@ def parse_farside_html(text: str) -> list[dict[str, Any]]:
     return output
 
 
+def parse_fed_board_table(text: str, series_code: str) -> list[tuple[str, float]]:
+    stripped = text.lstrip()
+    if stripped.startswith("<"):
+        parser = _TableParser()
+        parser.feed(text)
+        table_rows = parser.rows
+    else:
+        table_rows = [list(row) for row in csv.reader(io.StringIO(text))]
+    header = next((row for row in table_rows if row and row[0].strip().lower() == "series"), None)
+    data = next((row for row in table_rows if row and row[0].strip() == series_code), None)
+    if header is None or data is None:
+        raise ValueError(f"Federal Reserve Board series not found: {series_code}")
+    points: list[tuple[str, float]] = []
+    for index in range(2, min(len(header), len(data))):
+        date = header[index].strip()
+        raw = data[index].strip().replace(",", "")
+        if not date or raw in {"", "ND", "NA", "."}:
+            continue
+        try:
+            points.append((date, float(raw)))
+        except ValueError:
+            continue
+    if not points:
+        raise ValueError(f"Federal Reserve Board series has no usable observations: {series_code}")
+    return points
+
+
 async def _fetch_cycle(client: httpx.AsyncClient) -> tuple[dict[str, Any], dict[str, Any]]:
     response = await client.get(MEMPOOL_TIP_URL)
     response.raise_for_status()
@@ -181,18 +215,60 @@ async def _fetch_btc_price(client: httpx.AsyncClient) -> tuple[dict[str, Any], d
     rows = result.get("list") or []
     result["list"] = [row for row in rows if isinstance(row, (list, tuple)) and row and int(row[0]) < day_start_ms]
     closed_payload = {**payload, "result": result}
-    return summarize_btc_price(closed_payload), _source_status("LIVE", provider="Bybit EU", symbol="BTCUSDC", closed_daily_only=True, url=url)
-
-
-async def _fetch_fred_series(client: httpx.AsyncClient, name: str, series_id: str) -> tuple[str, dict[str, Any], dict[str, Any]]:
-    response = await client.get(FRED_CSV_URL, params={"id": series_id})
-    response.raise_for_status()
-    points = parse_fred_csv(response.text, series_id)
-    summary = summarize_series(points)
-    return name, {"series_id": series_id, **summary}, _source_status(
-        "LIVE", provider="FRED / Federal Reserve Bank of St. Louis", series_id=series_id,
-        url=f"https://fred.stlouisfed.org/series/{series_id}",
+    return summarize_btc_price(closed_payload), _source_status(
+        "LIVE", provider="Bybit EU", symbol="BTCUSDC", closed_daily_only=True, url=url
     )
+
+
+async def _fetch_fed_board_fallback(
+    client: httpx.AsyncClient, requested_fred_series: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    url, board_series, frequency = FED_BOARD_FALLBACKS[requested_fred_series]
+    response = await client.get(url, timeout=httpx.Timeout(12.0, connect=5.0))
+    response.raise_for_status()
+    points = parse_fed_board_table(response.text, board_series)
+    summary = summarize_series(points)
+    payload = {
+        "series_id": requested_fred_series,
+        "source_series_id": board_series,
+        "observation_frequency": frequency,
+        **summary,
+    }
+    status = _source_status(
+        "LIVE",
+        provider="Federal Reserve Board Data Download Program",
+        official=True,
+        requested_fred_series=requested_fred_series,
+        source_series_id=board_series,
+        observation_frequency=frequency,
+        fallback_from="FRED_CSV_TIMEOUT_OR_ERROR",
+        url=url,
+    )
+    return payload, status
+
+
+async def _fetch_fred_series(
+    client: httpx.AsyncClient, name: str, series_id: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    try:
+        response = await client.get(
+            FRED_CSV_URL,
+            params={"id": series_id},
+            timeout=httpx.Timeout(5.0, connect=3.0),
+        )
+        response.raise_for_status()
+        points = parse_fred_csv(response.text, series_id)
+        summary = summarize_series(points)
+        return {"series_id": series_id, **summary}, _source_status(
+            "LIVE",
+            provider="FRED / Federal Reserve Bank of St. Louis",
+            series_id=series_id,
+            url=f"https://fred.stlouisfed.org/series/{series_id}",
+        )
+    except Exception:
+        if series_id not in FED_BOARD_FALLBACKS:
+            raise
+        return await _fetch_fed_board_fallback(client, series_id)
 
 
 async def _fetch_etf(client: httpx.AsyncClient) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -233,17 +309,6 @@ async def build_current_snapshot() -> dict[str, Any]:
     cycle, cycle_status = by_name["cycle"]
     btc_price, price_status = by_name["btc_price"]
     etf, etf_status = by_name["etf_flows"]
-    cycle_name = "cycle"
-    price_name = "btc_price"
-    etf_name = "etf_flows"
-    macro_results = []
-    for name, series_id in FRED_SERIES.items():
-        value, item_status = by_name[f"fred_{name}"]
-        if value is None:
-            macro_results.append((name, None, {**item_status, "series_id": series_id}))
-        else:
-            item_name, summary, nested_status = value
-            macro_results.append((item_name, summary, nested_status))
 
     if cycle is None:
         raise RuntimeError("BTC cycle source unavailable")
@@ -251,10 +316,17 @@ async def build_current_snapshot() -> dict[str, Any]:
         raise RuntimeError("BTCUSDC daily price source unavailable")
 
     macro: dict[str, Any] = {}
-    status: dict[str, Any] = {cycle_name: cycle_status, price_name: price_status, etf_name: etf_status}
-    for name, summary, item_status in macro_results:
-        if summary is not None:
-            macro[name] = summary
+    status: dict[str, Any] = {
+        "cycle": cycle_status,
+        "btc_price": price_status,
+        "etf_flows": etf_status,
+    }
+    for name, series_id in FRED_SERIES.items():
+        value, item_status = by_name[f"fred_{name}"]
+        if value is not None:
+            macro[name] = value
+        else:
+            item_status = {**item_status, "series_id": series_id}
         status[f"fred_{name}"] = item_status
 
     return build_snapshot(
@@ -337,27 +409,36 @@ async def status_payload() -> dict[str, Any]:
 def attach_btc_macro_cycle_etf_research(app: FastAPI, require_api_key: Callable[..., Any]) -> None:
     @app.get(
         "/v1/research/btc-macro-cycle-etf/spec",
-        dependencies=[Depends(require_api_key)], include_in_schema=False,
+        dependencies=[Depends(require_api_key)],
+        include_in_schema=False,
     )
     async def btc_macro_cycle_etf_spec() -> dict[str, Any]:
         return spec()
 
     @app.post(
         "/v1/research/btc-macro-cycle-etf/capture",
-        dependencies=[Depends(require_api_key)], include_in_schema=False,
+        dependencies=[Depends(require_api_key)],
+        include_in_schema=False,
     )
     async def btc_macro_cycle_etf_capture() -> dict[str, Any]:
         try:
             return await capture_current_snapshot()
         except Exception as exc:
-            raise HTTPException(status_code=503, detail=f"Research BTC macro/cycle/ETF capture unavailable: {type(exc).__name__}") from exc
+            raise HTTPException(
+                status_code=503,
+                detail=f"Research BTC macro/cycle/ETF capture unavailable: {type(exc).__name__}",
+            ) from exc
 
     @app.get(
         "/v1/research/btc-macro-cycle-etf/status",
-        dependencies=[Depends(require_api_key)], include_in_schema=False,
+        dependencies=[Depends(require_api_key)],
+        include_in_schema=False,
     )
     async def btc_macro_cycle_etf_status() -> dict[str, Any]:
         try:
             return await status_payload()
         except Exception as exc:
-            raise HTTPException(status_code=503, detail=f"Research BTC macro/cycle/ETF status unavailable: {type(exc).__name__}") from exc
+            raise HTTPException(
+                status_code=503,
+                detail=f"Research BTC macro/cycle/ETF status unavailable: {type(exc).__name__}",
+            ) from exc
