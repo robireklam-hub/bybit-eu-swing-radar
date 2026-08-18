@@ -355,31 +355,28 @@ def _aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
 def _cohort_match(row: dict[str, Any], cohort: str) -> bool:
     if row.get("base_net_r") is None:
         return False
-    if cohort == "STRUCTURE_5M":
-        return bool(row.get("pass_structure_5m"))
-    if cohort == "VOLUME_PASS":
-        return bool(
-            row.get("pass_structure_5m")
-            and row.get("pass_volume_confirmation")
-        )
-    if cohort == "STRUCTURE_15M_PASS":
-        return bool(
-            row.get("pass_structure_5m")
-            and row.get("pass_volume_confirmation")
-            and row.get("pass_structure_15m")
-        )
-    if cohort == "LIQUID_EXECUTABLE":
-        return bool(
-            row.get("pass_tradeable")
-            and row.get("pass_side_execution_model")
-        )
-    if cohort == "SCORE_GATES_PASS":
-        return bool(row.get("pass_score_gates"))
-    if cohort == "STRICT_ELIGIBLE":
-        return bool(row.get("pass_strict_eligible"))
-    if cohort == "STRICT_TRADE":
-        return bool(row.get("pass_strict_trade"))
-    return False
+
+    structure_5m = bool(row.get("pass_structure_5m"))
+    volume_pass = structure_5m and bool(row.get("pass_volume_confirmation"))
+    structure_15m = volume_pass and bool(row.get("pass_structure_15m"))
+    liquid_executable = bool(
+        structure_15m
+        and row.get("pass_tradeable")
+        and row.get("pass_side_execution_model")
+    )
+    score_gates = liquid_executable and bool(row.get("pass_score_gates"))
+    strict_eligible = score_gates and bool(row.get("pass_strict_eligible"))
+    strict_trade = strict_eligible and bool(row.get("pass_strict_trade"))
+
+    return {
+        "STRUCTURE_5M": structure_5m,
+        "VOLUME_PASS": volume_pass,
+        "STRUCTURE_15M_PASS": structure_15m,
+        "LIQUID_EXECUTABLE": liquid_executable,
+        "SCORE_GATES_PASS": score_gates,
+        "STRICT_ELIGIBLE": strict_eligible,
+        "STRICT_TRADE": strict_trade,
+    }.get(cohort, False)
 
 
 async def diagnostic_edge_payload(
