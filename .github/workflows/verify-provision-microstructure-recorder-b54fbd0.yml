@@ -26,11 +26,44 @@ jobs:
           fi
           echo "RAILWAY_API_TOKEN present; value redacted."
 
-      - name: Inspect authenticated identity and visible workspaces
-        run: railway whoami --json
+      - name: Probe user identity without failing workspace-scoped tokens
+        run: |
+          if railway whoami --json >/tmp/whoami.json 2>/tmp/whoami.err; then
+            echo "WHOAMI_OK"
+            cat /tmp/whoami.json
+          else
+            echo "WHOAMI_UNAVAILABLE"
+            sed -E 's/[A-Za-z0-9_-]{24,}/[redacted]/g' /tmp/whoami.err
+          fi
 
-      - name: Inspect visible projects and workspace metadata
-        run: railway list --json
+      - name: Probe visible projects and workspace metadata independently
+        run: |
+          if railway list --json >/tmp/projects.json 2>/tmp/projects.err; then
+            echo "PROJECT_LIST_OK"
+            cat /tmp/projects.json
+          else
+            echo "PROJECT_LIST_UNAVAILABLE"
+            sed -E 's/[A-Za-z0-9_-]{24,}/[redacted]/g' /tmp/projects.err
+          fi
 
-      - name: Probe project link without mutation
-        run: railway link --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" --json
+      - name: Probe direct project link independently
+        run: |
+          if railway link --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" --json >/tmp/link.json 2>/tmp/link.err; then
+            echo "PROJECT_LINK_OK"
+            cat /tmp/link.json
+          else
+            echo "PROJECT_LINK_UNAVAILABLE"
+            sed -E 's/[A-Za-z0-9_-]{24,}/[redacted]/g' /tmp/link.err
+          fi
+
+      - name: Classify token usability
+        run: |
+          if grep -q 'PROJECT_LINK_OK' "$GITHUB_STEP_SUMMARY" 2>/dev/null; then
+            exit 0
+          fi
+          if [ -s /tmp/projects.json ] && grep -q "$PROJECT_ID" /tmp/projects.json; then
+            echo "TOKEN_CAN_SEE_PROJECT_BUT_LINK_NEEDS_WORKSPACE_SCOPE"
+            exit 0
+          fi
+          echo "TOKEN_CANNOT_ACCESS_TARGET_PROJECT"
+          exit 1
