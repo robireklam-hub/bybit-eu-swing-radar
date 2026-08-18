@@ -190,3 +190,36 @@ def test_post_boundary_event_is_captured_without_outcome_fields(monkeypatch):
         assert "outcome" not in payload
         assert "realized_pnl" not in payload
         assert row["sweep_time"] == sweep_at
+
+
+def test_live_strict_event_keys_require_exact_strict_trigger():
+    sweep_time = "2026-08-18T12:05:00+00:00"
+    setups = [
+        {
+            "symbol": "BTCUSDC",
+            "side": "long",
+            "category": "STRICT",
+            "trigger": {
+                "triggered": True,
+                "sweep_confirmation": {"sweep_time": sweep_time},
+            },
+        },
+        {
+            "symbol": "ETHUSDC",
+            "side": "long",
+            "category": "WATCH_ONLY",
+            "trigger": {
+                "triggered": True,
+                "sweep_confirmation": {"sweep_time": sweep_time},
+            },
+        },
+        {
+            "symbol": "SOLUSDC",
+            "side": "short",
+            "category": "STRICT",
+            "trigger": {"triggered": False, "sweep_confirmation": None},
+        },
+    ]
+    assert funnel._live_strict_event_keys(setups) == {
+        funnel._event_key("BTCUSDC", "long", sweep_time)
+    }

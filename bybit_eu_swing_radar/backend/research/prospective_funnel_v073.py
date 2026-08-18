@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS day_trade_v073_prospective_funnel (
     pass_target_path BOOLEAN NOT NULL,
     pass_rr BOOLEAN NOT NULL,
     pass_strict_trade BOOLEAN NOT NULL,
+    live_strict_trigger_observed BOOLEAN NOT NULL DEFAULT FALSE,
     first_failed_gate TEXT NOT NULL,
     borrowability_status TEXT NOT NULL,
     expansion_score DOUBLE PRECISION,
@@ -184,6 +185,24 @@ def _apply_current_execution_semantics(
     return result
 
 
+def _live_strict_event_keys(setups: Iterable[dict[str, Any]]) -> set[str]:
+    """Return exact sweep keys that the live v0.7.3 worker triggered as STRICT."""
+    keys: set[str] = set()
+    for setup in setups:
+        if setup.get("category") != "STRICT":
+            continue
+        trigger = setup.get("trigger") or {}
+        if not trigger.get("triggered"):
+            continue
+        sweep = trigger.get("sweep_confirmation") or {}
+        sweep_time = str(sweep.get("sweep_time") or "")
+        symbol = str(setup.get("symbol") or "").upper()
+        side = str(setup.get("side") or "")
+        if symbol and side in {"long", "short"} and sweep_time:
+            keys.add(_event_key(symbol, side, sweep_time))
+    return keys
+
+
 def _analysis_snapshot_rows(
     analyses: Iterable[Any],
     *,
@@ -191,6 +210,7 @@ def _analysis_snapshot_rows(
     prospective_start_at: datetime,
     source_commit_sha: str | None,
     volume_confirmation_ratio: float = 1.3,
+    live_strict_event_keys: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Build label-free point-in-time rows for recent prospective sweeps."""
     # Local import avoids an import cycle: diagnostics_v073 imports day_worker,
@@ -256,6 +276,7 @@ def _analysis_snapshot_rows(
                         "expected_rr": None if candidate is None else candidate.get("expected_rr"),
                     },
                 }
+                event_key = _event_key(symbol, side, sweep_time_text)
                 output.append(
                     {
                         "spec_version": SPEC_VERSION,
@@ -263,7 +284,7 @@ def _analysis_snapshot_rows(
                         "run_id": run_id,
                         "captured_at": captured_at,
                         "source_commit_sha": source_commit_sha,
-                        "event_key": _event_key(symbol, side, sweep_time_text),
+                        "event_key": event_key,
                         "symbol": symbol,
                         "side": side,
                         "sweep_time": sweep_at,
@@ -283,6 +304,7 @@ def _analysis_snapshot_rows(
                         "pass_target_path": bool(gates.get("pass_target_path")),
                         "pass_rr": bool(gates.get("pass_rr")),
                         "pass_strict_trade": bool(gates.get("pass_strict_trade")),
+                        "live_strict_trigger_observed": event_key in (live_strict_event_keys or set()),
                         "first_failed_gate": str(gates.get("first_failed_gate") or "UNKNOWN"),
                         "borrowability_status": str(gates.get("borrowability_status") or "UNKNOWN"),
                         "expansion_score": None if candidate is None else candidate.get("expansion_score"),
@@ -337,13 +359,13 @@ async def _insert_snapshot(connection: Any, row: dict[str, Any]) -> bool:
             structure_confirmed_15m,candidate_built,pass_tradeable,
             pass_side_execution_model,pass_expansion,pass_direction,pass_quality,
             pass_setup,pass_target_path,pass_rr,pass_strict_trade,
-            first_failed_gate,borrowability_status,expansion_score,
+            live_strict_trigger_observed,first_failed_gate,borrowability_status,expansion_score,
             side_direction_score,quality_score,setup_score,expected_rr,
             volume_ratio_5m,target_path_valid,failure_reasons,snapshot_payload
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
             $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,
-            $35::jsonb,$36::jsonb
+            $35,$36::jsonb,$37::jsonb
         )
         ON CONFLICT (spec_version, run_id, event_key) DO NOTHING
         RETURNING 1
@@ -357,8 +379,8 @@ async def _insert_snapshot(connection: Any, row: dict[str, Any]) -> bool:
         row["pass_tradeable"], row["pass_side_execution_model"],
         row["pass_expansion"], row["pass_direction"], row["pass_quality"],
         row["pass_setup"], row["pass_target_path"], row["pass_rr"],
-        row["pass_strict_trade"], row["first_failed_gate"],
-        row["borrowability_status"], row["expansion_score"],
+        row["pass_strict_trade"], row["live_strict_trigger_observed"],
+        row["first_failed_gate"], row["borrowability_status"], row["expansion_score"],
         row["side_direction_score"], row["quality_score"], row["setup_score"],
         row["expected_rr"], row["volume_ratio_5m"], row["target_path_valid"],
         json.dumps(row["failure_reasons"], ensure_ascii=False),
@@ -459,6 +481,7 @@ async def _cumulative_status(
             "No sweep event before prospective_start_at is persisted.",
             "Rows are run snapshots, so one sweep event may have multiple point-in-time snapshots as it matures.",
             "The forward short execution gate requires current Bybit EU USDC spot-margin borrowability.",
+            "pass_strict_trade is the comparable gate-chain state; live_strict_trigger_observed separately records an exact live STRICT trigger on that run.",
             "No realized outcome, PnL, MFE/MAE or win/loss label is stored by this recorder.",
         ],
     }
@@ -471,6 +494,7 @@ async def persist_v073_prospective_funnel(
     captured_at: datetime,
     source_commit_sha: str | None,
     volume_confirmation_ratio: float,
+    live_setups: Iterable[dict[str, Any]],
 ) -> dict[str, Any]:
     """Persist one label-free forward funnel snapshot batch."""
     captured_at = _as_utc(captured_at)
@@ -481,6 +505,7 @@ async def persist_v073_prospective_funnel(
         prospective_start_at=prospective_start_at,
         source_commit_sha=source_commit_sha,
         volume_confirmation_ratio=volume_confirmation_ratio,
+        live_strict_event_keys=_live_strict_event_keys(live_setups),
     )
     inserted = 0
     for row in rows:
@@ -504,5 +529,6 @@ __all__ = [
     "_analysis_snapshot_rows",
     "_apply_current_execution_semantics",
     "_event_key",
+    "_live_strict_event_keys",
     "persist_v073_prospective_funnel",
 ]

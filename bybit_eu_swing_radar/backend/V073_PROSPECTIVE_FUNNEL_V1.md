@@ -48,6 +48,8 @@ Stored fields include:
 - live v0.7.3 score components
 - target-path validity and expected RR
 - source commit SHA
+- comparable gate-chain STRICT state
+- separate exact `live_strict_trigger_observed` flag from the authoritative live worker payload
 - raw label-free sweep/gate snapshot payload
 
 The recorder does **not** store realized outcome, PnL, MFE/MAE, win/loss labels or other post-event target variables.
