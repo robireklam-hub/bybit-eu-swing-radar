@@ -1,0 +1,29 @@
+name: Verify production sweep effect 716f012
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-production-sweep-effect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 716f01251a8be0c0144016ccb813d578c2070e64
+    steps:
+      - name: Check out exact production commit
+        uses: actions/checkout@v7
+        with:
+          ref: 716f01251a8be0c0144016ccb813d578c2070e64
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Verify prospective sweep effect production layer
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_sweep_effect_shadow_smoke.py
