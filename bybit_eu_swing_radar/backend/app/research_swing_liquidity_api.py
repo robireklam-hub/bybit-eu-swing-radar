@@ -69,9 +69,13 @@ CREATE INDEX IF NOT EXISTS idx_swing_liq_forward_tiers
 
 def validate_usdc_symbol(symbol: str) -> str:
     normalized = symbol.strip().upper()
+    # A valid quote shape is <non-empty alphanumeric base> + USDC.  Do not
+    # assume a minimum base length beyond one character: Bybit EU currently
+    # exposes short base tickers such as LAUSDC, which must remain eligible for
+    # the research-only forward snapshot store.
     if (
         not normalized.endswith("USDC")
-        or len(normalized) < 7
+        or len(normalized) < 5
         or len(normalized) > 30
         or not normalized.isalnum()
     ):
