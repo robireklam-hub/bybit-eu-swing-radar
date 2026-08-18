@@ -20,8 +20,10 @@ jobs:
       RECORDER_SERVICE: microstructure-recorder
       DEPLOYMENT_ID: 59f20fd7-cb06-4e3c-a8f1-34cafd1461ff
     steps:
-      - name: Link production project
-        run: railway link --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" >/dev/null
+      - name: Link recorder service
+        run: |
+          railway link --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" >/dev/null
+          railway service link "$RECORDER_SERVICE" >/dev/null
 
       - name: Show recorder status
         run: railway service status --service "$RECORDER_SERVICE" --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" --json
@@ -30,4 +32,5 @@ jobs:
         run: railway logs "$DEPLOYMENT_ID" --build --lines 200
 
       - name: Show failed deployment logs
-        run: railway logs "$DEPLOYMENT_ID" --deployment --lines 200
+        if: always()
+        run: railway logs "$DEPLOYMENT_ID" --deployment --lines 200 || true
