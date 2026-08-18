@@ -1,0 +1,57 @@
+name: Patch BTC on-chain research route v1
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.head_ref == 'research/btc-onchain-context-v1'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: research/btc-onchain-context-v1
+          fetch-depth: 0
+
+      - name: Wire on-chain routes under BTC macro research router
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path=Path('bybit_eu_swing_radar/backend/app/research_btc_macro_cycle_etf_api.py')
+          text=path.read_text()
+          import_line='from app.research_btc_onchain_api import attach_btc_onchain_research\n'
+          anchor='from research.btc_macro_cycle_etf_shadow import (\n'
+          if import_line not in text:
+              if anchor not in text:
+                  raise SystemExit('FAIL import anchor not found')
+              text=text.replace(anchor, import_line+'\n'+anchor, 1)
+          function_anchor='def attach_btc_macro_cycle_etf_research(app: FastAPI, require_api_key: Callable[..., Any]) -> None:\n'
+          attach_line='    attach_btc_onchain_research(app, require_api_key)\n\n'
+          if attach_line not in text:
+              if function_anchor not in text:
+                  raise SystemExit('FAIL function anchor not found')
+              text=text.replace(function_anchor, function_anchor+attach_line, 1)
+          path.write_text(text)
+          PY
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add bybit_eu_swing_radar/backend/app/research_btc_macro_cycle_etf_api.py
+          if ! git diff --cached --quiet; then
+            git commit -m 'Research: attach BTC on-chain hidden routes'
+            git push origin HEAD:research/btc-onchain-context-v1
+          fi
+
+      - name: Remove temporary patch workflow
+        shell: bash
+        run: |
+          git pull --rebase origin research/btc-onchain-context-v1
+          rm -f .github/workflows/patch-btc-onchain-route-v1.yml
+          git add .github/workflows/patch-btc-onchain-route-v1.yml
+          git commit -m 'Cleanup temporary BTC on-chain route patcher'
+          git push origin HEAD:research/btc-onchain-context-v1
