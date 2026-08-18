@@ -435,3 +435,9 @@ attach_relative_strength_research(app, require_api_key)
 from app.research_sweep_effect_api import attach_sweep_effect_research
 
 attach_sweep_effect_research(app, require_api_key)
+
+# Research-only ETH on-chain shadow. It records closed-day network context
+# and has no strategy/scoring/eligibility/execution mutation path.
+from app.research_eth_onchain_api import attach_eth_onchain_research
+
+attach_eth_onchain_research(app, require_api_key)
