@@ -23,6 +23,10 @@ from research.btc_macro_cycle_etf_shadow import (
     summarize_etf_rows,
     summarize_series,
 )
+from research.macro_liquidity_fallback import (
+    SUPPORTED_SERIES as LIQUIDITY_FALLBACK_SERIES,
+    fetch_official_liquidity_fallback,
+)
 
 MEMPOOL_TIP_URL = "https://mempool.space/api/blocks/tip/height"
 FRED_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
@@ -266,9 +270,11 @@ async def _fetch_fred_series(
             url=f"https://fred.stlouisfed.org/series/{series_id}",
         )
     except Exception:
-        if series_id not in FED_BOARD_FALLBACKS:
-            raise
-        return await _fetch_fed_board_fallback(client, series_id)
+        if series_id in FED_BOARD_FALLBACKS:
+            return await _fetch_fed_board_fallback(client, series_id)
+        if series_id in LIQUIDITY_FALLBACK_SERIES:
+            return await fetch_official_liquidity_fallback(client, series_id)
+        raise
 
 
 async def _fetch_etf(client: httpx.AsyncClient) -> tuple[dict[str, Any], dict[str, Any]]:

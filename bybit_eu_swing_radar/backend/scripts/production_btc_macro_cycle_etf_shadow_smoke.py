@@ -50,8 +50,8 @@ def validate_capture(payload: dict[str, Any]) -> tuple[bool, str]:
         return False, "btc_price_coverage_invalid"
     statuses = ((payload.get("coverage") or {}).get("source_status") or {})
     live_macro = sum(1 for key, value in statuses.items() if key.startswith("fred_") and (value or {}).get("status") == "LIVE")
-    if live_macro < 2:
-        return False, "insufficient_live_macro_series"
+    if live_macro < 4:
+        return False, "incomplete_macro_coverage"
     if (statuses.get("etf_flows") or {}).get("status") != "LIVE" or payload.get("etf") is None:
         return False, "etf_flow_source_not_live"
     return True, "ok"
