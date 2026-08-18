@@ -1,0 +1,29 @@
+name: Verify production liquidation context 51eb991
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-production-liquidation-context:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 51eb991728de95b6b51a8bd00ef15d332a1f65a5
+    steps:
+      - name: Check out exact production commit
+        uses: actions/checkout@v7
+        with:
+          ref: 51eb991728de95b6b51a8bd00ef15d332a1f65a5
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Verify production liquidation context
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_liquidation_context_smoke.py
