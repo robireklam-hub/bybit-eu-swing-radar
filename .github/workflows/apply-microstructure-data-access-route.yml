@@ -1,0 +1,92 @@
+name: Apply microstructure data access route
+
+on:
+  push:
+    branches: [agent/microstructure-readonly-data-access]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-microstructure-data-access-route
+  cancel-in-progress: false
+
+jobs:
+  apply-route:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v7
+        with:
+          ref: agent/microstructure-readonly-data-access
+
+      - name: Patch research route
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('bybit_eu_swing_radar/backend/app/microstructure_research.py')
+          text = path.read_text()
+
+          old_fastapi = 'from fastapi import Depends, FastAPI\n'
+          new_fastapi = 'from fastapi import Depends, FastAPI, HTTPException, Query\n'
+          if old_fastapi not in text and new_fastapi not in text:
+              raise SystemExit('fastapi import anchor missing')
+          text = text.replace(old_fastapi, new_fastapi, 1)
+
+          import_anchor = 'from research.microstructure.collector import MicrostructureConfig, MicrostructureRecorder\n'
+          data_import = 'from research.microstructure.data_access import load_recent_bucket_payload\n'
+          if data_import not in text:
+              if import_anchor not in text:
+                  raise SystemExit('data access import anchor missing')
+              text = text.replace(import_anchor, import_anchor + data_import, 1)
+
+          route_anchor = '''    @app.get(\n        "/v1/research/microstructure/alignment-status",\n'''
+          route = '''    @app.get(\n        "/v1/research/microstructure/buckets",\n        dependencies=[Depends(require_api_key)],\n        include_in_schema=False,\n    )\n    async def microstructure_buckets(\n        symbol: str = Query(..., min_length=3, max_length=30),\n        lookback_minutes: int = Query(15, ge=1, le=360),\n        limit: int = Query(240, ge=1, le=1000),\n    ) -> dict[str, Any]:\n        """Return bounded label-free persisted 5-second market microstructure buckets."""\n        try:\n            _ensure_task_started()\n            await asyncio.sleep(0)\n            recorder = _ensure_recorder()\n            return await load_recent_bucket_payload(\n                recorder.config.database_url,\n                symbol,\n                recorder.config.symbols,\n                lookback_minutes=lookback_minutes,\n                limit=limit,\n            )\n        except ValueError as exc:\n            raise HTTPException(status_code=400, detail=str(exc)) from exc\n        except Exception as exc:\n            logger.exception("microstructure bucket query failed")\n            raise HTTPException(\n                status_code=503,\n                detail="Research microstructure data is temporarily unavailable",\n            ) from exc\n\n'''
+          if '/v1/research/microstructure/buckets' not in text:
+              if route_anchor not in text:
+                  raise SystemExit('route insertion anchor missing')
+              text = text.replace(route_anchor, route + route_anchor, 1)
+
+          path.write_text(text)
+          PY
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: bybit_eu_swing_radar/backend/requirements.txt
+
+      - name: Install test dependencies
+        working-directory: bybit_eu_swing_radar/backend
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pytest pytest-asyncio
+
+      - name: Verify route and targeted tests
+        working-directory: bybit_eu_swing_radar/backend
+        run: |
+          python - <<'PY'
+          from fastapi import FastAPI
+          from app.microstructure_research import attach_microstructure_research
+
+          app = FastAPI()
+          attach_microstructure_research(app, lambda: None)
+          routes = {route.path for route in app.routes}
+          assert "/v1/research/microstructure/buckets" in routes
+          PY
+          python -m pytest -q test_microstructure_data_access.py test_production_microstructure_data_access_smoke.py
+          python -m compileall -q app/microstructure_research.py research/microstructure/data_access.py scripts/production_microstructure_data_access_smoke.py
+
+      - name: Commit validated route patch and remove one-shot workflow
+        run: |
+          git rm .github/workflows/apply-microstructure-data-access-route.yml
+          git add bybit_eu_swing_radar/backend/app/microstructure_research.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Wire bounded microstructure data access"
+          git push origin HEAD:agent/microstructure-readonly-data-access
