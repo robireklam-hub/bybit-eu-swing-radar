@@ -1,0 +1,37 @@
+name: Patch geopolitical Event v2 routes
+
+on:
+  push:
+    branches: [research/geopolitical-event-shadow-v2]
+    paths:
+      - ".github/workflows/patch-geopolitical-event-v2-routes.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v7
+        with:
+          ref: research/geopolitical-event-shadow-v2
+      - name: Attach routes and remove patcher
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('bybit_eu_swing_radar/backend/app/main.py')
+          text = path.read_text()
+          marker = 'attach_geopolitical_event_v2_research(app, require_api_key)'
+          if marker not in text:
+              text = text.rstrip() + '''\n\n# Research-only GDELT Event 2.0 static-stream geopolitical context.\n# V1 remains auditable but automatic DOC capture is retired. No live mutation.\nfrom app.research_geopolitical_event_v2_api import attach_geopolitical_event_v2_research\n\nattach_geopolitical_event_v2_research(app, require_api_key)\n'''
+              path.write_text(text)
+          PY
+          rm .github/workflows/patch-geopolitical-event-v2-routes.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bybit_eu_swing_radar/backend/app/main.py .github/workflows/patch-geopolitical-event-v2-routes.yml
+          git commit -m "Attach geopolitical Event v2 research routes"
+          git push origin HEAD:research/geopolitical-event-shadow-v2
