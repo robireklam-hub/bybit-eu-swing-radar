@@ -12,6 +12,17 @@ def test_parse_h41_walcl_series() -> None:
     ]
 
 
+def test_parse_h41_walcl_accepts_official_prefixed_unique_id() -> None:
+    text = (
+        "Series,Series Description,2026-07-22,2026-07-29\n"
+        "H41/H41/RESPPMA_N.WW,Total assets less eliminations,6580000,6595000\n"
+    )
+    assert parse_h41_series(text, "RESPPMA_N.WW") == [
+        ("2026-07-22", 6580000.0),
+        ("2026-07-29", 6595000.0),
+    ]
+
+
 def test_parse_nyfed_rrp_aggregates_overnight_operations_by_day() -> None:
     payload = {
         "repo": {
