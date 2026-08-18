@@ -24,6 +24,80 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - name: Verify production positioning liquidation integration
-        working-directory: bybit_eu_swing_radar/backend
-        run: python scripts/production_derivatives_liquidation_integration_smoke.py
+      - name: Diagnose exact production payloads
+        shell: python
+        run: |
+          import json, os, time, urllib.request
+
+          base = os.environ["PRODUCTION_RADAR_API_BASE_URL"].rstrip("/")
+          key = os.environ["PRODUCTION_RADAR_API_KEY"]
+          expected = os.environ["EXPECTED_SHA"]
+
+          def req(path, method="GET", auth=True, timeout=120):
+              headers = {"Accept": "application/json"}
+              if auth:
+                  headers["X-Radar-Key"] = key
+              request = urllib.request.Request(base + path, headers=headers, method=method)
+              with urllib.request.urlopen(request, timeout=timeout) as response:
+                  return json.loads(response.read().decode())
+
+          version = req("/version", auth=False, timeout=15)
+          if version.get("commit_sha") != expected:
+              raise SystemExit(f"exact production SHA mismatch: {version}")
+
+          liquidation_capture = req("/v1/research/liquidation-context/capture", method="POST")
+          liquidation_status = req("/v1/research/liquidation-context/status")
+          positioning_capture = req("/v1/research/derivatives-positioning/capture", method="POST")
+          positioning_status = req("/v1/research/derivatives-positioning/status")
+
+          def compact_liquidation(payload):
+              latest = payload.get("latest") if isinstance(payload, dict) and "latest" in payload else payload
+              latest = latest or {}
+              return {
+                  "source_commit_sha": latest.get("source_commit_sha"),
+                  "captured_at": latest.get("captured_at"),
+                  "captured_hour": latest.get("captured_hour"),
+                  "coverage": latest.get("coverage"),
+                  "metadata": latest.get("metadata"),
+                  "markets": [
+                      {
+                          "symbol": row.get("symbol"),
+                          "coverage": row.get("coverage"),
+                          "market_symbol": row.get("market_symbol"),
+                          "exchange": row.get("exchange"),
+                          "quote_asset": row.get("quote_asset"),
+                      }
+                      for row in (latest.get("symbols") or [])
+                      if isinstance(row, dict)
+                  ],
+              }
+
+          def compact_positioning(payload):
+              latest = payload.get("latest") if isinstance(payload, dict) and "latest" in payload else payload
+              latest = latest or {}
+              symbols = latest.get("symbols") or {}
+              if isinstance(symbols, list):
+                  symbols = {str(row.get("symbol")): row for row in symbols if isinstance(row, dict)}
+              return {
+                  "source_commit_sha": latest.get("source_commit_sha"),
+                  "captured_at": latest.get("captured_at"),
+                  "captured_hour": latest.get("captured_hour"),
+                  "coverage": latest.get("coverage"),
+                  "upstream": latest.get("upstream"),
+                  "symbols": {
+                      symbol: {
+                          "liquidations": (row or {}).get("liquidations"),
+                          "coverage": (row or {}).get("coverage"),
+                      }
+                      for symbol, row in symbols.items()
+                  },
+              }
+
+          output = {
+              "version": version,
+              "liquidation_capture": compact_liquidation(liquidation_capture),
+              "liquidation_status": compact_liquidation(liquidation_status),
+              "positioning_capture": compact_positioning(positioning_capture),
+              "positioning_status": compact_positioning(positioning_status),
+          }
+          print("POSITIONING_LIQUIDATION_DIAGNOSTIC=" + json.dumps(output, sort_keys=True, default=str))
