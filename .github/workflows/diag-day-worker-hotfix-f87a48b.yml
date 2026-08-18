@@ -50,9 +50,12 @@ jobs:
               if not isinstance(payload,dict): raise RuntimeError('non-object '+path)
               return payload
 
-          q='query deploymentLogs($deploymentId:String!,$limit:Int){deploymentLogs(deploymentId:$deploymentId,limit:$limit){timestamp message severity}}'
-          logs=(gql(q,{'deploymentId':deployment,'limit':200}).get('deploymentLogs') or [])
-          print('RUNTIME_LOGS='+json.dumps([{'timestamp':x.get('timestamp'),'severity':x.get('severity'),'message':x.get('message')} for x in logs],sort_keys=True),flush=True)
+          try:
+              q='query deploymentLogs($deploymentId:String!,$limit:Int){deploymentLogs(deploymentId:$deploymentId,limit:$limit){timestamp message severity}}'
+              logs=(gql(q,{'deploymentId':deployment,'limit':200}).get('deploymentLogs') or [])
+              print('RUNTIME_LOGS='+json.dumps([{'timestamp':x.get('timestamp'),'severity':x.get('severity'),'message':x.get('message')} for x in logs],sort_keys=True),flush=True)
+          except Exception as exc:
+              print('RUNTIME_LOGS_UNAVAILABLE='+type(exc).__name__,flush=True)
 
           version=get('/version',auth=False)
           day=get('/v1/day-trade/status')
