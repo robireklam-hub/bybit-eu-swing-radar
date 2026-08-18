@@ -1,0 +1,42 @@
+name: Sector rotation shadow
+
+on:
+  schedule:
+    - cron: "57 0 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "bybit_eu_swing_radar/backend/research/sector_rotation_shadow.py"
+      - "bybit_eu_swing_radar/backend/app/research_sector_rotation_api.py"
+      - "bybit_eu_swing_radar/backend/scripts/production_sector_rotation_smoke.py"
+      - "bybit_eu_swing_radar/backend/app/main.py"
+      - ".github/workflows/sector-rotation-shadow.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sector-rotation-shadow
+  cancel-in-progress: true
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Capture and verify sourced sector rotation
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_sector_rotation_smoke.py

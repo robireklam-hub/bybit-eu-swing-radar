@@ -441,3 +441,9 @@ attach_sweep_effect_research(app, require_api_key)
 from app.research_eth_onchain_api import attach_eth_onchain_research
 
 attach_eth_onchain_research(app, require_api_key)
+
+# Research-only sourced sector-taxonomy / rotation shadow. It aggregates
+# provider functional tags over relative strength without live mutation.
+from app.research_sector_rotation_api import attach_sector_rotation_research
+
+attach_sector_rotation_research(app, require_api_key)
