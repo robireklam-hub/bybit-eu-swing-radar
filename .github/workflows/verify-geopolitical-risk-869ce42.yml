@@ -1,0 +1,28 @@
+name: Verify geopolitical risk production 869ce42
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.head_ref == 'verify/geopolitical-risk-869ce42'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 869ce422e0d503e829f9386934c756377db440e5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 869ce422e0d503e829f9386934c756377db440e5
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Run exact-main geopolitical risk production smoke
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_geopolitical_risk_smoke.py
