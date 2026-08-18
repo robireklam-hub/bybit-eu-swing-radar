@@ -1,0 +1,40 @@
+name: Verify current microstructure research state bd251e5
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-microstructure-state:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: bd251e5bc29b5b0f615e6b377c291ac62344131c
+    steps:
+      - name: Check out exact production target
+        uses: actions/checkout@v7
+        with:
+          ref: bd251e5bc29b5b0f615e6b377c291ac62344131c
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Verify recorder and readiness
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_smoke.py
+
+      - name: Verify alignment sample status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_alignment_status.py
+
+      - name: Verify effect status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_effect_status.py
