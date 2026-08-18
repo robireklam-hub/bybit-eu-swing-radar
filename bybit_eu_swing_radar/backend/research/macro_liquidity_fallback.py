@@ -28,10 +28,17 @@ NYFED_RRP_URL = "https://markets.newyorkfed.org/api/rp/reverserepo/propositions/
 SUPPORTED_SERIES = {"WALCL", "RRPONTSYD"}
 
 
+def _h41_series_name(value: str) -> str:
+    return value.strip().split("/")[-1]
+
+
 def parse_h41_series(text: str, series_code: str) -> list[tuple[str, float]]:
     rows = [list(row) for row in csv.reader(io.StringIO(text))]
     header = next((row for row in rows if row and row[0].strip().lower() == "series"), None)
-    data = next((row for row in rows if row and row[0].strip() == series_code), None)
+    data = next(
+        (row for row in rows if row and _h41_series_name(row[0]) == series_code),
+        None,
+    )
     if header is None or data is None:
         raise ValueError(f"H.4.1 series not found: {series_code}")
 
