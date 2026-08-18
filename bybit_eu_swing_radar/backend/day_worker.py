@@ -74,6 +74,7 @@ def env_int(name: str, default: int) -> int:
 
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
+SOURCE_COMMIT_SHA = os.getenv("RAILWAY_GIT_COMMIT_SHA") or None
 DAY_STRATEGY_VERSION = "0.7.3"
 DAY_MIN_TURNOVER_USDC = env_float("DAY_MIN_TURNOVER_USDC", 250_000.0)
 DAY_MAX_SPREAD_BPS = env_float("DAY_MAX_SPREAD_BPS", 25.0)
@@ -1492,6 +1493,7 @@ async def run() -> None:
             "worker": {
                 "status": "ok",
                 "strategy_mode": "DAY_TRADE",
+                "source_commit_sha": SOURCE_COMMIT_SHA,
                 "duration_seconds": round(elapsed, 2),
                 "strict_long_candidates": len(strict_longs),
                 "strict_short_candidates": len(strict_shorts),
