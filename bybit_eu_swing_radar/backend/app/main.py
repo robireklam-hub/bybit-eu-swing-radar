@@ -429,3 +429,9 @@ attach_btc_macro_cycle_etf_research(app, require_api_key)
 from app.research_relative_strength_api import attach_relative_strength_research
 
 attach_relative_strength_research(app, require_api_key)
+
+# Research-only prospective sweep-effect status. It reads already-closed v0.7.3
+# journal rows behind a label-blind sample gate and never mutates live strategy.
+from app.research_sweep_effect_api import attach_sweep_effect_research
+
+attach_sweep_effect_research(app, require_api_key)
