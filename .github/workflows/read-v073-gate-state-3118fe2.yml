@@ -1,0 +1,113 @@
+name: Read v0.7.3 gate state 3118fe2
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  read-gate-state:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 3118fe2281e134db72c4066abcc65fa75b47ba4a
+    steps:
+      - name: Check out exact merged main
+        uses: actions/checkout@v7
+        with:
+          ref: 3118fe2281e134db72c4066abcc65fa75b47ba4a
+      - name: Read exact-main v0.7.3 diagnostic state
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import time
+          from urllib.request import Request, urlopen
+
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key = os.environ['PRODUCTION_RADAR_API_KEY']
+          expected = os.environ['EXPECTED_SHA']
+
+          def get(path, timeout=45):
+              req = Request(base + path, headers={
+                  'Accept': 'application/json',
+                  'X-Radar-Key': key,
+                  'User-Agent': 'bybit-eu-v073-gate-state-verifier/1',
+              })
+              with urlopen(req, timeout=timeout) as r:
+                  return json.load(r)
+
+          deployed = False
+          for i in range(45):
+              try:
+                  version = get('/version', 20)
+              except Exception:
+                  version = {}
+              if version.get('commit_sha') == expected:
+                  deployed = True
+                  break
+              if i < 44:
+                  time.sleep(5)
+          if not deployed:
+              raise SystemExit('FAIL expected exact main is not deployed')
+
+          status = get('/v1/day-trade/backtest/diagnostics/v073/status')
+          all_wf = get('/v1/day-trade/backtest/diagnostics/v073/waterfall?side=both&split=all&primary_only=true')
+          val_wf = get('/v1/day-trade/backtest/diagnostics/v073/waterfall?side=both&split=VALIDATION&primary_only=true')
+          edge = get('/v1/day-trade/backtest/diagnostics/v073/edge?side=both&split=VALIDATION&primary_only=true')
+
+          job = status.get('job') or {}
+          compact_status = {
+              'exists': status.get('exists'),
+              'strategy_version': status.get('strategy_version'),
+              'progress_pct': status.get('progress_pct'),
+              'job_id': job.get('id'),
+              'job_status': job.get('status'),
+              'total_symbols': job.get('total_symbols'),
+              'completed_symbols': job.get('completed_symbols'),
+              'failed_symbols': job.get('failed_symbols'),
+              'total_events': job.get('total_events'),
+              'primary_event_count': job.get('primary_event_count'),
+              'strict_eligible_count': job.get('strict_eligible_count'),
+              'strict_trade_count': job.get('strict_trade_count'),
+              'started_at': job.get('started_at'),
+              'completed_at': job.get('completed_at'),
+              'warnings': status.get('warnings'),
+          }
+
+          def compact_wf(payload):
+              return {
+                  'job_status': (payload.get('job') or {}).get('status'),
+                  'requested_split': payload.get('requested_split'),
+                  'primary_only': payload.get('primary_only'),
+                  'sweep_count': payload.get('sweep_count'),
+                  'primary_count': payload.get('primary_count'),
+                  'strict_eligible_count': payload.get('strict_eligible_count'),
+                  'strict_trade_count': payload.get('strict_trade_count'),
+                  'four_hour_conflict_count': payload.get('four_hour_conflict_count'),
+                  'waterfall': payload.get('waterfall'),
+                  'first_failures': payload.get('first_failures'),
+                  'by_side': payload.get('by_side'),
+                  'by_split': payload.get('by_split'),
+                  'warnings': payload.get('warnings'),
+              }
+
+          compact_edge = {
+              'strategy_version': edge.get('strategy_version'),
+              'requested_split': edge.get('requested_split'),
+              'primary_only': edge.get('primary_only'),
+              'evaluable_sample': edge.get('evaluable_sample'),
+              'cohorts': edge.get('cohorts'),
+              'four_hour_context_ab': edge.get('four_hour_context_ab'),
+          }
+
+          print('V073_STATUS=' + json.dumps(compact_status, sort_keys=True, default=str))
+          print('V073_WATERFALL_ALL=' + json.dumps(compact_wf(all_wf), sort_keys=True, default=str))
+          print('V073_WATERFALL_VALIDATION=' + json.dumps(compact_wf(val_wf), sort_keys=True, default=str))
+          print('V073_EDGE_VALIDATION=' + json.dumps(compact_edge, sort_keys=True, default=str))
+          print('V0.7.3 GATE STATE READ COMPLETE.')
+          PY
