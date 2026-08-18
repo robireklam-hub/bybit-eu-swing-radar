@@ -21,6 +21,7 @@ from research.geopolitical_risk_shadow import (
 )
 
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
+GDELT_DOC_HTTP_URL = "http://api.gdeltproject.org/api/v2/doc/doc"
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS research_geopolitical_risk_snapshots (
@@ -55,17 +56,41 @@ def _decode(value: Any) -> dict[str, Any]:
     return {}
 
 
-def _status(status: str, *, bins: int = 0, reason: str | None = None) -> dict[str, Any]:
+def _status(
+    status: str,
+    *,
+    bins: int = 0,
+    reason: str | None = None,
+    url: str = GDELT_DOC_URL,
+    transport: str = "HTTPS",
+) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "status": status,
         "provider": PROVIDER,
         "mode": "TimelineVolRaw",
         "lookback": "24h",
         "bins": int(bins),
-        "url": GDELT_DOC_URL,
+        "url": url,
+        "transport": transport,
+        "transport_security": "TLS" if transport == "HTTPS" else "PLAINTEXT_PROVIDER_FALLBACK",
     }
     if reason:
         payload["reason"] = reason
+    return payload
+
+
+async def _provider_request(
+    client: httpx.AsyncClient,
+    semaphore: asyncio.Semaphore,
+    url: str,
+    params: Mapping[str, str],
+) -> dict[str, Any]:
+    async with semaphore:
+        response = await client.get(url, params=params)
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("Provider returned non-object JSON")
     return payload
 
 
@@ -82,17 +107,43 @@ async def _fetch_topic(
         "timespan": "24h",
         "timelinesmooth": "0",
     }
+
     try:
-        async with semaphore:
-            response = await client.get(GDELT_DOC_URL, params=params)
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, dict):
-            return name, {}, _status("ERROR", reason="Provider returned non-object JSON")
+        payload = await _provider_request(client, semaphore, GDELT_DOC_URL, params)
         points = extract_timeline_points(payload)
         if not points:
             return name, payload, _status("PARTIAL", reason="No valid TimelineVolRaw bins returned")
         return name, payload, _status("LIVE", bins=len(points))
+    except (httpx.ConnectError, httpx.ConnectTimeout) as https_exc:
+        # GDELT officially supports DOC 2.0 over both HTTPS and HTTP. HTTP is
+        # used only when the TLS endpoint cannot be connected to from the
+        # runtime network, and the downgrade remains explicit in provenance.
+        try:
+            payload = await _provider_request(client, semaphore, GDELT_DOC_HTTP_URL, params)
+            points = extract_timeline_points(payload)
+            if not points:
+                return name, payload, _status(
+                    "PARTIAL",
+                    reason=(
+                        f"HTTPS {type(https_exc).__name__}; official HTTP fallback returned no valid TimelineVolRaw bins"
+                    ),
+                    url=GDELT_DOC_HTTP_URL,
+                    transport="HTTP",
+                )
+            return name, payload, _status(
+                "PARTIAL",
+                bins=len(points),
+                reason=f"HTTPS {type(https_exc).__name__}; official HTTP transport fallback used",
+                url=GDELT_DOC_HTTP_URL,
+                transport="HTTP",
+            )
+        except Exception as http_exc:
+            return name, {}, _status(
+                "ERROR",
+                reason=(
+                    f"HTTPS {type(https_exc).__name__}; HTTP fallback {type(http_exc).__name__}: {str(http_exc)[:120]}"
+                ),
+            )
     except Exception as exc:
         return name, {}, _status("ERROR", reason=f"{type(exc).__name__}: {str(exc)[:180]}")
 
@@ -105,6 +156,7 @@ async def build_current_snapshot() -> dict[str, Any]:
     async with httpx.AsyncClient(
         timeout=timeout,
         limits=limits,
+        follow_redirects=True,
         headers={"User-Agent": "bybit-eu-geopolitical-risk-shadow/1"},
     ) as client:
         results = await asyncio.gather(
