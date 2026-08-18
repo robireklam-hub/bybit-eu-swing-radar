@@ -1228,6 +1228,7 @@ async def persist_day_results(
                         analyses,
                         captured_at=datetime.fromisoformat(scan["data_as_of"]),
                         source_commit_sha=SOURCE_COMMIT_SHA,
+                        volume_confirmation_ratio=DAY_TRIGGER_VOLUME_RATIO,
                     )
             except Exception as exc:
                 funnel_status = {

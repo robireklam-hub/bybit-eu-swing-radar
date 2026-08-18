@@ -190,6 +190,7 @@ def _analysis_snapshot_rows(
     captured_at: datetime,
     prospective_start_at: datetime,
     source_commit_sha: str | None,
+    volume_confirmation_ratio: float = 1.3,
 ) -> list[dict[str, Any]]:
     """Build label-free point-in-time rows for recent prospective sweeps."""
     # Local import avoids an import cycle: diagnostics_v073 imports day_worker,
@@ -201,7 +202,9 @@ def _analysis_snapshot_rows(
     lower_age_bound = captured_at - timedelta(minutes=MAX_EVENT_AGE_MINUTES)
     lower_bound = max(prospective_start_at, lower_age_bound)
     run_id = captured_at.isoformat()
-    sweep_config = SweepResearchConfig()
+    sweep_config = SweepResearchConfig(
+        volume_confirmation_ratio=volume_confirmation_ratio
+    )
 
     output: list[dict[str, Any]] = []
     for analysis in analyses:
@@ -467,6 +470,7 @@ async def persist_v073_prospective_funnel(
     *,
     captured_at: datetime,
     source_commit_sha: str | None,
+    volume_confirmation_ratio: float,
 ) -> dict[str, Any]:
     """Persist one label-free forward funnel snapshot batch."""
     captured_at = _as_utc(captured_at)
@@ -476,6 +480,7 @@ async def persist_v073_prospective_funnel(
         captured_at=captured_at,
         prospective_start_at=prospective_start_at,
         source_commit_sha=source_commit_sha,
+        volume_confirmation_ratio=volume_confirmation_ratio,
     )
     inserted = 0
     for row in rows:
