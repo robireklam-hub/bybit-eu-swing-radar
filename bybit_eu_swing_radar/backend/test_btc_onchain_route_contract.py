@@ -1,5 +1,7 @@
 from pathlib import Path
 
+# Connector-authored no-op comment keeps final CI on a non-bot commit.
+
 
 def test_btc_macro_research_router_attaches_btc_onchain_routes():
     path = Path(__file__).resolve().parent / "app" / "research_btc_macro_cycle_etf_api.py"
