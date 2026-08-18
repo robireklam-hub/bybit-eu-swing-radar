@@ -1,0 +1,56 @@
+name: Diag liquidity forward 719
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.head_ref == 'diag/liquidity-forward-719'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+    steps:
+      - name: Read current durable liquidity forward state
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os
+          from datetime import datetime, timezone
+          from urllib.request import Request, urlopen
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key = os.environ['PRODUCTION_RADAR_API_KEY']
+          req = Request(base + '/v1/research/swing-liquidity/forward-status', headers={'Accept':'application/json','X-Radar-Key':key,'User-Agent':'liquidity-forward-diag/1'})
+          with urlopen(req, timeout=15) as r:
+              p = json.load(r)
+          last = p.get('last_capture_at')
+          age = None
+          if last:
+              ts = datetime.fromisoformat(last.replace('Z','+00:00')).astimezone(timezone.utc)
+              age = round((datetime.now(timezone.utc)-ts).total_seconds(),1)
+          safe = {k:p.get(k) for k in ('research_only','live_strategy_mutated','promotion_allowed','study','capture_count','first_capture_at','last_capture_at','candidate_observations','orderbook_errors','turnover_tiers','spread_tiers','development_target_matured_events','validation_target_matured_events')}
+          safe['capture_age_seconds'] = age
+          print('SWING_LIQUIDITY_FORWARD_DIAG=' + json.dumps(safe, sort_keys=True))
+          errors=[]
+          if p.get('research_only') is not True: errors.append('research_only_not_true')
+          if p.get('live_strategy_mutated') is not False: errors.append('live_strategy_mutated_not_false')
+          if p.get('promotion_allowed') is not False: errors.append('promotion_allowed_not_false')
+          if int(p.get('capture_count') or 0) <= 0: errors.append('no_durable_captures')
+          if int(p.get('candidate_observations') or 0) <= 0: errors.append('no_durable_observations')
+          if int(p.get('orderbook_errors') or 0) != 0: errors.append('orderbook_errors_present')
+          tiers=p.get('turnover_tiers') or {}
+          below={'LT_25K','25K_50K','50K_100K','<25k','25k-50k','50k-100k'}
+          above={'100K_250K','250K_1M','GE_1M','100-250k','250k-1m','>=1m'}
+          if not any(int(v or 0)>0 for k,v in tiers.items() if k in below): errors.append('missing_below_100k_research_exposure')
+          if not any(int(v or 0)>0 for k,v in tiers.items() if k in above): errors.append('missing_current_gate_comparator_exposure')
+          if not (p.get('spread_tiers') or {}): errors.append('missing_spread_tier_coverage')
+          if errors:
+              raise SystemExit('FAIL ' + ' | '.join(errors))
+          print('SWING LIQUIDITY DURABLE FORWARD STATE VERIFIED.')
+          PY
