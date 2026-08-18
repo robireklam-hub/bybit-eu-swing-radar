@@ -15,8 +15,8 @@ def _payload(**overrides):
         "last_capture_at": (now - timedelta(minutes=5)).isoformat(),
         "candidate_observations": 72,
         "orderbook_errors": 0,
-        "turnover_tiers": {"<25k": 4, "100-250k": 7},
-        "spread_tiers": {"<5bps": 10},
+        "turnover_tiers": {"50K_100K": 4, "100K_250K": 7},
+        "spread_tiers": {"LE_10": 10},
     }
     payload.update(overrides)
     return payload, now
@@ -41,6 +41,18 @@ def test_validate_status_rejects_stale_or_empty_state():
     assert any(error.startswith("stale_last_capture:") for error in errors)
     assert "missing_turnover_tier_coverage" in errors
     assert "missing_spread_tier_coverage" in errors
+
+
+def test_validate_status_requires_both_preregistered_turnover_exposures():
+    payload, now = _payload(turnover_tiers={"100K_250K": 7, "GE_1M": 3})
+    errors = validate_status(payload, now=now)
+    assert "missing_below_100k_research_exposure" in errors
+    assert "missing_current_gate_comparator_exposure" not in errors
+
+    payload, now = _payload(turnover_tiers={"25K_50K": 5, "50K_100K": 6})
+    errors = validate_status(payload, now=now)
+    assert "missing_below_100k_research_exposure" not in errors
+    assert "missing_current_gate_comparator_exposure" in errors
 
 
 def test_run_check_requires_research_only_nonpromotion_contract():
