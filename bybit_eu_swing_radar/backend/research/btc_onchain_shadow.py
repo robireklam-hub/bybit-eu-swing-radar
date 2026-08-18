@@ -15,9 +15,11 @@ COIN_METRICS = (
     "TxCnt",
     "FeeTotNtv",
     "HashRate",
-    "DiffMean",
     "SplyCur",
 )
+COMMUNITY_EXCLUDED_METRICS = {
+    "DiffMean": "Coin Metrics Community API returns 403 for BTC 1d; difficulty context is sourced separately from mempool.space.",
+}
 
 
 def spec() -> dict[str, Any]:
@@ -36,6 +38,7 @@ def spec() -> dict[str, Any]:
             "closed_daily_only": True,
             "lookback_days": 100,
             "metrics": list(COIN_METRICS),
+            "excluded_metrics": COMMUNITY_EXCLUDED_METRICS,
         },
         "mempool_context": {
             "provider": "mempool.space",
