@@ -1,10 +1,6 @@
-name: Geopolitical risk shadow forward capture
+name: Geopolitical risk shadow v1 manual audit
 
 on:
-  push:
-    branches: [main]
-  schedule:
-    - cron: "43 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -27,6 +23,6 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - name: Capture and verify research geopolitical risk shadow
+      - name: Capture and verify retired research geopolitical DOC shadow
         working-directory: bybit_eu_swing_radar/backend
         run: python scripts/production_geopolitical_risk_smoke.py
