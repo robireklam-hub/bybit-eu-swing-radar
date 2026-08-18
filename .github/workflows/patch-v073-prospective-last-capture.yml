@@ -1,0 +1,127 @@
+name: Patch v073 prospective last capture checkpoint
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/patch-v073-prospective-last-capture.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.head_ref == 'research/v073-prospective-funnel-catchup'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+
+      - name: Add durable last-capture checkpoint
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          module = Path('bybit_eu_swing_radar/backend/research/prospective_funnel_v073.py')
+          text = module.read_text()
+          reps = [
+              (
+                  '    prospective_start_at TIMESTAMPTZ NOT NULL,\n    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n);',
+                  '    prospective_start_at TIMESTAMPTZ NOT NULL,\n    last_capture_at TIMESTAMPTZ,\n    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n);\n\nALTER TABLE day_trade_v073_prospective_funnel_meta\n    ADD COLUMN IF NOT EXISTS last_capture_at TIMESTAMPTZ;',
+              ),
+              (
+                  'async def _insert_snapshot(connection: Any, row: dict[str, Any]) -> bool:',
+                  '''async def _previous_capture_at(connection: Any) -> datetime | None:\n    value = await connection.fetchval(\n        \"\"\"\n        SELECT COALESCE(\n            last_capture_at,\n            (\n                SELECT MAX(captured_at)\n                FROM day_trade_v073_prospective_funnel\n                WHERE spec_version = $1 AND strategy_version = $2\n            )\n        )\n        FROM day_trade_v073_prospective_funnel_meta\n        WHERE spec_version = $1 AND strategy_version = $2\n        \"\"\",\n        SPEC_VERSION,\n        STRATEGY_VERSION,\n    )\n    return None if value is None else _as_utc(value)\n\n\nasync def _mark_capture_success(connection: Any, captured_at: datetime) -> None:\n    await connection.execute(\n        \"\"\"\n        UPDATE day_trade_v073_prospective_funnel_meta\n        SET last_capture_at = $3\n        WHERE spec_version = $1 AND strategy_version = $2\n        \"\"\",\n        SPEC_VERSION,\n        STRATEGY_VERSION,\n        _as_utc(captured_at),\n    )\n\n\nasync def _insert_snapshot(connection: Any, row: dict[str, Any]) -> bool:''',
+              ),
+              (
+                  '''    previous_capture_at = await connection.fetchval(\n        \"\"\"\n        SELECT MAX(captured_at)\n        FROM day_trade_v073_prospective_funnel\n        WHERE spec_version = $1 AND strategy_version = $2\n        \"\"\",\n        SPEC_VERSION,\n        STRATEGY_VERSION,\n    )''',
+                  '    previous_capture_at = await _previous_capture_at(connection)',
+              ),
+              (
+                  '''    return await _cumulative_status(\n        connection,\n        prospective_start_at=prospective_start_at,\n        captured_at=captured_at,\n        source_commit_sha=source_commit_sha,\n        current_rows=rows,\n        inserted_snapshots=inserted,\n    )''',
+                  '''    status = await _cumulative_status(\n        connection,\n        prospective_start_at=prospective_start_at,\n        captured_at=captured_at,\n        source_commit_sha=source_commit_sha,\n        current_rows=rows,\n        inserted_snapshots=inserted,\n    )\n    # Advance the durable recorder checkpoint only after the entire recorder\n    # batch succeeded, including zero-event runs. The surrounding transaction\n    # rolls this back if later live cache persistence fails.\n    await _mark_capture_success(connection, captured_at)\n    return status''',
+              ),
+              (
+                  '    "_live_strict_event_keys",\n    "persist_v073_prospective_funnel",',
+                  '    "_live_strict_event_keys",\n    "_mark_capture_success",\n    "_previous_capture_at",\n    "persist_v073_prospective_funnel",',
+              ),
+          ]
+          for old, new in reps:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'module target count={count}: {old[:100]!r}')
+              text = text.replace(old, new, 1)
+          module.write_text(text)
+
+          tests = Path('bybit_eu_swing_radar/backend/test_v073_prospective_funnel.py')
+          t = tests.read_text()
+          append = r'''
+
+class _CheckpointConnection:
+    def __init__(self, previous=None):
+        self.previous = previous
+        self.fetchval_calls = []
+        self.execute_calls = []
+
+    async def fetchval(self, sql, *args):
+        self.fetchval_calls.append((sql, args))
+        return self.previous
+
+    async def execute(self, sql, *args):
+        self.execute_calls.append((sql, args))
+        return "UPDATE 1"
+
+
+async def test_previous_capture_uses_durable_meta_checkpoint():
+    previous = datetime(2026, 8, 18, 12, 45, tzinfo=timezone.utc)
+    connection = _CheckpointConnection(previous)
+    value = await funnel._previous_capture_at(connection)
+    assert value == previous
+    sql, args = connection.fetchval_calls[0]
+    assert "last_capture_at" in sql
+    assert "MAX(captured_at)" in sql  # migration fallback for pre-checkpoint rows
+    assert args == (funnel.SPEC_VERSION, funnel.STRATEGY_VERSION)
+
+
+async def test_zero_event_success_can_advance_durable_capture_checkpoint():
+    captured = datetime(2026, 8, 18, 13, 0, tzinfo=timezone.utc)
+    connection = _CheckpointConnection()
+    await funnel._mark_capture_success(connection, captured)
+    sql, args = connection.execute_calls[0]
+    assert "SET last_capture_at = $3" in sql
+    assert args == (funnel.SPEC_VERSION, funnel.STRATEGY_VERSION, captured)
+
+
+def test_schema_migrates_last_capture_checkpoint():
+    schema = funnel.PROSPECTIVE_SCHEMA_SQL
+    assert "last_capture_at TIMESTAMPTZ" in schema
+    assert "ADD COLUMN IF NOT EXISTS last_capture_at TIMESTAMPTZ" in schema
+'''
+          if 'test_zero_event_success_can_advance_durable_capture_checkpoint' in t:
+              raise SystemExit('checkpoint tests already present')
+          tests.write_text(t.rstrip() + append + '\n')
+
+          doc = Path('bybit_eu_swing_radar/backend/V073_PROSPECTIVE_FUNNEL_V1.md')
+          d = doc.read_text()
+          marker = 'If the day worker is interrupted for longer than that maturation window, the next successful recorder run catches up from the previous persisted capture with a 15-minute overlap. This catch-up remains bounded by `prospective_start_at`, so it recovers only genuinely forward events and never creates historical backfill.'
+          replacement = marker + '\n\nThe previous successful capture time is stored separately as `last_capture_at` in recorder metadata and advances even when a run observes zero sweep events. Existing pre-checkpoint data can bootstrap this value from the latest persisted snapshot, but the checkpoint never moves before `prospective_start_at`.'
+          if d.count(marker) != 1:
+              raise SystemExit('doc marker mismatch')
+          doc.write_text(d.replace(marker, replacement, 1))
+          PY
+
+      - name: Remove temporary workflow and push
+        shell: bash
+        run: |
+          rm .github/workflows/patch-v073-prospective-last-capture.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bybit_eu_swing_radar/backend/research/prospective_funnel_v073.py \
+                  bybit_eu_swing_radar/backend/test_v073_prospective_funnel.py \
+                  bybit_eu_swing_radar/backend/V073_PROSPECTIVE_FUNNEL_V1.md \
+                  .github/workflows/patch-v073-prospective-last-capture.yml
+          git commit -m "Persist prospective funnel capture checkpoint"
+          git push origin HEAD:${{ github.head_ref }}
