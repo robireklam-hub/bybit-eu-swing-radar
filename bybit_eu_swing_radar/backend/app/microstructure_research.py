@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import datetime
 from typing import Any, Callable, Iterable, Mapping
 
@@ -20,6 +21,7 @@ from research.microstructure.alignment import (
 )
 from research.microstructure.collector import MicrostructureConfig, MicrostructureRecorder
 from research.microstructure.data_access import load_recent_bucket_payload
+from research.microstructure.runtime_status import load_runtime_status
 from research.microstructure.effect_analysis import (
     analyze_preregistered_effects,
     effect_spec,
@@ -44,6 +46,13 @@ def _ensure_recorder() -> MicrostructureRecorder:
     return _recorder
 
 
+def _recorder_owner() -> str:
+    owner = os.getenv("MICROSTRUCTURE_RECORDER_OWNER", "api").strip().lower()
+    if owner not in {"api", "external"}:
+        raise ValueError("MICROSTRUCTURE_RECORDER_OWNER must be api or external")
+    return owner
+
+
 def _ensure_task_started() -> bool:
     """Start the research collector on the current event loop when needed.
 
@@ -54,6 +63,8 @@ def _ensure_task_started() -> bool:
     strategy/scoring/execution state.
     """
     global _task
+    if _recorder_owner() != "api":
+        return False
     recorder = _ensure_recorder()
     if not recorder.config.enabled:
         return False
@@ -332,16 +343,24 @@ def attach_microstructure_research(
     )
     async def status() -> dict[str, Any]:
         try:
+            recorder = _ensure_recorder()
+            if _recorder_owner() == "external":
+                return await load_runtime_status(
+                    recorder.config.database_url,
+                    recorder.config.symbols,
+                )
             _ensure_task_started()
             # Yield once so the newly scheduled collector can set its initial
             # runtime state before we report status on first access.
             await asyncio.sleep(0)
         except Exception as exc:
-            logger.exception("microstructure recorder self-start failed")
+            logger.exception("microstructure recorder status failed")
             payload = microstructure_status()
             payload["start_error"] = str(exc)[:1000]
             return payload
-        return microstructure_status()
+        payload = microstructure_status()
+        payload["process_role"] = "api"
+        return payload
 
     @app.get(
         "/v1/research/microstructure/readiness",
