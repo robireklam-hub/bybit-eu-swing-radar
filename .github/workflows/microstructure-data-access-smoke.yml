@@ -1,0 +1,41 @@
+name: Microstructure read-only data access smoke
+
+on:
+  workflow_run:
+    workflows: ["Microstructure forward recorder smoke"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: microstructure-readonly-data-access-smoke
+  cancel-in-progress: true
+
+jobs:
+  data-access-smoke:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_sha != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+
+    steps:
+      - name: Check out production-verified commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Verify bounded raw microstructure access
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_data_access_smoke.py
