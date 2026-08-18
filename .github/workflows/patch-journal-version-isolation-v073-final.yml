@@ -3,8 +3,7 @@ name: Apply final v0.7.3 journal version isolation
 on:
   push:
     branches:
-      - "fix/journal-version-isolation-v073-final"
-      - "fix/journal-version-isolation-v073-final2"
+      - "fix/journal-version-isolation-v073-final3"
     paths:
       - ".github/workflows/patch-journal-version-isolation-v073-final.yml"
   pull_request:
@@ -80,3 +79,4 @@ jobs:
           git diff --cached --check
           git commit -m "Fix v0.7.3 journal version isolation"
           git push origin HEAD:${TARGET_BRANCH}
+# unique-opened-event-final3
