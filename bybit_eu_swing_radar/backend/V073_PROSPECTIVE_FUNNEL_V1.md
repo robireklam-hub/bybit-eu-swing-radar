@@ -26,6 +26,8 @@ The recorder reuses the existing v0.7.3 sweep detector and historical diagnostic
 14. net RR >= live v0.7.3 threshold
 15. STRICT trade
 
+The recorder receives the live `DAY_TRIGGER_VOLUME_RATIO` value from the day worker, so the forward volume-confirmation gate cannot drift from the deployed v0.7.3 trigger configuration.
+
 Historical diagnostics retain their technical-only short assumption because historical borrowability is unavailable. **Forward prospective capture requires current Bybit EU USDC spot-margin borrowability on short rows.**
 
 ## Prospective boundary
