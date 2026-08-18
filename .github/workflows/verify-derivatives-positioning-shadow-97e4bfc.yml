@@ -1,0 +1,29 @@
+name: Verify production derivatives positioning shadow 97e4bfc
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-production-derivatives-positioning:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 97e4bfcf5b6f7f6e680b27ddd3652666e53416b4
+    steps:
+      - name: Check out exact production commit
+        uses: actions/checkout@v7
+        with:
+          ref: 97e4bfcf5b6f7f6e680b27ddd3652666e53416b4
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Verify exact-SHA production derivatives positioning shadow
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_derivatives_positioning_shadow_smoke.py
