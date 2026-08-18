@@ -25,7 +25,9 @@ jobs:
           ref: b54fbd01e086d1f7d1b57d6324d32241e11e2d89
 
       - name: Install Railway CLI
-        run: bash <(curl -fsSL https://railway.com/install.sh) -y
+        run: |
+          bash <(curl -fsSL https://railway.com/install.sh) -y
+          echo "$HOME/.railway/bin" >> "$GITHUB_PATH"
 
       - name: Link target recorder service
         run: |
