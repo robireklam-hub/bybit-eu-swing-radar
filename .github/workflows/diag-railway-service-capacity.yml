@@ -20,8 +20,8 @@ jobs:
           project_id='846f5088-4e8b-45fe-84d9-0728542b2c36'
           env_id='2be04d3c-82b3-487d-930c-a4fbc7d483d8'
           day_service='b740fd25-f72b-4392-b156-7aa3b0c5ffd4'
-          def gql(query, variables):
-              req=urllib.request.Request(endpoint,data=json.dumps({'query':query,'variables':variables}).encode(),headers={'Authorization':'Bearer '+token,'Content-Type':'application/json','Accept':'application/json','User-Agent':'railway-capacity-diag/1'})
+          def gql(query, variables=None):
+              req=urllib.request.Request(endpoint,data=json.dumps({'query':query,'variables':variables or {}}).encode(),headers={'Authorization':'Bearer '+token,'Content-Type':'application/json','Accept':'application/json','User-Agent':'railway-capacity-diag/2'})
               with urllib.request.urlopen(req,timeout=25) as r: payload=json.loads(r.read().decode())
               if payload.get('errors'): raise RuntimeError(json.dumps(payload['errors']))
               return payload['data']
@@ -30,7 +30,16 @@ jobs:
           services=sorted([{'id':e['node']['id'],'name':e['node']['name']} for e in data['services']['edges']],key=lambda x:x['name'])
           vq='query variables($projectId:String!,$environmentId:String!,$serviceId:String,$unrendered:Boolean){variables(projectId:$projectId,environmentId:$environmentId,serviceId:$serviceId,unrendered:$unrendered)}'
           vars_=gql(vq,{'projectId':project_id,'environmentId':env_id,'serviceId':day_service,'unrendered':True})['variables'] or {}
+          type_data=gql('query { __type(name:"ServiceInstanceUpdateInput") { inputFields { name } } }')
+          update_fields=sorted(x['name'] for x in (type_data['__type']['inputFields'] or []))
+          desired=[x for x in ['startCommand','rootDirectory','cronSchedule','region','builder','watchPatterns','restartPolicyType','restartPolicyMaxRetries'] if x in update_fields]
+          instance={}
+          if desired:
+              iq='query serviceInstance($serviceId:String!,$environmentId:String!){serviceInstance(serviceId:$serviceId,environmentId:$environmentId){'+ ' '.join(desired) +'}}'
+              instance=gql(iq,{'serviceId':day_service,'environmentId':env_id})['serviceInstance'] or {}
           print('SERVICE_COUNT='+str(len(services)))
           print('SERVICES='+json.dumps(services,sort_keys=True))
           print('DAY_WORKER_VARIABLE_NAMES='+json.dumps(sorted(vars_.keys())))
+          print('SERVICE_INSTANCE_UPDATE_FIELDS='+json.dumps(update_fields))
+          print('DAY_WORKER_DEPLOY_SETTINGS='+json.dumps(instance,sort_keys=True,default=str))
           PY
