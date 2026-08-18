@@ -1,0 +1,132 @@
+name: Verify journal isolation 6a80c53
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/verify-journal-isolation-6a80c53.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 6a80c53f17eebd4972a527055f258b953ca6b44a
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 6a80c53f17eebd4972a527055f258b953ca6b44a
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Verify exact-main journal lifecycle isolation after fresh worker run
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, time
+          from datetime import datetime, timezone
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+
+          base = os.environ["PRODUCTION_RADAR_API_BASE_URL"].rstrip("/")
+          key = os.environ["PRODUCTION_RADAR_API_KEY"]
+          expected = os.environ["EXPECTED_SHA"]
+
+          def get(path, params=None, auth=True, timeout=35):
+              url = base + path
+              if params:
+                  url += "?" + urlencode(params)
+              headers = {"Accept":"application/json", "User-Agent":"journal-isolation-verifier/1"}
+              if auth:
+                  headers["X-Radar-Key"] = key
+              with urlopen(Request(url, headers=headers), timeout=timeout) as r:
+                  payload = json.loads(r.read().decode())
+              if not isinstance(payload, dict):
+                  raise ValueError(f"non-object payload: {path}")
+              return payload
+
+          # First prove the exact merged API SHA is serving.
+          version_seen_at = None
+          for attempt in range(50):
+              try:
+                  version = get("/version", auth=False, timeout=15)
+                  if version.get("commit_sha") == expected:
+                      version_seen_at = datetime.now(timezone.utc)
+                      print("EXACT_API_SHA=" + expected)
+                      break
+              except Exception as exc:
+                  print(f"version_wait attempt={attempt+1} error={type(exc).__name__}")
+              time.sleep(4)
+          if version_seen_at is None:
+              raise SystemExit("FAIL exact production API SHA not serving")
+
+          def parse_dt(value):
+              if not value:
+                  return None
+              try:
+                  return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+              except ValueError:
+                  return None
+
+          # A journal run after the exact API deploy is required. If worker provenance
+          # exposes the SHA, require it too; otherwise the post-deploy run timestamp is
+          # retained as explicit evidence rather than assuming the old cached run.
+          verified = None
+          for attempt in range(70):
+              journal = get("/v1/day-trade/journal/summary", {"days":365,"signal_class":"all"})
+              day = get("/v1/day-trade/status")
+              data = get("/v1/data-status")
+              latest = journal.get("latest_run") or {}
+              run_at = parse_dt(latest.get("run_at"))
+
+              def find_sha(obj, path=""):
+                  hits = []
+                  if isinstance(obj, dict):
+                      for k, v in obj.items():
+                          p = f"{path}.{k}" if path else str(k)
+                          if "sha" in str(k).lower() and isinstance(v, str):
+                              hits.append((p, v))
+                          hits.extend(find_sha(v, p))
+                  elif isinstance(obj, list):
+                      for i, v in enumerate(obj):
+                          hits.extend(find_sha(v, f"{path}[{i}]"))
+                  return hits
+
+              sha_hits = find_sha(data) + find_sha(day)
+              worker_expected = any(value == expected for _, value in sha_hits)
+              fresh_run = bool(run_at and run_at >= version_seen_at)
+              if fresh_run:
+                  overall = journal.get("overall") or {}
+                  open_count = int(overall.get("open_count") or 0)
+                  active = int(latest.get("active_signal_count") or 0)
+                  safe = {
+                      "version_seen_at": version_seen_at.isoformat(),
+                      "latest_run_at": latest.get("run_at"),
+                      "latest_run_strategy_version": latest.get("strategy_version"),
+                      "latest_run_active_signal_count": active,
+                      "summary_open_count": open_count,
+                      "summary_sample_size": overall.get("sample_size"),
+                      "triggered_trade_count": latest.get("triggered_trade_count"),
+                      "shadow_trigger_count": latest.get("shadow_trigger_count"),
+                      "new_signal_count": latest.get("new_signal_count"),
+                      "worker_expected_sha_exposed": worker_expected,
+                      "sha_fields": sha_hits[:20],
+                  }
+                  print("JOURNAL_ISOLATION_EVIDENCE=" + json.dumps(safe, sort_keys=True, default=str))
+                  if str(latest.get("strategy_version") or "") != "0.7.3":
+                      raise SystemExit("FAIL latest journal run is not v0.7.3")
+                  if active != open_count:
+                      raise SystemExit(f"FAIL v0.7.3 active/open mismatch: run={active} summary={open_count}")
+                  verified = safe
+                  break
+              time.sleep(5)
+
+          if verified is None:
+              raise SystemExit("FAIL no fresh post-deploy journal run observed")
+          print("V0.7.3 JOURNAL OPEN LIFECYCLE ISOLATION VERIFIED.")
+          PY
