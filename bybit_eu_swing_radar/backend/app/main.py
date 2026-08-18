@@ -447,3 +447,9 @@ attach_eth_onchain_research(app, require_api_key)
 from app.research_sector_rotation_api import attach_sector_rotation_research
 
 attach_sector_rotation_research(app, require_api_key)
+
+# Research-only Cross-Layer Context v2. V1 remains immutable; V2 adds sourced
+# sector rotation plus BTC/ETH on-chain context without live mutation.
+from app.research_cross_layer_context_v2_api import attach_cross_layer_context_v2_research
+
+attach_cross_layer_context_v2_research(app, require_api_key)
