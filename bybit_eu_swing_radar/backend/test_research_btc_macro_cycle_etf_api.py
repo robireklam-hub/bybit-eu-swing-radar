@@ -1,4 +1,8 @@
-from app.research_btc_macro_cycle_etf_api import parse_farside_html, parse_fred_csv
+from app.research_btc_macro_cycle_etf_api import (
+    parse_farside_html,
+    parse_fed_board_table,
+    parse_fred_csv,
+)
 
 
 def test_parse_fred_csv_accepts_fredgraph_shape() -> None:
@@ -22,3 +26,23 @@ def test_parse_farside_html_preserves_negative_parentheses() -> None:
     assert rows[0]["funds"]["IBIT"] == -10_500_000.0
     assert rows[0]["total_usd"] == 9_500_000.0
     assert rows[1]["funds"]["FBTC"] is None
+
+
+def test_parse_fed_board_daily_csv_table() -> None:
+    text = (
+        "Series,Series Description,2026-07-29,2026-07-30\n"
+        "RIFLGFCY10_N.B,10-year Treasury,4.67,4.68\n"
+    )
+    rows = parse_fed_board_table(text, "RIFLGFCY10_N.B")
+    assert rows == [("2026-07-29", 4.67), ("2026-07-30", 4.68)]
+
+
+def test_parse_fed_board_monthly_html_table() -> None:
+    html = """
+    <table>
+      <tr><th>Series</th><th>Series Description</th><th>2026-05</th><th>2026-06</th></tr>
+      <tr><td>JRXWTFB_N.M</td><td>Nominal Broad Dollar Index</td><td>118.7792</td><td>120.0835</td></tr>
+    </table>
+    """
+    rows = parse_fed_board_table(html, "JRXWTFB_N.M")
+    assert rows == [("2026-05", 118.7792), ("2026-06", 120.0835)]
