@@ -1,6 +1,7 @@
 """Research-only BTC Macro / Cycle / ETF Intelligence v1 capture API."""
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
@@ -217,16 +218,32 @@ async def build_current_snapshot() -> dict[str, Any]:
         "Accept": "text/html,application/json,text/csv,text/plain,*/*",
     }
     async with httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=True) as client:
-        cycle_name, cycle, cycle_status = await _safe("cycle", _fetch_cycle(client))
-        price_name, btc_price, price_status = await _safe("btc_price", _fetch_btc_price(client))
-        macro_results = []
-        for name, series_id in FRED_SERIES.items():
-            try:
-                item_name, summary, status = await _fetch_fred_series(client, name, series_id)
-                macro_results.append((item_name, summary, status))
-            except Exception as exc:
-                macro_results.append((name, None, _source_status("ERROR", reason=f"{type(exc).__name__}: {str(exc)[:180]}", series_id=series_id)))
-        etf_name, etf, etf_status = await _safe("etf_flows", _fetch_etf(client))
+        tasks = [
+            _safe("cycle", _fetch_cycle(client)),
+            _safe("btc_price", _fetch_btc_price(client)),
+            *[
+                _safe(f"fred_{name}", _fetch_fred_series(client, name, series_id))
+                for name, series_id in FRED_SERIES.items()
+            ],
+            _safe("etf_flows", _fetch_etf(client)),
+        ]
+        results = await asyncio.gather(*tasks)
+
+    by_name = {name: (value, status) for name, value, status in results}
+    cycle, cycle_status = by_name["cycle"]
+    btc_price, price_status = by_name["btc_price"]
+    etf, etf_status = by_name["etf_flows"]
+    cycle_name = "cycle"
+    price_name = "btc_price"
+    etf_name = "etf_flows"
+    macro_results = []
+    for name, series_id in FRED_SERIES.items():
+        value, item_status = by_name[f"fred_{name}"]
+        if value is None:
+            macro_results.append((name, None, {**item_status, "series_id": series_id}))
+        else:
+            item_name, summary, nested_status = value
+            macro_results.append((item_name, summary, nested_status))
 
     if cycle is None:
         raise RuntimeError("BTC cycle source unavailable")
