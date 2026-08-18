@@ -22,26 +22,40 @@ jobs:
         run: |
           python - <<'PY'
           import json, os, re
+          from urllib.error import HTTPError
           from urllib.request import Request, urlopen
 
           ENDPOINT = "https://backboard.railway.com/graphql/v2"
           token = os.environ["RAILWAY_API_TOKEN"]
 
           def gql(query, variables):
-              req = Request(
-                  ENDPOINT,
-                  data=json.dumps({"query": query, "variables": variables}).encode(),
-                  headers={
-                      "Authorization": "Bearer " + token,
-                      "Content-Type": "application/json",
-                      "Accept": "application/json",
-                  },
+              body = json.dumps({"query": query, "variables": variables}).encode()
+              auth_headers = (
+                  {"Authorization": "Bearer " + token},
+                  {"Project-Access-Token": token},
               )
-              with urlopen(req, timeout=30) as response:
-                  payload = json.loads(response.read().decode())
-              if payload.get("errors"):
-                  raise RuntimeError(json.dumps([e.get("message") for e in payload["errors"]]))
-              return payload.get("data") or {}
+              last = None
+              for auth in auth_headers:
+                  req = Request(
+                      ENDPOINT,
+                      data=body,
+                      headers={
+                          **auth,
+                          "Content-Type": "application/json",
+                          "Accept": "application/json",
+                      },
+                  )
+                  try:
+                      with urlopen(req, timeout=30) as response:
+                          payload = json.loads(response.read().decode())
+                      if payload.get("errors"):
+                          raise RuntimeError(json.dumps([e.get("message") for e in payload["errors"]]))
+                      return payload.get("data") or {}
+                  except HTTPError as exc:
+                      last = exc
+                      if exc.code not in (401, 403):
+                          raise
+              raise last or RuntimeError("Railway authentication failed")
 
           def safe(text):
               text = str(text)
