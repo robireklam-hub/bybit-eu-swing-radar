@@ -119,3 +119,6 @@ def test_external_smoke_requires_standalone_role_and_exact_sha():
     assert 'candidate.get("process_role") == "standalone"' in source
     assert 'candidate.get("source_commit_sha") == expected_sha' in source
     assert 'candidate.get("external_service_healthy") is True' in source
+
+
+# Connector-authored CI trigger; no behavioral effect.
