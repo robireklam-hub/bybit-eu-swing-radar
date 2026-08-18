@@ -28,6 +28,7 @@ from sweep_research import SweepResearchConfig, scan_sweep_setups
 SPEC_VERSION = "v073-prospective-funnel-v1"
 STRATEGY_VERSION = "0.7.3"
 MAX_EVENT_AGE_MINUTES = 90
+CAPTURE_OVERLAP_MINUTES = 15
 
 PROSPECTIVE_SCHEMA_SQL = r"""
 CREATE TABLE IF NOT EXISTS day_trade_v073_prospective_funnel_meta (
@@ -101,6 +102,29 @@ def _parse_iso(value: str | None) -> datetime | None:
         return _as_utc(datetime.fromisoformat(value))
     except (TypeError, ValueError):
         return None
+
+
+def _capture_lower_bound(
+    captured_at: datetime,
+    prospective_start_at: datetime,
+    previous_capture_at: datetime | None = None,
+) -> datetime:
+    """Return a forward-only scan bound that also catches up after worker gaps.
+
+    Normal cadence keeps re-snapshotting the recent 90-minute maturation window.
+    After a longer worker gap, the lower bound expands back to the previous
+    successful capture minus a small overlap, while never crossing the immutable
+    prospective boundary.
+    """
+    captured_at = _as_utc(captured_at)
+    prospective_start_at = _as_utc(prospective_start_at)
+    recent_bound = captured_at - timedelta(minutes=MAX_EVENT_AGE_MINUTES)
+    if previous_capture_at is None:
+        return max(prospective_start_at, recent_bound)
+    catchup_bound = _as_utc(previous_capture_at) - timedelta(
+        minutes=CAPTURE_OVERLAP_MINUTES
+    )
+    return max(prospective_start_at, min(recent_bound, catchup_bound))
 
 
 def _event_key(symbol: str, side: str, sweep_time: str) -> str:
@@ -208,6 +232,7 @@ def _analysis_snapshot_rows(
     *,
     captured_at: datetime,
     prospective_start_at: datetime,
+    previous_capture_at: datetime | None = None,
     source_commit_sha: str | None,
     volume_confirmation_ratio: float = 1.3,
     live_strict_event_keys: set[str] | None = None,
@@ -219,8 +244,11 @@ def _analysis_snapshot_rows(
 
     captured_at = _as_utc(captured_at)
     prospective_start_at = _as_utc(prospective_start_at)
-    lower_age_bound = captured_at - timedelta(minutes=MAX_EVENT_AGE_MINUTES)
-    lower_bound = max(prospective_start_at, lower_age_bound)
+    lower_bound = _capture_lower_bound(
+        captured_at,
+        prospective_start_at,
+        previous_capture_at,
+    )
     run_id = captured_at.isoformat()
     sweep_config = SweepResearchConfig(
         volume_confirmation_ratio=volume_confirmation_ratio
@@ -504,10 +532,20 @@ async def persist_v073_prospective_funnel(
     """Persist one label-free forward funnel snapshot batch."""
     captured_at = _as_utc(captured_at)
     prospective_start_at = await _ensure_prospective_boundary(connection, captured_at)
+    previous_capture_at = await connection.fetchval(
+        """
+        SELECT MAX(captured_at)
+        FROM day_trade_v073_prospective_funnel
+        WHERE spec_version = $1 AND strategy_version = $2
+        """,
+        SPEC_VERSION,
+        STRATEGY_VERSION,
+    )
     rows = _analysis_snapshot_rows(
         analyses,
         captured_at=captured_at,
         prospective_start_at=prospective_start_at,
+        previous_capture_at=previous_capture_at,
         source_commit_sha=source_commit_sha,
         volume_confirmation_ratio=volume_confirmation_ratio,
         live_strict_event_keys=_live_strict_event_keys(live_setups),
@@ -527,12 +565,14 @@ async def persist_v073_prospective_funnel(
 
 
 __all__ = [
+    "CAPTURE_OVERLAP_MINUTES",
     "MAX_EVENT_AGE_MINUTES",
     "PROSPECTIVE_SCHEMA_SQL",
     "SPEC_VERSION",
     "STRATEGY_VERSION",
     "_analysis_snapshot_rows",
     "_apply_current_execution_semantics",
+    "_capture_lower_bound",
     "_event_key",
     "_live_strict_event_keys",
     "persist_v073_prospective_funnel",

@@ -34,7 +34,9 @@ Historical diagnostics retain their technical-only short assumption because hist
 
 The first successful recorder run writes `prospective_start_at`. No sweep whose `sweep_time` is before this timestamp is persisted. There is no historical backfill.
 
-Recent events are sampled as run snapshots for up to 90 minutes after the sweep. A sweep can therefore have multiple point-in-time snapshots as reclaim/structure/volume/15m confirmation evolves.
+Under normal cadence, recent events are sampled as run snapshots for up to 90 minutes after the sweep, so a sweep can have multiple point-in-time snapshots as reclaim/structure/volume/15m confirmation evolves.
+
+If the day worker is interrupted for longer than that maturation window, the next successful recorder run catches up from the previous persisted capture with a 15-minute overlap. This catch-up remains bounded by `prospective_start_at`, so it recovers only genuinely forward events and never creates historical backfill.
 
 ## Stored data
 

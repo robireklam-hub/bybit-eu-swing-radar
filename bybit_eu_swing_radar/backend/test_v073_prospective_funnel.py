@@ -223,3 +223,28 @@ def test_live_strict_event_keys_require_exact_strict_trigger():
     assert funnel._live_strict_event_keys(setups) == {
         funnel._event_key("BTCUSDC", "long", sweep_time)
     }
+
+def test_capture_lower_bound_keeps_recent_maturation_window_on_normal_cadence():
+    prospective = datetime(2026, 8, 18, 12, 0, tzinfo=timezone.utc)
+    captured = datetime(2026, 8, 18, 15, 0, tzinfo=timezone.utc)
+    previous = captured - timedelta(minutes=15)
+    assert funnel._capture_lower_bound(captured, prospective, previous) == (
+        captured - timedelta(minutes=funnel.MAX_EVENT_AGE_MINUTES)
+    )
+
+
+def test_capture_lower_bound_catches_up_after_long_worker_gap():
+    prospective = datetime(2026, 8, 18, 12, 0, tzinfo=timezone.utc)
+    previous = datetime(2026, 8, 18, 12, 30, tzinfo=timezone.utc)
+    captured = datetime(2026, 8, 18, 16, 0, tzinfo=timezone.utc)
+    assert funnel._capture_lower_bound(captured, prospective, previous) == (
+        previous - timedelta(minutes=funnel.CAPTURE_OVERLAP_MINUTES)
+    )
+
+
+def test_capture_lower_bound_never_crosses_prospective_boundary():
+    prospective = datetime(2026, 8, 18, 13, 0, tzinfo=timezone.utc)
+    previous = datetime(2026, 8, 18, 12, 30, tzinfo=timezone.utc)
+    captured = datetime(2026, 8, 18, 16, 0, tzinfo=timezone.utc)
+    assert funnel._capture_lower_bound(captured, prospective, previous) == prospective
+
