@@ -25,4 +25,12 @@ jobs:
 
       - name: Verify durable swing liquidity forward state
         working-directory: bybit_eu_swing_radar/backend
-        run: python scripts/production_swing_liquidity_forward_status.py
+        run: |
+          python - <<'PY'
+          import os
+          from scripts.production_swing_liquidity_forward_status import run_check
+          raise SystemExit(run_check(
+              os.environ["PRODUCTION_RADAR_API_BASE_URL"],
+              os.environ["PRODUCTION_RADAR_API_KEY"],
+          ))
+          PY
