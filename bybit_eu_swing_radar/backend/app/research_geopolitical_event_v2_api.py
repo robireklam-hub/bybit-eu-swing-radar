@@ -16,6 +16,7 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException
 
 from research.geopolitical_event_shadow_v2 import (
+    EXPECTED_EVENT_COLUMNS,
     PROVIDER,
     SPEC_VERSION,
     build_snapshot,
@@ -182,6 +183,10 @@ def parse_event_zip(content: bytes) -> tuple[list[dict[str, Any]], dict[str, Any
                 total_rows += 1
                 if total_rows > MAX_EVENT_ROWS:
                     raise ValueError("GDELT Event export exceeds bounded row limit")
+                if len(columns) != EXPECTED_EVENT_COLUMNS:
+                    raise ValueError(
+                        f"GDELT Event export schema drift: expected {EXPECTED_EVENT_COLUMNS} columns, got {len(columns)}"
+                    )
                 normalized = normalize_event_columns(columns)
                 if normalized is None:
                     invalid_rows += 1
@@ -193,6 +198,8 @@ def parse_event_zip(content: bytes) -> tuple[list[dict[str, Any]], dict[str, Any
         "invalid_rows": invalid_rows,
         "zip_member": member.filename,
         "zip_uncompressed_bytes": member.file_size,
+        "schema_expected_columns": EXPECTED_EVENT_COLUMNS,
+        "schema_validated": True,
     }
 
 

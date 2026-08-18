@@ -26,9 +26,10 @@ def make_row(event_id: str = "123", quad_class: int = 4) -> str:
     row[32] = "3"
     row[33] = "4"
     row[34] = "-2.5"
-    row[51] = "UP"
-    row[56] = "20260818123000"
-    row[57] = "https://example.com/story"
+    row[51] = "4"
+    row[53] = "UP"
+    row[59] = "20260818123000"
+    row[60] = "https://example.com/story"
     return "\t".join(row)
 
 
@@ -59,13 +60,23 @@ def test_lastupdate_manifest_rejects_missing_export():
         parse_lastupdate_manifest("100 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa x.gkg.csv.zip")
 
 
-def test_event_zip_parses_valid_and_invalid_rows():
-    content = make_zip([make_row("1"), "too\tshort", make_row("2", quad_class=1)])
+def test_event_zip_parses_valid_and_semantically_invalid_rows():
+    invalid = make_row("bad").split("\t")
+    invalid[53] = "4"
+    content = make_zip([make_row("1"), "\t".join(invalid), make_row("2", quad_class=1)])
     events, meta = parse_event_zip(content)
     assert meta["total_rows"] == 3
     assert meta["valid_rows"] == 2
     assert meta["invalid_rows"] == 1
+    assert meta["schema_expected_columns"] == 61
+    assert meta["schema_validated"] is True
     assert [item["global_event_id"] for item in events] == ["1", "2"]
+
+
+def test_event_zip_fails_closed_on_column_count_drift():
+    content = make_zip([make_row("1"), "too\tshort"])
+    with pytest.raises(ValueError, match="schema drift"):
+        parse_event_zip(content)
 
 
 def test_event_zip_requires_exactly_one_member():

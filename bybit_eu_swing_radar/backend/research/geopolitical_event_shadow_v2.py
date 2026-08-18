@@ -14,7 +14,8 @@ from typing import Any, Iterable, Mapping, Sequence
 
 SPEC_VERSION = "geopolitical-event-shadow-v2"
 PROVIDER = "GDELT 2.0 Event Database"
-MIN_EVENT_COLUMNS = 61
+EXPECTED_EVENT_COLUMNS = 61
+MIN_EVENT_COLUMNS = EXPECTED_EVENT_COLUMNS
 MATERIAL_CONFLICT_QUAD_CLASS = 4
 SEVERE_NEGATIVE_GOLDSTEIN_CUTOFF = -7.0
 
@@ -50,7 +51,7 @@ def spec() -> dict[str, Any]:
         "live_strategy_mutated": False,
         "source_family": "STATIC_GDELT_EVENT_EXPORT",
         "source_resolution": "15_MINUTE_FILE",
-        "schema_min_columns": MIN_EVENT_COLUMNS,
+        "schema_expected_columns": EXPECTED_EVENT_COLUMNS,
         "material_conflict_definition": "QuadClass == 4",
         "severe_negative_goldstein_cutoff": SEVERE_NEGATIVE_GOLDSTEIN_CUTOFF,
         "historical_backfill_allowed": False,
@@ -86,7 +87,7 @@ def _float(value: Any) -> float | None:
 
 def normalize_event_columns(columns: Sequence[str]) -> dict[str, Any] | None:
     """Normalize stable GDELT 2.0 Event fields with schema sanity guards."""
-    if len(columns) < MIN_EVENT_COLUMNS:
+    if len(columns) != EXPECTED_EVENT_COLUMNS:
         return None
     global_event_id = str(columns[IDX_GLOBAL_EVENT_ID]).strip()
     quad_class = _int(columns[IDX_QUAD_CLASS])
