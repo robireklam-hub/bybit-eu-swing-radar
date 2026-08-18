@@ -16,6 +16,7 @@ jobs:
       RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
       CURRENT_DEPLOYMENT_ID: c82a3a4a-7f2f-4e46-b4cd-0bb4de98f71f
       PREVIOUS_DEPLOYMENT_ID: 856db25a-3fac-4b4c-94d7-9677c7fd31a0
+      LAST_KNOWN_GOOD_DEPLOYMENT_ID: 237ef1f3-d3fb-4467-b572-66d57edf57b0
     steps:
       - name: Read Railway runtime logs
         shell: bash
@@ -41,7 +42,12 @@ jobs:
               return payload.get('data') or {}
 
           q='query deploymentLogs($deploymentId:String!,$limit:Int){deploymentLogs(deploymentId:$deploymentId,limit:$limit){timestamp message severity}}'
-          for label, dep in [('CURRENT',os.environ['CURRENT_DEPLOYMENT_ID']),('PREVIOUS',os.environ['PREVIOUS_DEPLOYMENT_ID'])]:
+          deployments=[
+              ('CURRENT',os.environ['CURRENT_DEPLOYMENT_ID']),
+              ('PREVIOUS',os.environ['PREVIOUS_DEPLOYMENT_ID']),
+              ('LAST_KNOWN_GOOD',os.environ['LAST_KNOWN_GOOD_DEPLOYMENT_ID']),
+          ]
+          for label, dep in deployments:
               data=gql(q,{'deploymentId':dep,'limit':300})
               rows=data.get('deploymentLogs') or []
               safe=[{
