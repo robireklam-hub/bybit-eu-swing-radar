@@ -1,0 +1,110 @@
+name: Diagnose day worker cron state 25c30af
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.head_ref == 'diag/day-worker-cron-state-25c30af'
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PROJECT_ID: 846f5088-4e8b-45fe-84d9-0728542b2c36
+      ENVIRONMENT_ID: 2be04d3c-82b3-487d-930c-a4fbc7d483d8
+      DAY_SERVICE_ID: b740fd25-f72b-4392-b156-7aa3b0c5ffd4
+      EXPECTED_SHA: 25c30af2bd8b597d6eb990616ff5b525170dd25b
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 25c30af2bd8b597d6eb990616ff5b525170dd25b
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Read Railway cron and production state
+        shell: bash
+        run: |
+          python -u - <<'PY'
+          import json, os
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+
+          endpoint='https://backboard.railway.com/graphql/v2'
+          token=os.environ['RAILWAY_API_TOKEN']
+          project=os.environ['PROJECT_ID']
+          environment=os.environ['ENVIRONMENT_ID']
+          sid=os.environ['DAY_SERVICE_ID']
+          base=os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key=os.environ['PRODUCTION_RADAR_API_KEY']
+
+          def gql(query, variables=None, soft=False):
+              req=Request(endpoint,data=json.dumps({'query':query,'variables':variables or {}}).encode(),headers={'Authorization':'Bearer '+token,'Content-Type':'application/json','Accept':'application/json','User-Agent':'day-worker-cron-diag/1'})
+              with urlopen(req,timeout=25) as r: payload=json.loads(r.read().decode())
+              if payload.get('errors'):
+                  safe=[{'message':e.get('message'),'path':e.get('path')} for e in payload['errors']]
+                  if soft:
+                      return {'_errors':safe}
+                  raise RuntimeError(json.dumps(safe))
+              return payload.get('data') or {}
+
+          def get(path, params=None, auth=True):
+              url=base+path
+              if params: url+='?'+urlencode(params)
+              headers={'Accept':'application/json','User-Agent':'day-worker-cron-diag/1'}
+              if auth: headers['X-Radar-Key']=key
+              with urlopen(Request(url,headers=headers),timeout=25) as r:
+                  payload=json.loads(r.read().decode())
+              if not isinstance(payload,dict): raise RuntimeError('non-object '+path)
+              return payload
+
+          # Service-instance configuration. Keep soft because Railway schema may evolve.
+          q='query cfg($serviceId:String!,$environmentId:String!){serviceInstance(serviceId:$serviceId,environmentId:$environmentId){cronSchedule startCommand restartPolicyType restartPolicyMaxRetries}}'
+          cfg=gql(q,{'serviceId':sid,'environmentId':environment},soft=True)
+          print('SERVICE_INSTANCE='+json.dumps(cfg,sort_keys=True,default=str),flush=True)
+
+          d=gql('query deployments($input:DeploymentListInput!){deployments(input:$input,first:20){edges{node{id status createdAt updatedAt meta}}}}',{'input':{'projectId':project,'serviceId':sid}})
+          rows=[e.get('node') or {} for e in (((d.get('deployments') or {}).get('edges')) or [])]
+          safe=[]
+          for row in rows:
+              meta=row.get('meta') if isinstance(row.get('meta'),dict) else {}
+              safe.append({
+                  'id':row.get('id'),
+                  'status':row.get('status'),
+                  'createdAt':row.get('createdAt'),
+                  'updatedAt':row.get('updatedAt'),
+                  'commitHash':meta.get('commitHash') or meta.get('commitSha') or meta.get('commit'),
+              })
+          print('DAY_DEPLOYMENTS='+json.dumps(safe,sort_keys=True),flush=True)
+
+          version=get('/version',auth=False)
+          day=get('/v1/day-trade/status')
+          journal=get('/v1/day-trade/journal/summary',{'days':365,'signal_class':'all'})
+          worker=day.get('worker') or {}
+          funnel=day.get('prospective_funnel') or {}
+          latest=journal.get('latest_run') or {}
+          overall=journal.get('overall') or {}
+          print('API_VERSION='+json.dumps({'commit_sha':version.get('commit_sha')},sort_keys=True),flush=True)
+          print('DAY_STATUS='+json.dumps({
+              'checked_at':day.get('checked_at'),
+              'worker_source_commit_sha':worker.get('source_commit_sha'),
+              'worker_status':worker.get('status'),
+              'duration_seconds':worker.get('duration_seconds'),
+              'prospective_funnel_status':funnel.get('status'),
+              'prospective_funnel_source_commit_sha':funnel.get('source_commit_sha'),
+              'prospective_start_at':funnel.get('prospective_start_at'),
+          },sort_keys=True),flush=True)
+          print('JOURNAL='+json.dumps({
+              'run_at':latest.get('run_at'),
+              'strategy_version':latest.get('strategy_version'),
+              'active_signal_count':latest.get('active_signal_count'),
+              'open_count':overall.get('open_count'),
+              'triggered_trade_count':latest.get('triggered_trade_count'),
+              'shadow_trigger_count':latest.get('shadow_trigger_count'),
+          },sort_keys=True),flush=True)
+          PY
