@@ -1,0 +1,28 @@
+name: Verify geopolitical risk production 59dad0e
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 59dad0eb20087856413e8234c2bf993f5f3b48a2
+    steps:
+      - name: Check out exact merged main
+        uses: actions/checkout@v7
+        with:
+          ref: 59dad0eb20087856413e8234c2bf993f5f3b48a2
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Run exact-main geopolitical risk production smoke
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_geopolitical_risk_smoke.py
