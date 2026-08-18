@@ -1,0 +1,117 @@
+name: Diagnose liquidation coverage 6d5c4a8
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose-liquidations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 6d5c4a8da27792934e1aab562421c20a5b3d6c6b
+    steps:
+      - name: Diagnose cached liquidation coverage read-only
+        shell: python
+        run: |
+          import json, os, time, urllib.request
+
+          base = os.environ["PRODUCTION_RADAR_API_BASE_URL"].rstrip("/")
+          key = os.environ["PRODUCTION_RADAR_API_KEY"]
+          expected = os.environ["EXPECTED_SHA"]
+
+          def get(path, auth=True):
+              headers = {"Accept": "application/json"}
+              if auth:
+                  headers["X-Radar-Key"] = key
+              req = urllib.request.Request(base + path, headers=headers)
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  return json.loads(r.read().decode())
+
+          for _ in range(30):
+              try:
+                  version = get("/version", auth=False)
+                  if version.get("commit_sha") == expected:
+                      break
+              except Exception:
+                  pass
+              time.sleep(2)
+          else:
+              raise SystemExit("exact production SHA not active")
+
+          data_status = get("/v1/data-status")
+          positioning = get("/v1/research/derivatives-positioning/status")
+          top = get("/v1/top-candidates?limit=5&include_watchlist=true")
+          scan = get("/v1/scan?direction=both&limit=10&min_score=0")
+
+          def find_nodes(value, predicate, path="$"):
+              out = []
+              if isinstance(value, dict):
+                  if predicate(value):
+                      out.append((path, value))
+                  for k, v in value.items():
+                      out.extend(find_nodes(v, predicate, f"{path}.{k}"))
+              elif isinstance(value, list):
+                  for i, v in enumerate(value):
+                      out.extend(find_nodes(v, predicate, f"{path}[{i}]"))
+              return out
+
+          coinalyze_sources = [
+              x for x in (data_status.get("sources") or [])
+              if str(x.get("source", "")).lower().startswith("coinalyze")
+          ]
+          latest = positioning.get("latest") or {}
+          symbols = latest.get("symbols") or {}
+          if isinstance(symbols, list):
+              symbols = {str(x.get("symbol")): x for x in symbols if isinstance(x, dict)}
+          position_summary = {}
+          for symbol, row in symbols.items():
+              liq = (row or {}).get("liquidations") or {}
+              position_summary[symbol] = {
+                  "positioning_state": (row or {}).get("positioning_state"),
+                  "liquidation_state": liq.get("state"),
+                  "long_liquidations_usd": liq.get("long_liquidations_usd"),
+                  "short_liquidations_usd": liq.get("short_liquidations_usd"),
+                  "coverage": (row or {}).get("coverage"),
+              }
+
+          def interesting(node):
+              keys = set(node)
+              return bool(keys & {
+                  "long_liquidations_24h_usd", "short_liquidations_24h_usd",
+                  "endpoint_errors", "derivatives_status", "derivatives_status_reason"
+              })
+
+          compact_nodes = []
+          for source_name, payload in (("top", top), ("scan", scan)):
+              for path, node in find_nodes(payload, interesting):
+                  compact_nodes.append({
+                      "source": source_name,
+                      "path": path,
+                      "symbol": node.get("symbol"),
+                      "long_liquidations_24h_usd": node.get("long_liquidations_24h_usd"),
+                      "short_liquidations_24h_usd": node.get("short_liquidations_24h_usd"),
+                      "endpoint_errors": node.get("endpoint_errors"),
+                      "derivatives_status": node.get("derivatives_status"),
+                      "derivatives_status_reason": node.get("derivatives_status_reason"),
+                      "availability": node.get("availability"),
+                  })
+
+          output = {
+              "commit_sha": version.get("commit_sha"),
+              "coinalyze_data_status": coinalyze_sources,
+              "positioning_snapshot": {
+                  "captured_at": latest.get("captured_at"),
+                  "source_commit_sha": latest.get("source_commit_sha"),
+                  "coverage": latest.get("coverage"),
+                  "upstream": latest.get("upstream"),
+                  "symbols": position_summary,
+              },
+              "swing_liquidation_nodes": compact_nodes,
+          }
+          print("LIQUIDATION_DIAGNOSTIC=" + json.dumps(output, sort_keys=True, default=str))
