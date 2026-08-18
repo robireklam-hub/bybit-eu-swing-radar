@@ -159,18 +159,20 @@ def _configure_service(environment_id: str, service_id: str) -> None:
 def _deploy(environment_id: str, service_id: str, commit_sha: str) -> str:
     mutation = """
     mutation deploy($serviceId:String!,$environmentId:String!,$commitSha:String!){
-      serviceInstanceDeployV2(serviceId:$serviceId,environmentId:$environmentId,commitSha:$commitSha){id status}
+      serviceInstanceDeployV2(serviceId:$serviceId,environmentId:$environmentId,commitSha:$commitSha)
     }
     """
-    deployment = _gql(
-        mutation,
-        {
-            "serviceId": service_id,
-            "environmentId": environment_id,
-            "commitSha": commit_sha,
-        },
-    ).get("serviceInstanceDeployV2") or {}
-    deployment_id = str(deployment.get("id") or "")
+    deployment_id = str(
+        _gql(
+            mutation,
+            {
+                "serviceId": service_id,
+                "environmentId": environment_id,
+                "commitSha": commit_sha,
+            },
+        ).get("serviceInstanceDeployV2")
+        or ""
+    )
     if not deployment_id:
         raise RuntimeError("Railway deploy returned no deployment id")
     return deployment_id
