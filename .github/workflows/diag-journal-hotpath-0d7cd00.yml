@@ -1,0 +1,130 @@
+name: Diagnose journal hotpath 0d7cd00
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.head_ref == 'diag/journal-hotpath-0d7cd00'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      DEPLOYMENT_ID: 46fe6417-d376-46ac-8e01-cb73f77b9717
+      EXPECTED_SHA: 0d7cd00e56731553353301da9126e29970f13092
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+    steps:
+      - name: Verify exact-main worker completion and persistence
+        shell: bash
+        run: |
+          python -u - <<'PY'
+          import json, os, time
+          from datetime import datetime, timezone
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+
+          railway='https://backboard.railway.com/graphql/v2'
+          token=os.environ['RAILWAY_API_TOKEN']
+          deployment=os.environ['DEPLOYMENT_ID']
+          expected=os.environ['EXPECTED_SHA']
+          base=os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key=os.environ['PRODUCTION_RADAR_API_KEY']
+          old_checked=datetime.fromisoformat('2026-08-18T13:15:42.947907+00:00')
+          old_journal=datetime.fromisoformat('2026-08-18T13:15:45.912014+00:00')
+
+          def gql(query, variables):
+              req=Request(railway,data=json.dumps({'query':query,'variables':variables}).encode(),headers={
+                  'Authorization':'Bearer '+token,'Content-Type':'application/json','Accept':'application/json','User-Agent':'journal-hotpath-diag/1'})
+              with urlopen(req,timeout=25) as r: payload=json.loads(r.read().decode())
+              if payload.get('errors'):
+                  raise RuntimeError(json.dumps([{'message':e.get('message'),'path':e.get('path')} for e in payload['errors']]))
+              return payload.get('data') or {}
+
+          def get(path, params=None, auth=True):
+              url=base+path
+              if params: url+='?'+urlencode(params)
+              headers={'Accept':'application/json','User-Agent':'journal-hotpath-diag/1'}
+              if auth: headers['X-Radar-Key']=key
+              with urlopen(Request(url,headers=headers),timeout=25) as r: payload=json.loads(r.read().decode())
+              if not isinstance(payload,dict): raise RuntimeError('non-object '+path)
+              return payload
+
+          def parse_dt(value):
+              if not value: return None
+              return datetime.fromisoformat(str(value).replace('Z','+00:00'))
+
+          last_state={}
+          last_logs=[]
+          for attempt in range(1,19):
+              try:
+                  version=get('/version',auth=False)
+                  day=get('/v1/day-trade/status')
+                  journal=get('/v1/day-trade/journal/summary',{'days':365,'signal_class':'all'})
+                  worker=day.get('worker') or {}
+                  funnel=day.get('prospective_funnel') or {}
+                  latest=journal.get('latest_run') or {}
+                  overall=journal.get('overall') or {}
+                  checked=parse_dt(day.get('checked_at'))
+                  journal_at=parse_dt(latest.get('run_at'))
+
+                  try:
+                      q='query deploymentLogs($deploymentId:String!,$limit:Int){deploymentLogs(deploymentId:$deploymentId,limit:$limit){timestamp message severity}}'
+                      rows=(gql(q,{'deploymentId':deployment,'limit':300}).get('deploymentLogs') or [])
+                      last_logs=[{'timestamp':x.get('timestamp'),'severity':x.get('severity'),'message':x.get('message')} for x in rows]
+                  except Exception as exc:
+                      last_logs=[{'message':'RUNTIME_LOGS_UNAVAILABLE:'+type(exc).__name__}]
+
+                  messages='\n'.join(str(x.get('message') or '') for x in last_logs)
+                  last_state={
+                      'attempt':attempt,
+                      'api_sha':version.get('commit_sha'),
+                      'checked_at':day.get('checked_at'),
+                      'worker_sha':worker.get('source_commit_sha'),
+                      'worker_status':worker.get('status'),
+                      'duration_seconds':worker.get('duration_seconds'),
+                      'funnel_status':funnel.get('status'),
+                      'funnel_enabled':funnel.get('enabled'),
+                      'funnel_reason':funnel.get('reason'),
+                      'funnel_source_sha':funnel.get('source_commit_sha'),
+                      'journal_run_at':latest.get('run_at'),
+                      'journal_strategy_version':latest.get('strategy_version'),
+                      'journal_active':latest.get('active_signal_count'),
+                      'journal_open':overall.get('open_count'),
+                      'runtime_start':('Day worker starting:' in messages and expected in messages),
+                      'runtime_pre_persist':'Day worker pre-persist:' in messages,
+                      'runtime_complete':'Day worker complete:' in messages,
+                  }
+                  ok=(
+                      version.get('commit_sha') == expected
+                      and worker.get('source_commit_sha') == expected
+                      and str(worker.get('status') or '').lower() == 'ok'
+                      and checked is not None and checked > old_checked
+                      and latest.get('strategy_version') == '0.7.3'
+                      and journal_at is not None and journal_at > old_journal
+                      and latest.get('active_signal_count') == overall.get('open_count')
+                      and funnel.get('status') == 'DISABLED'
+                      and funnel.get('enabled') is False
+                      and funnel.get('reason') == 'INLINE_RECORDER_DISABLED_FOR_LIVE_WORKER_ISOLATION'
+                      and last_state['runtime_start']
+                      and last_state['runtime_pre_persist']
+                      and last_state['runtime_complete']
+                  )
+                  print('POLL='+json.dumps(last_state,sort_keys=True,default=str),flush=True)
+                  if ok:
+                      print('FINAL_RUNTIME_LOGS='+json.dumps(last_logs,sort_keys=True,default=str),flush=True)
+                      print('DAY-WORKER JOURNAL HOTPATH FIX VERIFIED.',flush=True)
+                      raise SystemExit(0)
+              except Exception as exc:
+                  print('POLL_ERROR='+type(exc).__name__+':'+str(exc)[:300],flush=True)
+              if attempt < 18:
+                  time.sleep(20)
+
+          print('FINAL_STATE='+json.dumps(last_state,sort_keys=True,default=str),flush=True)
+          print('FINAL_RUNTIME_LOGS='+json.dumps(last_logs,sort_keys=True,default=str),flush=True)
+          raise SystemExit('verification did not reach PASS')
+          PY
