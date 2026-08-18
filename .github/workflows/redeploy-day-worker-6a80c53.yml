@@ -1,4 +1,4 @@
-name: Redeploy day worker exact main 6a80c53
+name: Verify day worker exact main 6a80c53
 
 on:
   pull_request:
@@ -8,15 +8,13 @@ permissions:
   contents: read
 
 jobs:
-  redeploy-and-verify:
+  verify-exact-main:
     if: github.head_ref == 'ops/redeploy-day-worker-6a80c53'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 12
     env:
-      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
-      PROJECT_ID: 846f5088-4e8b-45fe-84d9-0728542b2c36
-      ENVIRONMENT_ID: 2be04d3c-82b3-487d-930c-a4fbc7d483d8
       EXPECTED_SHA: 6a80c53f17eebd4972a527055f258b953ca6b44a
+      DEPLOY_REQUESTED_AT: '2026-08-18T11:45:44+00:00'
       PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
       PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
     steps:
@@ -28,170 +26,62 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Identify day worker, deploy exact commit, and verify fresh run
+      - name: Verify exact-main day-worker run and journal isolation
         shell: bash
         run: |
-          python - <<'PY'
-          import json, os, re, time
+          python -u - <<'PY'
+          import json, os, time
           from datetime import datetime, timezone
           from urllib.parse import urlencode
           from urllib.request import Request, urlopen
 
-          endpoint = 'https://backboard.railway.com/graphql/v2'
-          token = os.environ['RAILWAY_API_TOKEN']
-          project = os.environ['PROJECT_ID']
-          environment = os.environ['ENVIRONMENT_ID']
           expected = os.environ['EXPECTED_SHA']
+          deploy_requested_at = datetime.fromisoformat(os.environ['DEPLOY_REQUESTED_AT']).astimezone(timezone.utc)
           base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
           radar_key = os.environ['PRODUCTION_RADAR_API_KEY']
 
-          def gql(query, variables=None):
-              body = json.dumps({'query': query, 'variables': variables or {}}).encode()
-              req = Request(endpoint, data=body, headers={
-                  'Authorization': 'Bearer ' + token,
-                  'Content-Type': 'application/json',
-                  'Accept': 'application/json',
-                  'User-Agent': 'day-worker-exact-main-redeploy/1',
-              })
-              with urlopen(req, timeout=30) as r:
-                  payload = json.loads(r.read().decode())
-              if payload.get('errors'):
-                  safe = [{'message': e.get('message'), 'path': e.get('path')} for e in payload['errors']]
-                  raise RuntimeError('Railway GraphQL errors: ' + json.dumps(safe))
-              return payload.get('data') or {}
-
-          def get(path, params=None, auth=True, timeout=30):
+          def get(path, params=None, auth=True, timeout=20):
               url = base + path
               if params:
                   url += '?' + urlencode(params)
-              headers = {'Accept':'application/json','User-Agent':'day-worker-exact-main-redeploy/1'}
+              headers = {'Accept': 'application/json', 'User-Agent': 'day-worker-exact-main-verify/1'}
               if auth:
                   headers['X-Radar-Key'] = radar_key
-              with urlopen(Request(url, headers=headers), timeout=timeout) as r:
-                  p = json.loads(r.read().decode())
-              if not isinstance(p, dict):
+              with urlopen(Request(url, headers=headers), timeout=timeout) as response:
+                  payload = json.loads(response.read().decode())
+              if not isinstance(payload, dict):
                   raise RuntimeError('non-object API payload for ' + path)
-              return p
+              return payload
 
-          services_data = gql('''
-            query project($id: String!) {
-              project(id: $id) {
-                services { edges { node { id name } } }
-              }
-            }
-          ''', {'id': project})
-          edges = (((services_data.get('project') or {}).get('services') or {}).get('edges') or [])
-          services = [e.get('node') or {} for e in edges]
-          safe_services = [{'id': s.get('id'), 'name': s.get('name')} for s in services]
-          print('RAILWAY_SERVICES=' + json.dumps(safe_services, sort_keys=True))
-
-          def is_day_worker(name):
-              n = re.sub(r'[^a-z0-9]+', '-', str(name or '').lower()).strip('-')
-              excluded = ('swing','flow','microstructure','backtest','diagnostic','postgres','api')
-              return 'day' in n and 'worker' in n and not any(x in n for x in excluded)
-
-          candidates = [s for s in services if is_day_worker(s.get('name'))]
-          if len(candidates) != 1:
-              raise SystemExit('FAIL day-worker service identification is ambiguous: ' + json.dumps([
-                  {'id': s.get('id'), 'name': s.get('name')} for s in candidates
-              ]))
-          service = candidates[0]
-          service_id = str(service['id'])
-          print('DAY_WORKER_SERVICE=' + json.dumps({'id': service_id, 'name': service.get('name')}))
-
-          vars_data = gql('''
-            query variables($projectId: String!, $environmentId: String!, $serviceId: String) {
-              variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId)
-            }
-          ''', {'projectId': project, 'environmentId': environment, 'serviceId': service_id})
-          var_obj = vars_data.get('variables') or {}
-          keys = sorted(var_obj.keys()) if isinstance(var_obj, dict) else []
-          print('DAY_WORKER_VARIABLE_KEYS=' + json.dumps([k for k in keys if k.startswith('DAY_') or k.startswith('RAILWAY_')]))
-          if 'RAILWAY_SERVICE_NAME' in var_obj and str(var_obj['RAILWAY_SERVICE_NAME']) != str(service.get('name')):
-              raise SystemExit('FAIL Railway service identity mismatch')
-
-          schema = gql('''
-            query {
-              __type(name: "Mutation") {
-                fields {
-                  name
-                  args { name type { kind name ofType { kind name } } }
-                  type { kind name ofType { kind name } }
-                }
-              }
-            }
-          ''')
-          fields = ((schema.get('__type') or {}).get('fields') or [])
-          deploy_field = next((f for f in fields if f.get('name') == 'serviceInstanceDeployV2'), None)
-          if not deploy_field:
-              raise SystemExit('FAIL serviceInstanceDeployV2 mutation unavailable')
-          arg_names = {a.get('name') for a in deploy_field.get('args') or []}
-          required = {'serviceId','environmentId','commitSha'}
-          if not required.issubset(arg_names):
-              raise SystemExit('FAIL serviceInstanceDeployV2 contract changed: args=' + json.dumps(sorted(arg_names)))
-          out_type = deploy_field.get('type') or {}
-          scalar = out_type.get('kind') in {'SCALAR','ENUM'} or (out_type.get('kind') == 'NON_NULL' and (out_type.get('ofType') or {}).get('kind') in {'SCALAR','ENUM'})
-          selection = '' if scalar else ' { id }'
-          mutation = 'mutation Deploy($serviceId:String!,$environmentId:String!,$commitSha:String!){serviceInstanceDeployV2(serviceId:$serviceId,environmentId:$environmentId,commitSha:$commitSha)' + selection + '}'
-
-          deploy_started = datetime.now(timezone.utc)
-          deployed = gql(mutation, {'serviceId': service_id, 'environmentId': environment, 'commitSha': expected})
-          deployment_result = deployed.get('serviceInstanceDeployV2')
-          deployment_id = deployment_result if isinstance(deployment_result, str) else (deployment_result or {}).get('id')
-          if not deployment_id:
-              raise SystemExit('FAIL exact-commit deployment did not return an id')
-          print('DAY_WORKER_DEPLOYMENT_ID=' + str(deployment_id))
-          print('DEPLOY_REQUESTED_AT=' + deploy_started.isoformat())
-
-          # Wait until Railway reports this exact deployment as terminal SUCCESS.
-          query_deploy = '''
-            query deployments($input: DeploymentListInput!) {
-              deployments(input: $input, first: 10) {
-                edges { node { id status createdAt } }
-              }
-            }
-          '''
-          deployment_ok = False
-          for attempt in range(100):
-              d = gql(query_deploy, {'input': {'projectId': project, 'serviceId': service_id}})
-              rows = [e.get('node') or {} for e in (((d.get('deployments') or {}).get('edges')) or [])]
-              row = next((r for r in rows if str(r.get('id')) == str(deployment_id)), None)
-              if row:
-                  status = str(row.get('status') or '')
-                  if attempt % 5 == 0:
-                      print('DEPLOYMENT_STATUS=' + status)
-                  if status == 'SUCCESS':
-                      deployment_ok = True
-                      break
-                  if status in {'FAILED','CRASHED','REMOVED','SKIPPED'}:
-                      raise SystemExit('FAIL day-worker deployment terminal state=' + status)
-              time.sleep(4)
-          if not deployment_ok:
-              raise SystemExit('FAIL day-worker exact-main deployment timeout')
-
-          # API itself must still serve the exact same main SHA.
-          version = get('/version', auth=False, timeout=15)
-          if version.get('commit_sha') != expected:
-              raise SystemExit('FAIL API exact-main SHA changed unexpectedly')
-
-          def parse_dt(v):
-              if not v:
+          def parse_dt(value):
+              if not value:
                   return None
               try:
-                  return datetime.fromisoformat(str(v).replace('Z','+00:00')).astimezone(timezone.utc)
+                  return datetime.fromisoformat(str(value).replace('Z', '+00:00')).astimezone(timezone.utc)
               except ValueError:
                   return None
 
-          # Wait for a NEW worker run from the exact commit, then prove journal isolation again.
+          version = get('/version', auth=False, timeout=15)
+          if version.get('commit_sha') != expected:
+              raise SystemExit('FAIL API exact-main SHA mismatch: ' + str(version.get('commit_sha')))
+
           evidence = None
-          for attempt in range(150):
+          for attempt in range(100):
               day = get('/v1/day-trade/status')
               worker = day.get('worker') or {}
-              worker_sha = worker.get('source_commit_sha')
-              journal = get('/v1/day-trade/journal/summary', {'days':365,'signal_class':'all'})
+              journal = get('/v1/day-trade/journal/summary', {'days': 365, 'signal_class': 'all'})
               latest = journal.get('latest_run') or {}
               run_at = parse_dt(latest.get('run_at'))
-              if worker_sha == expected and run_at and run_at >= deploy_started:
+              worker_sha = worker.get('source_commit_sha')
+
+              if attempt % 6 == 0:
+                  print('DAY_WORKER_VERIFY_PROGRESS=' + json.dumps({
+                      'seen_worker_sha': worker_sha,
+                      'latest_run_at': latest.get('run_at'),
+                      'expected_sha': expected,
+                  }, sort_keys=True), flush=True)
+
+              if worker_sha == expected and run_at and run_at >= deploy_requested_at:
                   overall = journal.get('overall') or {}
                   active = int(latest.get('active_signal_count') or 0)
                   open_count = int(overall.get('open_count') or 0)
@@ -205,17 +95,16 @@ jobs:
                       'shadow_trigger_count': latest.get('shadow_trigger_count'),
                       'new_signal_count': latest.get('new_signal_count'),
                   }
-                  print('EXACT_MAIN_DAY_WORKER_EVIDENCE=' + json.dumps(evidence, sort_keys=True))
+                  print('EXACT_MAIN_DAY_WORKER_EVIDENCE=' + json.dumps(evidence, sort_keys=True), flush=True)
                   if str(latest.get('strategy_version') or '') != '0.7.3':
                       raise SystemExit('FAIL latest journal run is not v0.7.3')
                   if active != open_count:
                       raise SystemExit(f'FAIL exact-main journal isolation mismatch active={active} open={open_count}')
                   break
-              if attempt % 10 == 0:
-                  print('WAITING_FOR_EXACT_WORKER_RUN=' + json.dumps({'seen_worker_sha': worker_sha, 'latest_run_at': latest.get('run_at')}))
               time.sleep(5)
-          if evidence is None:
-              raise SystemExit('FAIL no fresh exact-main day-worker run observed')
 
-          print('DAY-WORKER EXACT-MAIN REDEPLOY AND JOURNAL ISOLATION VERIFIED.')
+          if evidence is None:
+              raise SystemExit('FAIL no fresh exact-main day-worker run observed after the deploy request')
+
+          print('DAY-WORKER EXACT-MAIN DEPLOY AND JOURNAL ISOLATION VERIFIED.', flush=True)
           PY
