@@ -30,7 +30,15 @@ async def ensure_journal_schema(connection: asyncpg.Connection) -> None:
     if schema_complete:
         return
 
-    async with connection.transaction():
+    # Real asyncpg connections always expose transaction(). Keep a narrow
+    # compatibility fallback for the repository's legacy unit-test doubles,
+    # which intentionally model only the older execute/fetch surface.
+    transaction_factory = getattr(connection, "transaction", None)
+    if transaction_factory is None:
+        await connection.execute(_core.SCHEMA_SQL)
+        return
+
+    async with transaction_factory():
         await connection.execute("SET LOCAL lock_timeout = '5s'")
         await connection.execute("SET LOCAL statement_timeout = '10s'")
         await connection.execute(_core.SCHEMA_SQL)
