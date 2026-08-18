@@ -1,0 +1,30 @@
+name: Verify Coinalyze semantics exact main 6a80c53
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  semantic-smoke:
+    if: github.head_ref == 'ops/verify-coinalyze-main-6a80c53'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 6a80c53f17eebd4972a527055f258b953ca6b44a
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 6a80c53f17eebd4972a527055f258b953ca6b44a
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Verify production swing candidate Coinalyze semantics
+        working-directory: bybit_eu_swing_radar/backend
+        run: python -u scripts/production_swing_coinalyze_smoke.py
