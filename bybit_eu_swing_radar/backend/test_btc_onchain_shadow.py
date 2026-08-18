@@ -2,6 +2,7 @@ from datetime import date, datetime, timezone
 
 from research.btc_onchain_shadow import (
     COIN_METRICS,
+    COMMUNITY_EXCLUDED_METRICS,
     build_snapshot,
     closed_daily_rows,
     compact_difficulty,
@@ -41,6 +42,9 @@ def test_spec_is_context_only_and_has_no_directional_score():
     assert payload["promotion_allowed"] is False
     assert "bull_bear_score" in payload["forbidden"]
     assert payload["coin_metrics"]["metrics"] == list(COIN_METRICS)
+    assert "DiffMean" not in COIN_METRICS
+    assert "DiffMean" in COMMUNITY_EXCLUDED_METRICS
+    assert payload["coin_metrics"]["excluded_metrics"] == COMMUNITY_EXCLUDED_METRICS
 
 
 def test_closed_daily_rows_excludes_partial_current_day():
