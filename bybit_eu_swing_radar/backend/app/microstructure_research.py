@@ -27,6 +27,7 @@ from research.microstructure.effect_analysis import (
     select_earliest_ready_cohort,
 )
 from research.microstructure.readiness import get_readiness
+from app.research_market_regime_api import attach_market_regime_research
 
 logger = logging.getLogger(__name__)
 
@@ -500,3 +501,5 @@ def attach_microstructure_research(
                 "error_type": type(exc).__name__,
                 "error": str(exc)[:1000],
             }
+
+    attach_market_regime_research(app, require_api_key)

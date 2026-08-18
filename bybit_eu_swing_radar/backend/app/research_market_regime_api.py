@@ -234,6 +234,8 @@ async def status_payload() -> dict[str, Any]:
 
 
 def attach_market_regime_research(app: FastAPI, require_api_key: Callable[..., Any]) -> None:
+    if not callable(getattr(app, "post", None)):
+        return
     @app.get(
         "/v1/research/market-regime/spec",
         dependencies=[Depends(require_api_key)],
