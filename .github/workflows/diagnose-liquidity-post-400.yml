@@ -1,0 +1,91 @@
+name: Diagnose swing liquidity POST 400
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  diagnose-post:
+    if: github.head_ref == 'ops/diagnose-liquidity-post-400'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      ARTIFACT_ID: '9323267604'
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Retry immutable failed snapshot and expose sanitized HTTP detail
+        shell: bash
+        run: |
+          python -u - <<'PY'
+          import io, json, os, zipfile
+          from urllib.error import HTTPError
+          from urllib.request import Request, urlopen
+
+          repo = os.environ['REPO']
+          gh_token = os.environ['GH_TOKEN']
+          artifact_id = os.environ['ARTIFACT_ID']
+          artifact_url = f'https://api.github.com/repos/{repo}/actions/artifacts/{artifact_id}/zip'
+          req = Request(artifact_url, headers={
+              'Accept':'application/vnd.github+json',
+              'Authorization':'Bearer ' + gh_token,
+              'X-GitHub-Api-Version':'2022-11-28',
+              'User-Agent':'liquidity-post-diagnostic/1',
+          })
+          with urlopen(req, timeout=30) as response:
+              archive = response.read()
+          with zipfile.ZipFile(io.BytesIO(archive)) as zf:
+              names = zf.namelist()
+              target = next((n for n in names if n.endswith('swing-liquidity-shadow.json')), None)
+              if not target:
+                  raise SystemExit('FAIL immutable snapshot missing from artifact')
+              snapshot = json.loads(zf.read(target).decode())
+
+          safe_meta = {
+              'captured_at': snapshot.get('captured_at'),
+              'candidate_count': snapshot.get('candidate_count'),
+              'study': snapshot.get('study'),
+              'research_only': snapshot.get('research_only'),
+              'label_blind': snapshot.get('label_blind'),
+              'live_gate_unchanged': snapshot.get('live_gate_unchanged'),
+          }
+          print('RETRY_SNAPSHOT_META=' + json.dumps(safe_meta, sort_keys=True), flush=True)
+
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          api_key = os.environ['PRODUCTION_RADAR_API_KEY']
+          body = json.dumps(snapshot, ensure_ascii=False, separators=(',',':')).encode()
+          post = Request(
+              base + '/v1/research/swing-liquidity/forward-snapshot',
+              data=body,
+              method='POST',
+              headers={
+                  'Accept':'application/json',
+                  'Content-Type':'application/json',
+                  'X-Radar-Key':api_key,
+                  'User-Agent':'liquidity-post-diagnostic/1',
+              },
+          )
+          try:
+              with urlopen(post, timeout=30) as response:
+                  result = json.loads(response.read().decode())
+              print('RETRY_PERSIST_RESULT=' + json.dumps(result, sort_keys=True), flush=True)
+              print('SWING LIQUIDITY FAILED SNAPSHOT RETRY PERSISTED.', flush=True)
+          except HTTPError as exc:
+              raw = exc.read().decode(errors='replace')[:4000]
+              try:
+                  detail = json.loads(raw)
+              except Exception:
+                  detail = {'body': raw}
+              print('PERSIST_HTTP_ERROR=' + json.dumps({'status':exc.code,'reason':exc.reason,'detail':detail}, sort_keys=True), flush=True)
+              raise SystemExit(1)
+          PY
