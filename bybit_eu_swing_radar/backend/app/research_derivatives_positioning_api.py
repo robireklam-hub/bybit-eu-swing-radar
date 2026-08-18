@@ -128,11 +128,45 @@ async def _load_inputs(connection: asyncpg.Connection) -> tuple[list[str], dict[
         symbol = str(row["cache_key"]).split(":", 1)[-1].upper()
         flow_map[symbol] = _decode(row["payload"])
 
-    latest_scan_row = await connection.fetchrow(
-        "SELECT payload FROM radar_cache WHERE cache_key='latest_scan' LIMIT 1"
-    )
-    latest_scan = _decode(latest_scan_row["payload"]) if latest_scan_row else {}
-    liquidation_map = _extract_liquidation_context(latest_scan, set(symbols))
+    liquidation_map: dict[str, Any] = {}
+    try:
+        liquidation_row = await connection.fetchrow(
+            """
+            SELECT captured_at,payload
+            FROM research_liquidation_context_snapshots
+            WHERE spec_version='liquidation-context-shadow-v1'
+              AND captured_at <= NOW()
+              AND captured_at >= NOW() - INTERVAL '2 hours'
+            ORDER BY captured_at DESC
+            LIMIT 1
+            """
+        )
+    except asyncpg.UndefinedTableError:
+        liquidation_row = None
+
+    if liquidation_row is not None:
+        liquidation_snapshot = _decode(liquidation_row["payload"])
+        raw_liquidations = liquidation_snapshot.get("symbols")
+        wanted = set(symbols)
+        if isinstance(raw_liquidations, Mapping):
+            for symbol, item in raw_liquidations.items():
+                normalized = str(symbol).upper()
+                if (
+                    normalized in wanted
+                    and isinstance(item, Mapping)
+                    and item.get("coverage") is True
+                ):
+                    row = dict(item)
+                    row.setdefault("symbol", normalized)
+                    liquidation_map[normalized] = row
+        elif isinstance(raw_liquidations, list):
+            for item in raw_liquidations:
+                if not isinstance(item, Mapping):
+                    continue
+                normalized = str(item.get("symbol") or "").upper()
+                if normalized in wanted and item.get("coverage") is True:
+                    liquidation_map[normalized] = dict(item)
+
     return symbols, regime_snapshot, flow_map, liquidation_map
 
 
@@ -166,6 +200,7 @@ async def build_current_snapshot() -> dict[str, Any]:
         "market_regime_captured_at": regime_snapshot.get("captured_at"),
         "flow_cache_symbols": sorted(flow_map.keys()),
         "liquidation_cache_symbols": sorted(liquidation_map.keys()),
+        "liquidation_source_spec_version": "liquidation-context-shadow-v1",
     }
     return snapshot
 

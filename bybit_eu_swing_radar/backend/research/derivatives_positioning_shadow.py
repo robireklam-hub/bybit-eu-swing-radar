@@ -65,7 +65,7 @@ def spec() -> dict[str, Any]:
         "inputs": {
             "price_oi_flow": "existing day_trade_flow cache; Bybit global public linear derivatives plus USDC spot context",
             "funding": "existing day_trade_flow cache; Bybit global public linear derivatives",
-            "liquidations": "existing cached Coinalyze context when available",
+            "liquidations": "liquidation-context-shadow-v1 forward snapshot; Coinalyze derivatives context only",
             "market_regime": "market-regime-shadow-v1 forward snapshot",
         },
         "thresholds": {
