@@ -1,0 +1,29 @@
+name: Verify production microstructure data access e654389
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-production-data-access:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: e6543891f6e8b50df8d0cf406423afaece0fb698
+    steps:
+      - name: Check out exact production commit
+        uses: actions/checkout@v7
+        with:
+          ref: e6543891f6e8b50df8d0cf406423afaece0fb698
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Verify exact-SHA production microstructure bucket access
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_data_access_smoke.py
