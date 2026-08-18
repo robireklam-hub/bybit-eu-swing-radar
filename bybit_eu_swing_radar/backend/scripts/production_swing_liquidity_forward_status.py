@@ -12,23 +12,24 @@ from urllib.request import Request, urlopen
 STATUS_PATH = "/v1/research/swing-liquidity/forward-status"
 EXPECTED_STUDY = "swing-liquidity-validation-v1"
 MAX_CAPTURE_AGE_SECONDS = 20 * 60
+EXACT_CAPTURE_TOLERANCE_SECONDS = 1.0
 BELOW_100K_TIERS = frozenset(("LT_25K", "25K_50K", "50K_100K", "<25k", "25k-50k", "50k-100k"))
 AT_OR_ABOVE_100K_TIERS = frozenset(("100K_250K", "250K_1M", "GE_1M", "100-250k", "250k-1m", ">=1m"))
 
 
-def parse_timestamp(value: Any) -> datetime:
+def parse_timestamp(value: Any, field: str = "last_capture_at") -> datetime:
     if not isinstance(value, str) or not value.strip():
-        raise ValueError("last_capture_at is missing")
+        raise ValueError(f"{field} is missing")
     parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     if parsed.tzinfo is None:
-        raise ValueError("last_capture_at must be timezone-aware")
+        raise ValueError(f"{field} must be timezone-aware")
     return parsed.astimezone(timezone.utc)
 
 
 def fetch_json(url: str, api_key: str, timeout: float) -> dict[str, Any]:
     request = Request(url, method="GET", headers={
         "Accept": "application/json",
-        "User-Agent": "bybit-eu-swing-liquidity-forward-status/1",
+        "User-Agent": "bybit-eu-swing-liquidity-forward-status/2",
         "X-Radar-Key": api_key,
     })
     with urlopen(request, timeout=timeout) as response:
@@ -50,7 +51,12 @@ def _has_positive_tier_count(tiers: dict[str, Any], accepted: frozenset[str]) ->
     return False
 
 
-def validate_status(payload: dict[str, Any], *, now: datetime | None = None) -> list[str]:
+def validate_status(
+    payload: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    expected_capture_at: datetime | None = None,
+) -> list[str]:
     errors: list[str] = []
     if payload.get("research_only") is not True:
         errors.append("research_only_not_true")
@@ -83,6 +89,10 @@ def validate_status(payload: dict[str, Any], *, now: datetime | None = None) -> 
             errors.append("last_capture_at_in_future")
         elif age > MAX_CAPTURE_AGE_SECONDS:
             errors.append(f"stale_last_capture:{age:.1f}s")
+        if expected_capture_at is not None:
+            delta = abs((last_capture - expected_capture_at.astimezone(timezone.utc)).total_seconds())
+            if delta > EXACT_CAPTURE_TOLERANCE_SECONDS:
+                errors.append(f"exact_capture_not_persisted:{delta:.3f}s")
 
     turnover_tiers = payload.get("turnover_tiers")
     spread_tiers = payload.get("spread_tiers")
@@ -98,9 +108,15 @@ def validate_status(payload: dict[str, Any], *, now: datetime | None = None) -> 
     return errors
 
 
-def run_check(base_url: str, api_key: str, *, timeout: float = 15.0,
-              fetch: Callable[[str, str, float], dict[str, Any]] = fetch_json,
-              now: datetime | None = None) -> int:
+def run_check(
+    base_url: str,
+    api_key: str,
+    *,
+    timeout: float = 15.0,
+    fetch: Callable[[str, str, float], dict[str, Any]] = fetch_json,
+    now: datetime | None = None,
+    expected_capture_at: datetime | None = None,
+) -> int:
     payload = fetch(f"{base_url.rstrip('/')}{STATUS_PATH}", api_key, timeout)
     safe = {
         "research_only": payload.get("research_only"),
@@ -110,6 +126,7 @@ def run_check(base_url: str, api_key: str, *, timeout: float = 15.0,
         "capture_count": payload.get("capture_count"),
         "first_capture_at": payload.get("first_capture_at"),
         "last_capture_at": payload.get("last_capture_at"),
+        "expected_capture_at": expected_capture_at.isoformat() if expected_capture_at else None,
         "candidate_observations": payload.get("candidate_observations"),
         "orderbook_errors": payload.get("orderbook_errors"),
         "turnover_tiers": payload.get("turnover_tiers"),
@@ -118,23 +135,25 @@ def run_check(base_url: str, api_key: str, *, timeout: float = 15.0,
         "validation_target_matured_events": payload.get("validation_target_matured_events"),
     }
     print("SWING_LIQUIDITY_FORWARD_STATUS=" + json.dumps(safe, sort_keys=True))
-    errors = validate_status(payload, now=now)
+    errors = validate_status(payload, now=now, expected_capture_at=expected_capture_at)
     if errors:
         for error in errors:
             print(f"FAIL {error}")
         return 1
-    print("SWING LIQUIDITY DURABLE FORWARD CAPTURE VERIFIED.")
+    print("SWING LIQUIDITY EXACT DURABLE FORWARD CAPTURE VERIFIED.")
     return 0
 
 
 def main() -> int:
     base_url = os.getenv("PRODUCTION_RADAR_API_BASE_URL", "").strip()
     api_key = os.getenv("PRODUCTION_RADAR_API_KEY", "")
-    if not base_url or not api_key:
+    expected_raw = os.getenv("EXPECTED_SWING_LIQUIDITY_CAPTURE_AT", "").strip()
+    if not base_url or not api_key or not expected_raw:
         print("FAIL required production status configuration is missing")
         return 1
     try:
-        return run_check(base_url, api_key)
+        expected_capture_at = parse_timestamp(expected_raw, "EXPECTED_SWING_LIQUIDITY_CAPTURE_AT")
+        return run_check(base_url, api_key, expected_capture_at=expected_capture_at)
     except Exception as exc:
         print(f"FAIL request_error={type(exc).__name__}")
         return 1
