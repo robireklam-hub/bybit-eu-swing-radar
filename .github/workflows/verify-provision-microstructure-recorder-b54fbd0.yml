@@ -1,4 +1,4 @@
-name: Diagnose Railway scope for recorder provisioning b54fbd0
+name: Provision standalone microstructure recorder b54fbd0
 
 on:
   pull_request:
@@ -8,62 +8,92 @@ permissions:
   contents: read
 
 jobs:
-  diagnose:
+  provision:
     if: github.head_ref == 'ops/provision-microstructure-recorder-b54fbd0'
     runs-on: ubuntu-latest
     container: ghcr.io/railwayapp/cli:latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     env:
       RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
       PROJECT_ID: 846f5088-4e8b-45fe-84d9-0728542b2c36
       ENVIRONMENT_ID: 2be04d3c-82b3-487d-930c-a4fbc7d483d8
+      API_SERVICE_ID: 6b92a19d-a178-4eab-9b8a-9fed1855319b
+      RECORDER_SERVICE: microstructure-recorder
+      TARGET_SHA: b54fbd01e086d1f7d1b57d6324d32241e11e2d89
     steps:
-      - name: Verify account/workspace token presence
+      - uses: actions/checkout@v7
+        with:
+          ref: b54fbd01e086d1f7d1b57d6324d32241e11e2d89
+
+      - name: Verify Railway account token
         run: |
           if [ -z "${RAILWAY_API_TOKEN:-}" ]; then
             echo "FAIL RAILWAY_API_TOKEN is not configured"
             exit 1
           fi
-          echo "RAILWAY_API_TOKEN present; value redacted."
+          railway whoami --json >/tmp/whoami.json
+          echo "Railway account token authenticated; identity output suppressed."
 
-      - name: Probe user identity without failing workspace-scoped tokens
+      - name: Link production project
+        run: railway link --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID"
+
+      - name: Ensure empty recorder service exists
         run: |
-          if railway whoami --json >/tmp/whoami.json 2>/tmp/whoami.err; then
-            echo "WHOAMI_OK"
-            cat /tmp/whoami.json
+          if railway service status --service "$RECORDER_SERVICE" --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" --json >/tmp/existing.json 2>/dev/null; then
+            echo "Recorder service already exists."
           else
-            echo "WHOAMI_UNAVAILABLE"
-            sed -E 's/[A-Za-z0-9_-]{24,}/[redacted]/g' /tmp/whoami.err
+            railway add --service "$RECORDER_SERVICE" --json >/tmp/created.json
+            echo "Recorder service created."
           fi
 
-      - name: Probe visible projects and workspace metadata independently
+      - name: Copy only required database variable
         run: |
-          if railway list --json >/tmp/projects.json 2>/tmp/projects.err; then
-            echo "PROJECT_LIST_OK"
-            cat /tmp/projects.json
-          else
-            echo "PROJECT_LIST_UNAVAILABLE"
-            sed -E 's/[A-Za-z0-9_-]{24,}/[redacted]/g' /tmp/projects.err
+          api_vars="$(railway variable list --service "$API_SERVICE_ID" --environment "$ENVIRONMENT_ID" --kv)"
+          database_url="$(printf '%s\n' "$api_vars" | sed -n 's/^DATABASE_URL=//p' | head -n 1)"
+          if [ -z "$database_url" ]; then
+            echo "FAIL DATABASE_URL is unavailable on API service"
+            exit 1
           fi
+          printf '%s' "$database_url" | railway variable set DATABASE_URL --stdin --service "$RECORDER_SERVICE" --environment "$ENVIRONMENT_ID" --skip-deploys >/dev/null
+          unset api_vars database_url
+          echo "DATABASE_URL copied without logging its value."
 
-      - name: Probe direct project link independently
+      - name: Configure recorder variables
         run: |
-          if railway link --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" --json >/tmp/link.json 2>/tmp/link.err; then
-            echo "PROJECT_LINK_OK"
-            cat /tmp/link.json
-          else
-            echo "PROJECT_LINK_UNAVAILABLE"
-            sed -E 's/[A-Za-z0-9_-]{24,}/[redacted]/g' /tmp/link.err
-          fi
+          railway variable set \
+            MICROSTRUCTURE_RECORDER_ENABLED=true \
+            MICROSTRUCTURE_SYMBOLS=BTCUSDC,ETHUSDC,SOLUSDC \
+            MICROSTRUCTURE_BUCKET_SECONDS=5 \
+            MICROSTRUCTURE_DEPTH=50 \
+            MICROSTRUCTURE_SOURCE_COMMIT_SHA="$TARGET_SHA" \
+            --service "$RECORDER_SERVICE" \
+            --environment "$ENVIRONMENT_ID" \
+            --skip-deploys >/dev/null
 
-      - name: Classify token usability
+      - name: Configure standalone start and restart policy
         run: |
-          if grep -q 'PROJECT_LINK_OK' "$GITHUB_STEP_SUMMARY" 2>/dev/null; then
-            exit 0
-          fi
-          if [ -s /tmp/projects.json ] && grep -q "$PROJECT_ID" /tmp/projects.json; then
-            echo "TOKEN_CAN_SEE_PROJECT_BUT_LINK_NEEDS_WORKSPACE_SCOPE"
-            exit 0
-          fi
-          echo "TOKEN_CANNOT_ACCESS_TARGET_PROJECT"
+          railway environment edit --environment "$ENVIRONMENT_ID" --service-config "$RECORDER_SERVICE" startCommand "python -m research.microstructure.standalone" --message "Configure standalone microstructure recorder start command" >/dev/null
+          railway environment edit --environment "$ENVIRONMENT_ID" --service-config "$RECORDER_SERVICE" restartPolicyType "ON_FAILURE" --message "Configure microstructure recorder restart policy" >/dev/null
+          railway environment edit --environment "$ENVIRONMENT_ID" --service-config "$RECORDER_SERVICE" restartPolicyMaxRetries "10" --message "Configure microstructure recorder retry ceiling" >/dev/null
+
+      - name: Deploy exact backend source to recorder service
+        run: railway up bybit_eu_swing_radar/backend --service "$RECORDER_SERVICE" --environment "$ENVIRONMENT_ID" --project "$PROJECT_ID" --path-as-root --detach
+
+      - name: Wait for recorder deployment success
+        run: |
+          for i in $(seq 1 60); do
+            railway service status --service "$RECORDER_SERVICE" --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" --json >/tmp/recorder-status.json || true
+            if grep -Eq '"status"[[:space:]]*:[[:space:]]*"SUCCESS"' /tmp/recorder-status.json; then
+              echo "MICROSTRUCTURE RECORDER SERVICE DEPLOYMENT SUCCESS."
+              exit 0
+            fi
+            if grep -Eq '"status"[[:space:]]*:[[:space:]]*"(FAILED|CRASHED|REMOVED)"' /tmp/recorder-status.json; then
+              echo "FAIL recorder service entered terminal failure state"
+              cat /tmp/recorder-status.json
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "FAIL recorder service did not reach SUCCESS"
+          cat /tmp/recorder-status.json || true
           exit 1
