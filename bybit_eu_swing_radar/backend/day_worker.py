@@ -92,6 +92,10 @@ DAY_MIN_EXPANSION_SCORE = env_float("DAY_MIN_EXPANSION_SCORE", 55.0)
 DAY_MIN_DIRECTION_SCORE = env_float("DAY_MIN_DIRECTION_SCORE", 35.0)
 DAY_MIN_QUALITY_SCORE = env_float("DAY_MIN_QUALITY_SCORE", 65.0)
 DAY_TRIGGER_VOLUME_RATIO = env_float("DAY_TRIGGER_VOLUME_RATIO", 1.3)
+DAY_PROSPECTIVE_FUNNEL_TIMEOUT_SECONDS = min(
+    max(env_float("DAY_PROSPECTIVE_FUNNEL_TIMEOUT_SECONDS", 8.0), 1.0),
+    30.0,
+)
 DAY_BARRIER_LOOKBACK_15M = min(max(env_int("DAY_BARRIER_LOOKBACK_15M", 96), 32), 240)
 DAY_BARRIER_PIVOT_LEFT = min(max(env_int("DAY_BARRIER_PIVOT_LEFT", 2), 1), 5)
 DAY_BARRIER_PIVOT_RIGHT = min(max(env_int("DAY_BARRIER_PIVOT_RIGHT", 2), 1), 5)
@@ -1223,14 +1227,32 @@ async def persist_day_results(
                 # Research-only sidecar: isolate recorder SQL in a savepoint so
                 # any research failure cannot abort live journal/cache persistence.
                 async with connection.transaction():
-                    funnel_status = await persist_v073_prospective_funnel(
-                        connection,
-                        analyses,
-                        captured_at=datetime.fromisoformat(scan["data_as_of"]),
-                        source_commit_sha=SOURCE_COMMIT_SHA,
-                        volume_confirmation_ratio=DAY_TRIGGER_VOLUME_RATIO,
-                        live_setups=setups,
+                    funnel_status = await asyncio.wait_for(
+                        persist_v073_prospective_funnel(
+                            connection,
+                            analyses,
+                            captured_at=datetime.fromisoformat(scan["data_as_of"]),
+                            source_commit_sha=SOURCE_COMMIT_SHA,
+                            volume_confirmation_ratio=DAY_TRIGGER_VOLUME_RATIO,
+                            live_setups=setups,
+                        ),
+                        timeout=DAY_PROSPECTIVE_FUNNEL_TIMEOUT_SECONDS,
                     )
+            except TimeoutError:
+                funnel_status = {
+                    "status": "DEGRADED",
+                    "research_only": True,
+                    "label_free": True,
+                    "outcome_labels_stored": False,
+                    "spec_version": "v073-prospective-funnel-v1",
+                    "strategy_version": DAY_STRATEGY_VERSION,
+                    "captured_at": scan["data_as_of"],
+                    "source_commit_sha": SOURCE_COMMIT_SHA,
+                    "reason": (
+                        "PROSPECTIVE_FUNNEL_TIMEOUT_AFTER_"
+                        f"{DAY_PROSPECTIVE_FUNNEL_TIMEOUT_SECONDS:g}S"
+                    ),
+                }
             except Exception as exc:
                 funnel_status = {
                     "status": "DEGRADED",
