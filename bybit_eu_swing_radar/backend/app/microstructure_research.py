@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any, Callable, Iterable, Mapping
 
 import asyncpg
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException, Query
 
 from research.microstructure.alignment import (
     alignment_spec,
@@ -19,6 +19,7 @@ from research.microstructure.alignment import (
     sample_readiness,
 )
 from research.microstructure.collector import MicrostructureConfig, MicrostructureRecorder
+from research.microstructure.data_access import load_recent_bucket_payload
 from research.microstructure.effect_analysis import (
     analyze_preregistered_effects,
     effect_spec,
@@ -367,6 +368,37 @@ def attach_microstructure_research(
                 "error_type": type(exc).__name__,
                 "error": str(exc)[:1000],
             }
+
+    @app.get(
+        "/v1/research/microstructure/buckets",
+        dependencies=[Depends(require_api_key)],
+        include_in_schema=False,
+    )
+    async def microstructure_buckets(
+        symbol: str = Query(..., min_length=3, max_length=30),
+        lookback_minutes: int = Query(15, ge=1, le=360),
+        limit: int = Query(240, ge=1, le=1000),
+    ) -> dict[str, Any]:
+        """Return bounded label-free persisted 5-second market microstructure buckets."""
+        try:
+            _ensure_task_started()
+            await asyncio.sleep(0)
+            recorder = _ensure_recorder()
+            return await load_recent_bucket_payload(
+                recorder.config.database_url,
+                symbol,
+                recorder.config.symbols,
+                lookback_minutes=lookback_minutes,
+                limit=limit,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("microstructure bucket query failed")
+            raise HTTPException(
+                status_code=503,
+                detail="Research microstructure data is temporarily unavailable",
+            ) from exc
 
     @app.get(
         "/v1/research/microstructure/alignment-status",
