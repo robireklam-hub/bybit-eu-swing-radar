@@ -1,0 +1,37 @@
+name: Verify deployed microstructure c521
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.head_ref == 'diag/railway-main-4363c01'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: c521db2c358102791309be3ef9ee45794571dc0d
+    steps:
+      - name: Check out last successful API SHA
+        uses: actions/checkout@v7
+        with:
+          ref: c521db2c358102791309be3ef9ee45794571dc0d
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Check recorder and readiness
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_smoke.py
+      - name: Check alignment sample status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_alignment_status.py
+      - name: Check effect status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_effect_status.py
