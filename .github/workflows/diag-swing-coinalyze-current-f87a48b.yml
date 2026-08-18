@@ -1,0 +1,30 @@
+name: Diagnose swing Coinalyze current f87a48b
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  semantic-smoke:
+    if: github.head_ref == 'diag/coinalyze-current-f87a48b'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: f87a48b5ace9f479549a0f9892902bbba3cae489
+    steps:
+      - name: Check out current main
+        uses: actions/checkout@v7
+        with:
+          ref: f87a48b5ace9f479549a0f9892902bbba3cae489
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Verify swing candidate Coinalyze semantics
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_coinalyze_smoke.py
