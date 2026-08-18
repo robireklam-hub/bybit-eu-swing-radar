@@ -54,3 +54,13 @@ def test_v2_does_not_read_live_trade_state_or_outcomes():
     ):
         assert forbidden not in core
         assert forbidden not in api
+
+
+def test_v2_schema_guard_is_exact_and_fail_closed():
+    root = Path(__file__).resolve().parent
+    core = (root / "research" / "geopolitical_event_shadow_v2.py").read_text()
+    api = (root / "app" / "research_geopolitical_event_v2_api.py").read_text()
+    assert "EXPECTED_EVENT_COLUMNS = 61" in core
+    assert "len(columns) != EXPECTED_EVENT_COLUMNS" in core
+    assert "GDELT Event export schema drift" in api
+    assert '"schema_validated": True' in api

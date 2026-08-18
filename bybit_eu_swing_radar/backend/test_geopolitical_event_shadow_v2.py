@@ -39,9 +39,10 @@ def event_columns(
     row[32] = str(sources)
     row[33] = str(articles)
     row[34] = str(tone)
-    row[51] = country
-    row[56] = "20260818123000"
-    row[57] = "https://example.com/story"
+    row[51] = "4"  # ActionGeo_Type
+    row[53] = country  # ActionGeo_CountryCode
+    row[59] = "20260818123000"  # DATEADDED
+    row[60] = "https://example.com/story"  # SOURCEURL
     return row
 
 
@@ -54,10 +55,11 @@ def test_spec_is_research_only_and_not_promotable():
     assert payload["promotion_allowed"] is False
     assert payload["live_strategy_mutated"] is False
     assert payload["historical_backfill_allowed"] is False
+    assert payload["schema_expected_columns"] == 61
     assert payload["material_conflict_definition"] == "QuadClass == 4"
 
 
-def test_normalize_event_columns_uses_stable_core_positions():
+def test_normalize_event_columns_uses_current_v2_geo_positions():
     item = normalize_event_columns(event_columns("123"))
     assert item is not None
     assert item["global_event_id"] == "123"
@@ -68,13 +70,27 @@ def test_normalize_event_columns_uses_stable_core_positions():
     assert item["num_mentions"] == 5
     assert item["num_sources"] == 3
     assert item["num_articles"] == 4
+    assert item["action_geo_type"] == 4
     assert item["action_geo_country_code"] == "UP"
+    assert item["date_added"] == "20260818123000"
+    assert item["source_url"] == "https://example.com/story"
 
 
-def test_short_or_invalid_rows_are_rejected():
+def test_short_or_schema_invalid_rows_are_rejected():
     assert normalize_event_columns(["x"] * 20) is None
+    assert normalize_event_columns([""] * 58) is None
+    assert normalize_event_columns([""] * 62) is None
+
     row = event_columns("123")
     row[29] = "not-an-int"
+    assert normalize_event_columns(row) is None
+
+    row = event_columns("123")
+    row[53] = "4"
+    assert normalize_event_columns(row) is None
+
+    row = event_columns("123")
+    row[59] = "not-a-dateadded"
     assert normalize_event_columns(row) is None
 
 

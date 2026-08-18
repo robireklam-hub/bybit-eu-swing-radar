@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -90,6 +91,10 @@ def validate_capture(payload: dict[str, Any], expected_sha: str) -> tuple[bool, 
         return False, "download_url_not_event_export"
     if not source.get("actual_md5"):
         return False, "source_md5_missing"
+    if int(source.get("schema_expected_columns") or 0) != 61:
+        return False, "unexpected_event_schema_column_count"
+    if source.get("schema_validated") is not True:
+        return False, "event_schema_not_validated"
 
     coverage = payload.get("coverage") or {}
     total_rows = int(coverage.get("total_rows") or 0)
@@ -107,6 +112,11 @@ def validate_capture(payload: dict[str, Any], expected_sha: str) -> tuple[bool, 
         return False, "root_event_count_invalid"
     if int(material.get("event_count") or 0) > valid_rows:
         return False, "material_conflict_count_invalid"
+    for bucket_name, bucket in (("all", all_events), ("material", material)):
+        for item in bucket.get("top_action_countries") or []:
+            key = str(item.get("key") or "")
+            if re.fullmatch(r"[A-Z]{2}", key) is None:
+                return False, f"invalid_action_country_code:{bucket_name}:{key}"
     quad_counts = context.get("quad_class_counts") or {}
     if sum(int(value or 0) for value in quad_counts.values()) != valid_rows:
         return False, "quad_class_distribution_mismatch"

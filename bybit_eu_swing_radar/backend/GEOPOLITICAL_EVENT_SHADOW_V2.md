@@ -30,7 +30,7 @@ One source export file is treated as one point-in-time observation. No full-text
 - `DATEADDED`
 - `SOURCEURL`
 
-The parser requires at least the stable 58-column core record and ignores additional columns rather than depending on them.
+The current v2 export contract is **exactly 61 columns**. The parser fails closed on any different column count. `ActionGeo_CountryCode` is read from the 54th field, `DATEADDED` from the 60th, and `SOURCEURL` from the 61st. Non-empty action-country values must match the two-letter FIPS geo-code shape and `DATEADDED` must be a 14-digit provider timestamp.
 
 ## Descriptive context
 
