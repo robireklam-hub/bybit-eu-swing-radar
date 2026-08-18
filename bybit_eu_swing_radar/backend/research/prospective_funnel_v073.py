@@ -405,7 +405,8 @@ async def _cumulative_status(
             reclaim_confirmed,structure_shift_5m,volume_confirmed,
             structure_confirmed_15m,candidate_built,pass_tradeable,
             pass_side_execution_model,pass_expansion,pass_direction,pass_quality,
-            pass_setup,pass_target_path,pass_rr,pass_strict_trade
+            pass_setup,pass_target_path,pass_rr,pass_strict_trade,
+            live_strict_trigger_observed
         FROM day_trade_v073_prospective_funnel
         WHERE spec_version = $1 AND strategy_version = $2
         ORDER BY event_key, captured_at DESC
@@ -450,6 +451,9 @@ async def _cumulative_status(
     side_counts = Counter(str(row["side"]) for row in latest)
     symbols = sorted({str(row["symbol"]) for row in latest})
     current_side_counts = Counter(str(row["side"]) for row in current_rows)
+    exact_live_strict_events = sum(
+        1 for row in latest if bool(row["live_strict_trigger_observed"])
+    )
 
     return {
         "status": "COMPLETE",
@@ -471,6 +475,7 @@ async def _cumulative_status(
         "cumulative": {
             "distinct_sweep_events": len(latest),
             "total_snapshots": total_snapshots,
+            "exact_live_strict_trigger_events": exact_live_strict_events,
             "symbols_observed": len(symbols),
             "symbol_list": symbols,
             "side_event_counts": dict(sorted(side_counts.items())),
