@@ -27,25 +27,18 @@ jobs:
           railway deployment list --service "$PROSPECTIVE_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --limit 8 --json >/tmp/deployments.json
           railway logs --service "$PROSPECTIVE_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --latest --build --lines 150 --json >/tmp/build.json 2>/tmp/build.err || true
           railway logs --service "$PROSPECTIVE_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --latest --deployment --lines 200 --json >/tmp/runtime.json 2>/tmp/runtime.err || true
-          python - <<'PY'
-          import pathlib, re
 
-          token = pathlib.Path('/tmp/nonexistent').read_text() if False else ''
+          redact() {
+            sed -E \
+              -e 's#postgres(ql)?://[^[:space:]"\\]+#postgresql://***#Ig' \
+              -e 's#((api[_-]?key|token|secret)[=:][[:space:]]*)[^[:space:],"}]+#\1***#Ig'
+          }
 
-          def sanitize(text: str) -> str:
-              text = re.sub(r'postgres(?:ql)?://[^\s"\\]+', 'postgresql://***', text, flags=re.I)
-              text = re.sub(r'(?i)(api[_-]?key|token|secret)([=:]\s*)([^\s,"}]+)', r'\1\2***', text)
-              return text
-
-          for label, path in (
-              ('DEPLOYMENTS', '/tmp/deployments.json'),
-              ('BUILD_LOGS', '/tmp/build.json'),
-              ('BUILD_STDERR', '/tmp/build.err'),
-              ('RUNTIME_LOGS', '/tmp/runtime.json'),
-              ('RUNTIME_STDERR', '/tmp/runtime.err'),
-          ):
-              p = pathlib.Path(path)
-              text = p.read_text(errors='replace') if p.exists() else ''
-              print(label + '=')
-              print(sanitize(text)[-20000:])
-          PY
+          for path in /tmp/deployments.json /tmp/build.json /tmp/build.err /tmp/runtime.json /tmp/runtime.err; do
+            echo "===== $path ====="
+            if [ -s "$path" ]; then
+              tail -c 20000 "$path" | redact
+            else
+              echo EMPTY
+            fi
+          done
