@@ -84,7 +84,8 @@ jobs:
               keys = set(node)
               return bool(keys & {
                   "long_liquidations_24h_usd", "short_liquidations_24h_usd",
-                  "endpoint_errors", "derivatives_status", "derivatives_status_reason"
+                  "endpoint_errors", "derivatives_status", "derivatives_status_reason",
+                  "market_symbol"
               })
 
           compact_nodes = []
@@ -94,6 +95,11 @@ jobs:
                       "source": source_name,
                       "path": path,
                       "symbol": node.get("symbol"),
+                      "market_symbol": node.get("market_symbol"),
+                      "exchange": node.get("exchange"),
+                      "quote_asset": node.get("quote_asset"),
+                      "open_interest_usd": node.get("open_interest_usd"),
+                      "funding_rate": node.get("funding_rate"),
                       "long_liquidations_24h_usd": node.get("long_liquidations_24h_usd"),
                       "short_liquidations_24h_usd": node.get("short_liquidations_24h_usd"),
                       "endpoint_errors": node.get("endpoint_errors"),
