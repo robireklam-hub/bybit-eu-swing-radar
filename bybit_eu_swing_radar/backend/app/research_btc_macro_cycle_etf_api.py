@@ -14,6 +14,8 @@ import asyncpg
 import httpx
 from fastapi import Depends, FastAPI, HTTPException
 
+from app.research_btc_onchain_api import attach_btc_onchain_research
+
 from research.btc_macro_cycle_etf_shadow import (
     SPEC_VERSION,
     build_snapshot,
@@ -413,6 +415,8 @@ async def status_payload() -> dict[str, Any]:
 
 
 def attach_btc_macro_cycle_etf_research(app: FastAPI, require_api_key: Callable[..., Any]) -> None:
+    attach_btc_onchain_research(app, require_api_key)
+
     @app.get(
         "/v1/research/btc-macro-cycle-etf/spec",
         dependencies=[Depends(require_api_key)],
