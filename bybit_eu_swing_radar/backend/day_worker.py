@@ -31,6 +31,7 @@ import asyncpg
 import httpx
 
 from journal import persist_day_journal
+from research.prospective_funnel_v073 import persist_v073_prospective_funnel
 from sweep_research import SweepResearchConfig, latest_bar_sweep_setup
 
 from worker import (
@@ -1203,6 +1204,7 @@ async def persist_day_results(
     setups: list[dict[str, Any]],
     status: dict[str, Any],
     bars_by_symbol: dict[str, list[Bar]],
+    analyses: list[DayAnalysis],
 ) -> dict[str, Any]:
     connection = await asyncpg.connect(DATABASE_URL, timeout=30)
     try:
@@ -1216,6 +1218,33 @@ async def persist_day_results(
             )
             scan["journal"] = journal_status
             status["journal"] = journal_status
+
+            try:
+                # Research-only sidecar: isolate recorder SQL in a savepoint so
+                # any research failure cannot abort live journal/cache persistence.
+                async with connection.transaction():
+                    funnel_status = await persist_v073_prospective_funnel(
+                        connection,
+                        analyses,
+                        captured_at=datetime.fromisoformat(scan["data_as_of"]),
+                        source_commit_sha=SOURCE_COMMIT_SHA,
+                        volume_confirmation_ratio=DAY_TRIGGER_VOLUME_RATIO,
+                        live_setups=setups,
+                    )
+            except Exception as exc:
+                funnel_status = {
+                    "status": "DEGRADED",
+                    "research_only": True,
+                    "label_free": True,
+                    "outcome_labels_stored": False,
+                    "spec_version": "v073-prospective-funnel-v1",
+                    "strategy_version": DAY_STRATEGY_VERSION,
+                    "captured_at": scan["data_as_of"],
+                    "source_commit_sha": SOURCE_COMMIT_SHA,
+                    "reason": str(exc),
+                }
+            scan["prospective_funnel"] = funnel_status
+            status["prospective_funnel"] = funnel_status
 
             await upsert_cache(connection, "day_trade_scan", scan)
             await upsert_cache(connection, "day_trade_status", status)
@@ -1547,6 +1576,7 @@ async def run() -> None:
             all_candidates,
             status,
             bars_by_symbol,
+            analyses,
         )
         print(
             "Day worker complete: "
