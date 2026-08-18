@@ -96,6 +96,9 @@ DAY_PROSPECTIVE_FUNNEL_TIMEOUT_SECONDS = min(
     max(env_float("DAY_PROSPECTIVE_FUNNEL_TIMEOUT_SECONDS", 8.0), 1.0),
     30.0,
 )
+DAY_PROSPECTIVE_FUNNEL_INLINE_ENABLED = os.getenv(
+    "DAY_PROSPECTIVE_FUNNEL_INLINE_ENABLED", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
 DAY_BARRIER_LOOKBACK_15M = min(max(env_int("DAY_BARRIER_LOOKBACK_15M", 96), 32), 240)
 DAY_BARRIER_PIVOT_LEFT = min(max(env_int("DAY_BARRIER_PIVOT_LEFT", 2), 1), 5)
 DAY_BARRIER_PIVOT_RIGHT = min(max(env_int("DAY_BARRIER_PIVOT_RIGHT", 2), 1), 5)
@@ -1223,24 +1226,53 @@ async def persist_day_results(
             scan["journal"] = journal_status
             status["journal"] = journal_status
 
-            try:
-                # Research-only sidecar: isolate recorder SQL in a savepoint so
-                # any research failure cannot abort live journal/cache persistence.
-                async with connection.transaction():
-                    funnel_status = await asyncio.wait_for(
-                        persist_v073_prospective_funnel(
-                            connection,
-                            analyses,
-                            captured_at=datetime.fromisoformat(scan["data_as_of"]),
-                            source_commit_sha=SOURCE_COMMIT_SHA,
-                            volume_confirmation_ratio=DAY_TRIGGER_VOLUME_RATIO,
-                            live_setups=setups,
+            if DAY_PROSPECTIVE_FUNNEL_INLINE_ENABLED:
+                try:
+                    # Research-only sidecar: opt-in only. The default live worker
+                    # path skips this recorder so research cannot block production.
+                    async with connection.transaction():
+                        funnel_status = await asyncio.wait_for(
+                            persist_v073_prospective_funnel(
+                                connection,
+                                analyses,
+                                captured_at=datetime.fromisoformat(scan["data_as_of"]),
+                                source_commit_sha=SOURCE_COMMIT_SHA,
+                                volume_confirmation_ratio=DAY_TRIGGER_VOLUME_RATIO,
+                                live_setups=setups,
+                            ),
+                            timeout=DAY_PROSPECTIVE_FUNNEL_TIMEOUT_SECONDS,
+                        )
+                except TimeoutError:
+                    funnel_status = {
+                        "status": "DEGRADED",
+                        "research_only": True,
+                        "label_free": True,
+                        "outcome_labels_stored": False,
+                        "spec_version": "v073-prospective-funnel-v1",
+                        "strategy_version": DAY_STRATEGY_VERSION,
+                        "captured_at": scan["data_as_of"],
+                        "source_commit_sha": SOURCE_COMMIT_SHA,
+                        "reason": (
+                            "PROSPECTIVE_FUNNEL_TIMEOUT_AFTER_"
+                            f"{DAY_PROSPECTIVE_FUNNEL_TIMEOUT_SECONDS:g}S"
                         ),
-                        timeout=DAY_PROSPECTIVE_FUNNEL_TIMEOUT_SECONDS,
-                    )
-            except TimeoutError:
+                    }
+                except Exception as exc:
+                    funnel_status = {
+                        "status": "DEGRADED",
+                        "research_only": True,
+                        "label_free": True,
+                        "outcome_labels_stored": False,
+                        "spec_version": "v073-prospective-funnel-v1",
+                        "strategy_version": DAY_STRATEGY_VERSION,
+                        "captured_at": scan["data_as_of"],
+                        "source_commit_sha": SOURCE_COMMIT_SHA,
+                        "reason": str(exc),
+                    }
+            else:
                 funnel_status = {
-                    "status": "DEGRADED",
+                    "status": "DISABLED",
+                    "enabled": False,
                     "research_only": True,
                     "label_free": True,
                     "outcome_labels_stored": False,
@@ -1248,22 +1280,7 @@ async def persist_day_results(
                     "strategy_version": DAY_STRATEGY_VERSION,
                     "captured_at": scan["data_as_of"],
                     "source_commit_sha": SOURCE_COMMIT_SHA,
-                    "reason": (
-                        "PROSPECTIVE_FUNNEL_TIMEOUT_AFTER_"
-                        f"{DAY_PROSPECTIVE_FUNNEL_TIMEOUT_SECONDS:g}S"
-                    ),
-                }
-            except Exception as exc:
-                funnel_status = {
-                    "status": "DEGRADED",
-                    "research_only": True,
-                    "label_free": True,
-                    "outcome_labels_stored": False,
-                    "spec_version": "v073-prospective-funnel-v1",
-                    "strategy_version": DAY_STRATEGY_VERSION,
-                    "captured_at": scan["data_as_of"],
-                    "source_commit_sha": SOURCE_COMMIT_SHA,
-                    "reason": str(exc),
+                    "reason": "INLINE_RECORDER_DISABLED_FOR_LIVE_WORKER_ISOLATION",
                 }
             scan["prospective_funnel"] = funnel_status
             status["prospective_funnel"] = funnel_status
@@ -1322,6 +1339,11 @@ async def run() -> None:
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL is not configured")
 
+    print(
+        f"Day worker starting: strategy={DAY_STRATEGY_VERSION}, "
+        f"source_commit_sha={SOURCE_COMMIT_SHA or 'UNKNOWN'}",
+        flush=True,
+    )
     started = datetime.now(timezone.utc)
     timeout = httpx.Timeout(30.0, connect=15.0)
     limits = httpx.Limits(max_connections=10, max_keepalive_connections=10)
@@ -1593,6 +1615,11 @@ async def run() -> None:
         bars_by_symbol = {
             item.instrument.symbol: item.bars_5m for item in fast_results
         }
+        print(
+            f"Day worker pre-persist: fast={len(fast_results)}, "
+            f"deep={len(analyses)}, candidates={len(all_candidates)}",
+            flush=True,
+        )
         journal_status = await persist_day_results(
             scan,
             all_candidates,
