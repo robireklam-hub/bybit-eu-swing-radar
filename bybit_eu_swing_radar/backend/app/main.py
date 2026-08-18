@@ -417,3 +417,9 @@ attach_derivatives_positioning_research(app, require_api_key)
 from app.research_event_tokenomics_api import attach_event_tokenomics_research
 
 attach_event_tokenomics_research(app, require_api_key)
+
+# Research-only BTC macro/cycle/ETF shadow. It records descriptive context
+# and has no strategy/scoring/eligibility/execution mutation path.
+from app.research_btc_macro_cycle_etf_api import attach_btc_macro_cycle_etf_research
+
+attach_btc_macro_cycle_etf_research(app, require_api_key)

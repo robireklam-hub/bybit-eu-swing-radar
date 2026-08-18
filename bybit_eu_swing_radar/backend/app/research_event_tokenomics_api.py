@@ -13,6 +13,8 @@ import asyncpg
 import httpx
 from fastapi import Depends, FastAPI, HTTPException
 
+from research.bls_schedule_fallback import embedded_bls_2026_events
+
 from research.event_tokenomics_shadow import (
     SPEC_VERSION,
     build_snapshot,
@@ -432,10 +434,21 @@ async def _load_tracked_symbols(connection: asyncpg.Connection) -> list[str]:
 
 
 async def _fetch_bls(client: httpx.AsyncClient) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    response = await client.get(BLS_ICS_URL)
-    response.raise_for_status()
-    events = parse_bls_ics(response.text)
-    return events, _source_status("LIVE", events=len(events), official=True, url=BLS_ICS_URL)
+    try:
+        response = await client.get(BLS_ICS_URL)
+        response.raise_for_status()
+        events = parse_bls_ics(response.text)
+        return events, _source_status("LIVE", events=len(events), official=True, url=BLS_ICS_URL)
+    except Exception as exc:
+        events = embedded_bls_2026_events()
+        return events, _source_status(
+            "PARTIAL",
+            events=len(events),
+            official=True,
+            url=BLS_ICS_URL,
+            fallback_mode="EMBEDDED_OFFICIAL_2026",
+            reason=f"{type(exc).__name__}: {str(exc)[:120]}",
+        )
 
 
 async def _fetch_bybit(client: httpx.AsyncClient, tracked: list[str]) -> tuple[list[dict[str, Any]], dict[str, Any]]:

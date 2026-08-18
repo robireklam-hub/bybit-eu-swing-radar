@@ -175,7 +175,12 @@ async def _fetch_btc_price(client: httpx.AsyncClient) -> tuple[dict[str, Any], d
     payload = response.json()
     if int(payload.get("retCode", -1)) != 0:
         raise RuntimeError(f"Bybit kline error {payload.get('retCode')}")
-    return summarize_btc_price(payload), _source_status("LIVE", provider="Bybit EU", symbol="BTCUSDC", url=url)
+    day_start_ms = int(datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+    result = dict(payload.get("result") or {})
+    rows = result.get("list") or []
+    result["list"] = [row for row in rows if isinstance(row, (list, tuple)) and row and int(row[0]) < day_start_ms]
+    closed_payload = {**payload, "result": result}
+    return summarize_btc_price(closed_payload), _source_status("LIVE", provider="Bybit EU", symbol="BTCUSDC", closed_daily_only=True, url=url)
 
 
 async def _fetch_fred_series(client: httpx.AsyncClient, name: str, series_id: str) -> tuple[str, dict[str, Any], dict[str, Any]]:
