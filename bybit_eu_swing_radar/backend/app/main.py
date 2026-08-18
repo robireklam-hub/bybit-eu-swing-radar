@@ -453,3 +453,9 @@ attach_sector_rotation_research(app, require_api_key)
 from app.research_cross_layer_context_v2_api import attach_cross_layer_context_v2_research
 
 attach_cross_layer_context_v2_research(app, require_api_key)
+
+# Research-only prospective Signal-Time Context Freeze v2. V1 remains
+# immutable; V2 accepts only signals opened after the first Cross-Layer v2 snapshot.
+from app.research_signal_context_freeze_v2_api import attach_signal_context_freeze_v2_research
+
+attach_signal_context_freeze_v2_research(app, require_api_key)
