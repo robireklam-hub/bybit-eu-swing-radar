@@ -1,27 +1,25 @@
 name: Diag microstructure current 00cf
 
 on:
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize]
+  push:
+    branches: [diag/microstructure-current-00cf]
 
 permissions:
   contents: read
 
 jobs:
   verify:
-    if: github.head_ref == 'diag/microstructure-current-00cf'
     runs-on: ubuntu-latest
     timeout-minutes: 8
     env:
       PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
       PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
-      EXPECTED_SHA: ${{ github.event.pull_request.base.sha }}
+      EXPECTED_SHA: 00cf37d8e0814ca5c837f29614afc3bb34942b73
     steps:
       - name: Check out exact current main
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: 00cf37d8e0814ca5c837f29614afc3bb34942b73
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
