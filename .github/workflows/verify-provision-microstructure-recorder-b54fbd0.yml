@@ -1,4 +1,4 @@
-name: Cut over to standalone microstructure recorder b54fbd0
+name: Roll back standalone microstructure recorder b54fbd0
 
 on:
   pull_request:
@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  cutover:
+  rollback:
     if: github.head_ref == 'ops/provision-microstructure-recorder-b54fbd0'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -17,6 +17,7 @@ jobs:
       PROJECT_ID: 846f5088-4e8b-45fe-84d9-0728542b2c36
       ENVIRONMENT_ID: 2be04d3c-82b3-487d-930c-a4fbc7d483d8
       API_SERVICE_ID: 6b92a19d-a178-4eab-9b8a-9fed1855319b
+      STANDALONE_SERVICE_ID: 61664eb1-4a59-4947-bae9-18410a2221b8
       EXPECTED_SHA: b54fbd01e086d1f7d1b57d6324d32241e11e2d89
       PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
       PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
@@ -33,13 +34,20 @@ jobs:
       - name: Link production project
         run: railway link --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" >/dev/null
 
-      - name: Switch API recorder owner to external
+      - name: Disable failed standalone recorder
         run: |
-          railway variable set MICROSTRUCTURE_RECORDER_OWNER=external \
+          railway variable set MICROSTRUCTURE_RECORDER_ENABLED=false \
+            --service "$STANDALONE_SERVICE_ID" \
+            --environment "$ENVIRONMENT_ID" >/dev/null
+          echo "Failed standalone recorder disabled; Railway deployment triggered."
+
+      - name: Restore API recorder ownership
+        run: |
+          railway variable set MICROSTRUCTURE_RECORDER_OWNER=api \
             --service "$API_SERVICE_ID" \
             --environment "$ENVIRONMENT_ID" >/dev/null
-          echo "API recorder owner set to external; Railway deployment triggered."
+          echo "API recorder ownership restored; Railway deployment triggered."
 
-      - name: Verify exact-SHA external recorder and readiness
+      - name: Verify restored production recorder and readiness
         working-directory: bybit_eu_swing_radar/backend
-        run: python scripts/production_microstructure_external_smoke.py
+        run: python scripts/production_microstructure_smoke.py
