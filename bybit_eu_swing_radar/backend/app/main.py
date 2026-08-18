@@ -405,3 +405,9 @@ attach_v073_diagnostic_perf_routes(app, require_api_key)
 from app.research_swing_liquidity_api import attach_research_swing_liquidity_routes
 
 attach_research_swing_liquidity_routes(app, require_api_key)
+
+# Research-only derivatives positioning shadow. It consumes cached context only
+# and has no strategy/scoring/eligibility/execution mutation path.
+from app.research_derivatives_positioning_api import attach_derivatives_positioning_research
+
+attach_derivatives_positioning_research(app, require_api_key)
