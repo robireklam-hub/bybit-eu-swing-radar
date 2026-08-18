@@ -1,0 +1,51 @@
+name: Patch v073 prospective status
+
+on:
+  pull_request:
+    types: [synchronize]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.head_ref == 'research/v073-prospective-funnel-v1'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+      - name: Expose exact live trigger count
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('bybit_eu_swing_radar/backend/research/prospective_funnel_v073.py')
+          text = p.read_text()
+          text = text.replace(
+              '            pass_setup,pass_target_path,pass_rr,pass_strict_trade\n        FROM day_trade_v073_prospective_funnel',
+              '            pass_setup,pass_target_path,pass_rr,pass_strict_trade,\n            live_strict_trigger_observed\n        FROM day_trade_v073_prospective_funnel',
+              1,
+          )
+          old = '''    current_side_counts = Counter(str(row["side"]) for row in current_rows)\n\n    return {\n'''
+          new = '''    current_side_counts = Counter(str(row["side"]) for row in current_rows)\n    exact_live_strict_events = sum(\n        1 for row in latest if bool(row["live_strict_trigger_observed"])\n    )\n\n    return {\n'''
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif new not in text:
+              raise SystemExit('status counter anchor missing')
+          text = text.replace(
+              '            "total_snapshots": total_snapshots,\n            "symbols_observed": len(symbols),',
+              '            "total_snapshots": total_snapshots,\n            "exact_live_strict_trigger_events": exact_live_strict_events,\n            "symbols_observed": len(symbols),',
+              1,
+          )
+          p.write_text(text)
+          PY
+      - name: Remove temporary workflow and commit
+        run: |
+          rm -f .github/workflows/patch-v073-prospective-status.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bybit_eu_swing_radar/backend/research/prospective_funnel_v073.py .github/workflows/patch-v073-prospective-status.yml
+          git commit -m "Expose exact live STRICT trigger count"
+          git push origin HEAD:${{ github.head_ref }}
