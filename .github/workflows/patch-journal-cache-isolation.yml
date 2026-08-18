@@ -1,3 +1,4 @@
+# Temporary branch-only patch workflow; delete before merge.
 name: Patch journal cache isolation
 
 on:
