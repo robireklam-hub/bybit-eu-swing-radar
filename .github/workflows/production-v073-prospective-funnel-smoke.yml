@@ -1,0 +1,46 @@
+name: Production v0.7.3 prospective funnel smoke
+
+# Trusted main-only production verification. Pull requests are covered by Backend tests;
+# this workflow obtains production credentials only after a successful push-to-main CI run.
+on:
+  workflow_run:
+    workflows: ["Backend tests"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-v073-prospective-funnel-smoke
+  cancel-in-progress: true
+
+jobs:
+  production-smoke:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_sha != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_API_SHA: ${{ github.event.workflow_run.head_sha }}
+      PROSPECTIVE_FUNNEL_FEATURE_SHA: 327d353edee364209b36e4f486ccd68ef7faed05
+
+    steps:
+      - name: Check out tested main commit with history
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Run read-only prospective funnel production smoke
+        working-directory: bybit_eu_swing_radar/backend
+        run: python -u scripts/production_v073_prospective_funnel_smoke.py
