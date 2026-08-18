@@ -411,3 +411,9 @@ attach_research_swing_liquidity_routes(app, require_api_key)
 from app.research_derivatives_positioning_api import attach_derivatives_positioning_research
 
 attach_derivatives_positioning_research(app, require_api_key)
+
+# Research-only event/tokenomics shadow. It records catalyst context and
+# has no strategy/scoring/eligibility/execution mutation path.
+from app.research_event_tokenomics_api import attach_event_tokenomics_research
+
+attach_event_tokenomics_research(app, require_api_key)
