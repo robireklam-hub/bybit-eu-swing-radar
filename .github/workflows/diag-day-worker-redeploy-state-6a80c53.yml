@@ -1,0 +1,83 @@
+name: Diagnose day worker redeploy state 6a80c53
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.head_ref == 'diag/day-worker-redeploy-state-6a80c53'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PROJECT_ID: 846f5088-4e8b-45fe-84d9-0728542b2c36
+      EXPECTED_SHA: 6a80c53f17eebd4972a527055f258b953ca6b44a
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 6a80c53f17eebd4972a527055f258b953ca6b44a
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Snapshot Railway and production state
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, re
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+
+          endpoint='https://backboard.railway.com/graphql/v2'
+          token=os.environ['RAILWAY_API_TOKEN']
+          project=os.environ['PROJECT_ID']
+          base=os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key=os.environ['PRODUCTION_RADAR_API_KEY']
+
+          def gql(query, variables=None):
+              req=Request(endpoint,data=json.dumps({'query':query,'variables':variables or {}}).encode(),headers={'Authorization':'Bearer '+token,'Content-Type':'application/json','Accept':'application/json','User-Agent':'day-worker-state-diag/1'})
+              with urlopen(req,timeout=25) as r: p=json.loads(r.read().decode())
+              if p.get('errors'):
+                  raise RuntimeError(json.dumps([{'message':e.get('message'),'path':e.get('path')} for e in p['errors']]))
+              return p.get('data') or {}
+
+          def get(path, params=None, auth=True):
+              url=base+path
+              if params: url+='?'+urlencode(params)
+              headers={'Accept':'application/json','User-Agent':'day-worker-state-diag/1'}
+              if auth: headers['X-Radar-Key']=key
+              with urlopen(Request(url,headers=headers),timeout=25) as r: return json.loads(r.read().decode())
+
+          p=gql('query project($id:String!){project(id:$id){services{edges{node{id name}}}}}',{'id':project})
+          services=[e.get('node') or {} for e in ((((p.get('project') or {}).get('services') or {}).get('edges')) or [])]
+          print('SERVICES='+json.dumps([{'id':s.get('id'),'name':s.get('name')} for s in services],sort_keys=True))
+          def match(name):
+              n=re.sub(r'[^a-z0-9]+','-',str(name or '').lower()).strip('-')
+              return 'day' in n and 'worker' in n and not any(x in n for x in ('swing','flow','microstructure','backtest','diagnostic','postgres','api'))
+          cand=[s for s in services if match(s.get('name'))]
+          print('DAY_CANDIDATES='+json.dumps([{'id':s.get('id'),'name':s.get('name')} for s in cand]))
+          if len(cand)==1:
+              sid=str(cand[0]['id'])
+              d=gql('query deployments($input:DeploymentListInput!){deployments(input:$input,first:8){edges{node{id status createdAt meta}}}}',{'input':{'projectId':project,'serviceId':sid}})
+              rows=[e.get('node') or {} for e in (((d.get('deployments') or {}).get('edges')) or [])]
+              safe=[]
+              for r in rows:
+                  m=r.get('meta') if isinstance(r.get('meta'),dict) else {}
+                  safe.append({'id':r.get('id'),'status':r.get('status'),'createdAt':r.get('createdAt'),'commitHash':m.get('commitHash') or m.get('commitSha') or m.get('commit')})
+              print('DAY_DEPLOYMENTS='+json.dumps(safe,sort_keys=True))
+
+          version=get('/version',auth=False)
+          day=get('/v1/day-trade/status')
+          journal=get('/v1/day-trade/journal/summary',{'days':365,'signal_class':'all'})
+          print('API_VERSION='+json.dumps({'commit_sha':version.get('commit_sha')}))
+          w=day.get('worker') or {}
+          latest=journal.get('latest_run') or {}
+          overall=journal.get('overall') or {}
+          print('DAY_STATUS='+json.dumps({'source_commit_sha':w.get('source_commit_sha'),'generated_at':day.get('generated_at') or day.get('data_as_of'),'worker':{k:w.get(k) for k in ('status','last_run_at','source_commit_sha') if k in w}},sort_keys=True))
+          print('JOURNAL='+json.dumps({'run_at':latest.get('run_at'),'strategy_version':latest.get('strategy_version'),'active_signal_count':latest.get('active_signal_count'),'open_count':overall.get('open_count'),'triggered_trade_count':latest.get('triggered_trade_count'),'shadow_trigger_count':latest.get('shadow_trigger_count')},sort_keys=True))
+          PY
