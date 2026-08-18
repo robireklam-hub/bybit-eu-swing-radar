@@ -1,0 +1,39 @@
+name: Geopolitical Event v2 forward capture
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/geopolitical-event-v2.yml"
+      - ".github/workflows/geopolitical-risk-shadow.yml"
+      - "bybit_eu_swing_radar/backend/research/geopolitical_event_shadow_v2.py"
+      - "bybit_eu_swing_radar/backend/app/research_geopolitical_event_v2_api.py"
+      - "bybit_eu_swing_radar/backend/app/main.py"
+      - "bybit_eu_swing_radar/backend/scripts/production_geopolitical_event_v2_smoke.py"
+  schedule:
+    - cron: "11,26,41,56 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  capture-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: ${{ github.sha }}
+    steps:
+      - name: Check out exact commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Capture and verify geopolitical Event v2
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_geopolitical_event_v2_smoke.py

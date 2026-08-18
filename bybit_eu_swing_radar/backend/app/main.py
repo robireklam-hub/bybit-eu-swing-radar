@@ -465,3 +465,9 @@ attach_signal_context_freeze_v2_research(app, require_api_key)
 from app.research_geopolitical_risk_api import attach_geopolitical_risk_research
 
 attach_geopolitical_risk_research(app, require_api_key)
+
+# Research-only GDELT Event 2.0 static-stream geopolitical context.
+# V1 remains auditable but automatic DOC capture is retired. No live mutation.
+from app.research_geopolitical_event_v2_api import attach_geopolitical_event_v2_research
+
+attach_geopolitical_event_v2_research(app, require_api_key)
