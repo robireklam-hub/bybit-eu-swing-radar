@@ -1,0 +1,131 @@
+name: Cut over microstructure recorder in EU West b54fbd0
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  cutover:
+    if: github.head_ref == 'ops/cutover-microstructure-eu-west-b54fbd0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PROJECT_ID: 846f5088-4e8b-45fe-84d9-0728542b2c36
+      ENVIRONMENT_ID: 2be04d3c-82b3-487d-930c-a4fbc7d483d8
+      API_SERVICE_ID: 6b92a19d-a178-4eab-9b8a-9fed1855319b
+      STANDALONE_SERVICE_ID: 61664eb1-4a59-4947-bae9-18410a2221b8
+      EXPECTED_SHA: b54fbd01e086d1f7d1b57d6324d32241e11e2d89
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: b54fbd01e086d1f7d1b57d6324d32241e11e2d89
+
+      - name: Install Railway CLI
+        run: |
+          bash <(curl -fsSL https://railway.com/install.sh) -y
+          echo "$HOME/.railway/bin" >> "$GITHUB_PATH"
+
+      - name: Link production project
+        run: railway link --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" >/dev/null
+
+      - name: Move standalone recorder to API EU West region
+        run: |
+          railway service scale europe-west4-drams3a=1 sfo=0 \
+            --service "$STANDALONE_SERVICE_ID" \
+            --environment "$ENVIRONMENT_ID" --json >/tmp/scale.json
+          echo "Standalone recorder scaled to europe-west4-drams3a only."
+
+      - name: Enable standalone recorder while API still owns lock
+        run: |
+          railway variable set MICROSTRUCTURE_RECORDER_ENABLED=true \
+            --service "$STANDALONE_SERVICE_ID" \
+            --environment "$ENVIRONMENT_ID" >/dev/null
+          echo "Standalone recorder enabled in EU West."
+
+      - name: Wait for standalone deployment success
+        shell: bash
+        run: |
+          for i in $(seq 1 60); do
+            status=$(railway service status --service "$STANDALONE_SERVICE_ID" --environment "$ENVIRONMENT_ID" --json 2>/dev/null || true)
+            if printf '%s' "$status" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"SUCCESS"'; then
+              echo "Standalone EU West deployment SUCCESS."
+              exit 0
+            fi
+            if printf '%s' "$status" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"(FAILED|CRASHED|REMOVED)"'; then
+              echo "FAIL standalone EU West deployment terminal state"
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "FAIL standalone EU West deployment timeout"
+          exit 1
+
+      - name: Cut over with automatic rollback on failed external smoke
+        shell: bash
+        run: |
+          rollback() {
+            echo "Rolling back microstructure ownership to API."
+            railway variable set MICROSTRUCTURE_RECORDER_ENABLED=false --service "$STANDALONE_SERVICE_ID" --environment "$ENVIRONMENT_ID" >/dev/null || true
+            railway variable set MICROSTRUCTURE_RECORDER_OWNER=api --service "$API_SERVICE_ID" --environment "$ENVIRONMENT_ID" >/dev/null || true
+          }
+          railway variable set MICROSTRUCTURE_RECORDER_OWNER=external \
+            --service "$API_SERVICE_ID" --environment "$ENVIRONMENT_ID" >/dev/null
+          if ! python bybit_eu_swing_radar/backend/scripts/production_microstructure_external_smoke.py; then
+            rollback
+            exit 1
+          fi
+
+      - name: Capture standalone started_at before API redeploy
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+          req=urllib.request.Request(os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')+'/v1/research/microstructure/status',headers={'X-Radar-Key':os.environ['PRODUCTION_RADAR_API_KEY'],'Accept':'application/json'})
+          with urllib.request.urlopen(req,timeout=15) as r: p=json.load(r)
+          if p.get('process_role')!='standalone' or not p.get('started_at'):
+              raise SystemExit('FAIL standalone status unavailable before redeploy')
+          open('/tmp/standalone_started_at','w').write(p['started_at'])
+          print('PRE_REDEPLOY_STARTED_AT='+p['started_at'])
+          PY
+
+      - name: Redeploy API only using same code
+        run: |
+          railway redeploy --service "$API_SERVICE_ID" --yes >/dev/null
+          echo "API-only same-code redeploy triggered."
+
+      - name: Verify standalone survives API redeploy unchanged
+        shell: bash
+        run: |
+          rollback() {
+            echo "Rolling back after independence verification failure."
+            railway variable set MICROSTRUCTURE_RECORDER_ENABLED=false --service "$STANDALONE_SERVICE_ID" --environment "$ENVIRONMENT_ID" >/dev/null || true
+            railway variable set MICROSTRUCTURE_RECORDER_OWNER=api --service "$API_SERVICE_ID" --environment "$ENVIRONMENT_ID" >/dev/null || true
+          }
+          if ! python bybit_eu_swing_radar/backend/scripts/production_microstructure_external_smoke.py; then
+            rollback
+            exit 1
+          fi
+          if ! python3 - <<'PY'
+          import json, os, urllib.request
+          before=open('/tmp/standalone_started_at').read().strip()
+          req=urllib.request.Request(os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')+'/v1/research/microstructure/status',headers={'X-Radar-Key':os.environ['PRODUCTION_RADAR_API_KEY'],'Accept':'application/json'})
+          with urllib.request.urlopen(req,timeout=15) as r: p=json.load(r)
+          after=str(p.get('started_at') or '')
+          print('PRE_REDEPLOY_STARTED_AT='+before)
+          print('POST_REDEPLOY_STARTED_AT='+after)
+          if before != after:
+              raise SystemExit('FAIL standalone recorder restarted during API redeploy')
+          if p.get('process_role')!='standalone' or p.get('connected') is not True or p.get('singleton_acquired') is not True:
+              raise SystemExit('FAIL standalone recorder unhealthy after API redeploy')
+          print('MICROSTRUCTURE DEPLOYMENT INDEPENDENCE VERIFIED.')
+          PY
+          then
+            rollback
+            exit 1
+          fi
