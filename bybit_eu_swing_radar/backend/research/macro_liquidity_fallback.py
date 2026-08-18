@@ -33,25 +33,47 @@ def _h41_series_name(value: str) -> str:
 
 
 def parse_h41_series(text: str, series_code: str) -> list[tuple[str, float]]:
+    """Parse Federal Reserve DDP series-column CSV output for one H.4.1 series."""
     rows = [list(row) for row in csv.reader(io.StringIO(text))]
-    header = next((row for row in rows if row and row[0].strip().lower() == "series"), None)
-    data = next(
-        (row for row in rows if row and _h41_series_name(row[0]) == series_code),
+    identifier_row = next(
+        (
+            row
+            for row in rows
+            if row and row[0].strip().lower().startswith("unique identifier")
+        ),
         None,
     )
-    if header is None or data is None:
+    if identifier_row is None:
+        raise ValueError("H.4.1 unique-identifier row not found")
+
+    target_column = next(
+        (
+            index
+            for index, cell in enumerate(identifier_row[1:], start=1)
+            if _h41_series_name(cell) == series_code
+        ),
+        None,
+    )
+    if target_column is None:
         raise ValueError(f"H.4.1 series not found: {series_code}")
 
     points: list[tuple[str, float]] = []
-    for index in range(2, min(len(header), len(data))):
-        date = header[index].strip()
-        raw = data[index].strip().replace(",", "")
-        if not date or raw in {"", "ND", "NA", "."}:
+    for row in rows:
+        if not row or len(row) <= target_column:
+            continue
+        date = row[0].strip()
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+        except ValueError:
+            continue
+        raw = row[target_column].strip().replace(",", "")
+        if raw in {"", "ND", "NA", "."}:
             continue
         try:
             points.append((date, float(raw)))
         except ValueError:
             continue
+
     points.sort(key=lambda item: item[0])
     if not points:
         raise ValueError(f"H.4.1 series has no usable observations: {series_code}")
