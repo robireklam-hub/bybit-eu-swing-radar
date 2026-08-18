@@ -1,3 +1,4 @@
+"""Deterministic contract tests for the frozen market-regime shadow v1 classifier."""
 from __future__ import annotations
 
 import math
