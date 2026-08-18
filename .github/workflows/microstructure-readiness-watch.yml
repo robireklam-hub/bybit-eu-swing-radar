@@ -37,3 +37,7 @@ jobs:
       - name: Check preregistered alignment sample status
         working-directory: bybit_eu_swing_radar/backend
         run: python scripts/production_microstructure_alignment_status.py
+
+      - name: Check preregistered effect status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_effect_status.py

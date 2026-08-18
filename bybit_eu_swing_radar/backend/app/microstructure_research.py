@@ -19,6 +19,12 @@ from research.microstructure.alignment import (
     sample_readiness,
 )
 from research.microstructure.collector import MicrostructureConfig, MicrostructureRecorder
+from research.microstructure.effect_analysis import (
+    analyze_preregistered_effects,
+    effect_spec,
+    load_closed_outcomes,
+    select_earliest_ready_cohort,
+)
 from research.microstructure.readiness import get_readiness
 
 logger = logging.getLogger(__name__)
@@ -224,6 +230,88 @@ def build_alignment_status(
     }
 
 
+async def build_effect_status(
+    database_url: str,
+    symbols: Iterable[str],
+    bucket_seconds: int,
+) -> dict[str, Any]:
+    """Run the frozen effect-test gate; outcomes stay inaccessible until sample-ready."""
+    wanted = tuple(dict.fromkeys(str(symbol).upper() for symbol in symbols))
+    readiness_payload = await get_readiness(database_url, wanted, bucket_seconds)
+    base = {
+        "research_only": True,
+        "live_strategy_mutated": False,
+        "promotion_allowed": False,
+        "effect_spec": effect_spec(),
+    }
+    if readiness_payload.get("ready_for_forward_feature_analysis") is not True:
+        return {
+            **base,
+            "status": "WAITING_FOR_DATA_QUALITY",
+            "data_quality_ready": False,
+            "ready_for_preregistered_effect_test": False,
+        }
+
+    readiness_symbols = readiness_payload.get("symbols") or []
+    first_bucket_values = [
+        item.get("first_bucket_at")
+        for item in readiness_symbols
+        if isinstance(item, Mapping) and item.get("first_bucket_at")
+    ]
+    if len(first_bucket_values) != len(wanted):
+        raise ValueError("readiness first_bucket_at coverage is incomplete")
+    since = max(_parse_dt(value) for value in first_bucket_values)
+    until = _parse_dt(readiness_payload.get("checked_at"))
+    features, journal_signal_counts = await asyncio.gather(
+        load_feature_rows(
+            database_url,
+            wanted,
+            since,
+            until,
+            bucket_seconds=bucket_seconds,
+        ),
+        _load_journal_signal_counts(database_url, wanted, since, until),
+    )
+    alignment_payload = build_alignment_status(
+        readiness_payload,
+        features,
+        wanted,
+        journal_signal_counts,
+    )
+    interval = {"since": since.isoformat(), "until": until.isoformat()}
+    if alignment_payload.get("ready_for_preregistered_effect_test") is not True:
+        return {
+            **base,
+            "status": "WAITING_FOR_SAMPLE",
+            "data_quality_ready": True,
+            "ready_for_preregistered_effect_test": False,
+            "alignment_coverage": alignment_payload["alignment_coverage"],
+            "sample": alignment_payload["sample"],
+            "interval": interval,
+        }
+
+    cohort, cohort_gate = select_earliest_ready_cohort(features, wanted)
+    if not cohort or cohort_gate.get("cohort_frozen") is not True:
+        return {
+            **base,
+            "status": "WAITING_FOR_SAMPLE",
+            "data_quality_ready": True,
+            "ready_for_preregistered_effect_test": False,
+            "alignment_coverage": alignment_payload["alignment_coverage"],
+            "sample": alignment_payload["sample"],
+            "cohort_gate": cohort_gate,
+            "interval": interval,
+        }
+
+    outcomes = await load_closed_outcomes(database_url, cohort)
+    result = analyze_preregistered_effects(cohort, outcomes)
+    result["cohort_gate"] = cohort_gate
+    result["alignment_coverage"] = alignment_payload["alignment_coverage"]
+    result["interval"] = interval
+    result["ready_for_preregistered_effect_test"] = True
+    return result
+
+
 def attach_microstructure_research(
     app: FastAPI,
     require_api_key: Callable[..., Any],
@@ -350,6 +438,33 @@ def attach_microstructure_research(
                 "promotion_allowed": False,
                 "spec": alignment_spec(),
                 "ready_for_preregistered_effect_test": False,
+                "error_type": type(exc).__name__,
+                "error": str(exc)[:1000],
+            }
+
+    @app.get(
+        "/v1/research/microstructure/effect-status",
+        dependencies=[Depends(require_api_key)],
+    )
+    async def effect_status() -> dict[str, Any]:
+        """Execute the preregistered effect gate only after the frozen sample is ready."""
+        try:
+            _ensure_task_started()
+            await asyncio.sleep(0)
+            recorder = _ensure_recorder()
+            return await build_effect_status(
+                recorder.config.database_url,
+                recorder.config.symbols,
+                recorder.config.bucket_seconds,
+            )
+        except Exception as exc:
+            logger.exception("microstructure effect status query failed")
+            return {
+                "research_only": True,
+                "live_strategy_mutated": False,
+                "promotion_allowed": False,
+                "effect_spec": effect_spec(),
+                "status": "ERROR",
                 "error_type": type(exc).__name__,
                 "error": str(exc)[:1000],
             }
