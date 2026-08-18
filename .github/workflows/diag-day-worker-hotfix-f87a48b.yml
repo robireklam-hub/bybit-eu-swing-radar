@@ -1,0 +1,82 @@
+name: Diagnose day worker hotfix f87a48b
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.head_ref == 'diag/day-worker-hotfix-f87a48b'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      DEPLOYMENT_ID: 19abe5b5-4c2e-4ba4-877d-9a96cdc7eae3
+      EXPECTED_SHA: f87a48b5ace9f479549a0f9892902bbba3cae489
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+    steps:
+      - name: Read hotfix runtime and production state
+        shell: bash
+        run: |
+          python -u - <<'PY'
+          import json, os
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+
+          railway='https://backboard.railway.com/graphql/v2'
+          token=os.environ['RAILWAY_API_TOKEN']
+          deployment=os.environ['DEPLOYMENT_ID']
+          base=os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key=os.environ['PRODUCTION_RADAR_API_KEY']
+
+          def gql(query, variables):
+              req=Request(railway,data=json.dumps({'query':query,'variables':variables}).encode(),headers={
+                  'Authorization':'Bearer '+token,'Content-Type':'application/json','Accept':'application/json','User-Agent':'hotfix-day-worker-diag/1'})
+              with urlopen(req,timeout=25) as r: payload=json.loads(r.read().decode())
+              if payload.get('errors'):
+                  raise RuntimeError(json.dumps([{'message':e.get('message'),'path':e.get('path')} for e in payload['errors']]))
+              return payload.get('data') or {}
+
+          def get(path, params=None, auth=True):
+              url=base+path
+              if params: url+='?'+urlencode(params)
+              headers={'Accept':'application/json','User-Agent':'hotfix-day-worker-diag/1'}
+              if auth: headers['X-Radar-Key']=key
+              with urlopen(Request(url,headers=headers),timeout=25) as r: payload=json.loads(r.read().decode())
+              if not isinstance(payload,dict): raise RuntimeError('non-object '+path)
+              return payload
+
+          q='query deploymentLogs($deploymentId:String!,$limit:Int){deploymentLogs(deploymentId:$deploymentId,limit:$limit){timestamp message severity}}'
+          logs=(gql(q,{'deploymentId':deployment,'limit':200}).get('deploymentLogs') or [])
+          print('RUNTIME_LOGS='+json.dumps([{'timestamp':x.get('timestamp'),'severity':x.get('severity'),'message':x.get('message')} for x in logs],sort_keys=True),flush=True)
+
+          version=get('/version',auth=False)
+          day=get('/v1/day-trade/status')
+          journal=get('/v1/day-trade/journal/summary',{'days':365,'signal_class':'all'})
+          worker=day.get('worker') or {}
+          funnel=day.get('prospective_funnel') or {}
+          latest=journal.get('latest_run') or {}
+          overall=journal.get('overall') or {}
+          safe={
+              'api_sha':version.get('commit_sha'),
+              'checked_at':day.get('checked_at'),
+              'worker_sha':worker.get('source_commit_sha'),
+              'worker_status':worker.get('status'),
+              'duration_seconds':worker.get('duration_seconds'),
+              'funnel_status':funnel.get('status'),
+              'funnel_reason':funnel.get('reason'),
+              'funnel_source_sha':funnel.get('source_commit_sha'),
+              'prospective_start_at':funnel.get('prospective_start_at'),
+              'current_run':funnel.get('current_run'),
+              'cumulative':funnel.get('cumulative'),
+              'journal_run_at':latest.get('run_at'),
+              'journal_strategy_version':latest.get('strategy_version'),
+              'journal_active':latest.get('active_signal_count'),
+              'journal_open':overall.get('open_count'),
+          }
+          print('HOTFIX_STATE='+json.dumps(safe,sort_keys=True,default=str),flush=True)
+          PY
