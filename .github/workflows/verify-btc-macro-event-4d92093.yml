@@ -1,0 +1,32 @@
+name: Verify production BTC macro and event layers 4d92093
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-production-research-layers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 4d920933f2d073e7307a488a1ff1ee2e96f333ad
+    steps:
+      - name: Check out exact production commit
+        uses: actions/checkout@v7
+        with:
+          ref: 4d920933f2d073e7307a488a1ff1ee2e96f333ad
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Verify BTC macro cycle ETF production layer
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_btc_macro_cycle_etf_shadow_smoke.py
+      - name: Verify Event Tokenomics production layer and BLS fallback
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_event_tokenomics_shadow_smoke.py
