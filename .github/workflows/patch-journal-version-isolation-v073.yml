@@ -1,0 +1,84 @@
+name: Temporary patch v0.7.3 journal version isolation
+
+on:
+  push:
+    branches:
+      - "fix/journal-version-isolation-v073"
+    paths:
+      - ".github/workflows/patch-journal-version-isolation-v073.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+      - name: Patch journal queries, add regression test, self-remove
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          journal = Path("bybit_eu_swing_radar/backend/journal.py")
+          text = journal.read_text()
+
+          old_open = '''    open_rows = await connection.fetch(
+              """
+              SELECT *
+              FROM day_trade_signal_journal
+              WHERE status = 'OPEN'
+              ORDER BY opened_at ASC
+              """
+          )'''
+          new_open = '''    open_rows = await connection.fetch(
+              """
+              SELECT *
+              FROM day_trade_signal_journal
+              WHERE status = 'OPEN' AND strategy_version = $1
+              ORDER BY opened_at ASC
+              """,
+              STRATEGY_VERSION,
+          )'''
+          if old_open not in text:
+              raise SystemExit("expected unversioned OPEN query not found")
+          text = text.replace(old_open, new_open, 1)
+
+          old_active = '''    active = int(
+              await connection.fetchval(
+                  "SELECT COUNT(*) FROM day_trade_signal_journal WHERE status = 'OPEN'"
+              )
+              or 0
+          )'''
+          new_active = '''    active = int(
+              await connection.fetchval(
+                  """
+                  SELECT COUNT(*)
+                  FROM day_trade_signal_journal
+                  WHERE status = 'OPEN' AND strategy_version = $1
+                  """,
+                  STRATEGY_VERSION,
+              )
+              or 0
+          )'''
+          if old_active not in text:
+              raise SystemExit("expected unversioned active-count query not found")
+          text = text.replace(old_active, new_active, 1)
+          journal.write_text(text)
+
+          test = Path("bybit_eu_swing_radar/backend/test_journal_version_isolation.py")
+          test.write_text('''import asyncio\n\nfrom journal import STRATEGY_VERSION, persist_day_journal\n\n\nclass FakeConnection:\n    def __init__(self):\n        self.fetch_calls = []\n        self.fetchval_calls = []\n        self.execute_calls = []\n\n    async def execute(self, sql, *args):\n        self.execute_calls.append((sql, args))\n        return "OK"\n\n    async def fetch(self, sql, *args):\n        self.fetch_calls.append((sql, args))\n        return []\n\n    async def fetchval(self, sql, *args):\n        self.fetchval_calls.append((sql, args))\n        return 0\n\n\ndef test_persist_day_journal_isolates_open_evaluation_and_active_count_by_strategy_version():\n    connection = FakeConnection()\n    result = asyncio.run(\n        persist_day_journal(\n            connection,\n            candidates=[],\n            bars_by_symbol={},\n            scan={"data_quality": "GOOD", "coverage": {}},\n            status={"worker": {}},\n        )\n    )\n\n    open_queries = [call for call in connection.fetch_calls if "FROM day_trade_signal_journal" in call[0]]\n    assert len(open_queries) == 1\n    open_sql, open_args = open_queries[0]\n    assert "status = 'OPEN' AND strategy_version = $1" in open_sql\n    assert open_args == (STRATEGY_VERSION,)\n\n    active_queries = [call for call in connection.fetchval_calls if "FROM day_trade_signal_journal" in call[0]]\n    assert len(active_queries) == 1\n    active_sql, active_args = active_queries[0]\n    assert "status = 'OPEN' AND strategy_version = $1" in active_sql\n    assert active_args == (STRATEGY_VERSION,)\n\n    assert result["strategy_version"] == STRATEGY_VERSION\n    assert result["active_signals"] == 0\n''')
+
+          Path(".github/workflows/patch-journal-version-isolation-v073.yml").unlink()
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bybit_eu_swing_radar/backend/journal.py bybit_eu_swing_radar/backend/test_journal_version_isolation.py .github/workflows/patch-journal-version-isolation-v073.yml
+          git diff --cached --check
+          git commit -m "Fix v0.7.3 journal version isolation"
+          git push origin HEAD:${GITHUB_REF_NAME}
