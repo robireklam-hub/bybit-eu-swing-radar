@@ -1,4 +1,4 @@
-"""Regression coverage for bounded research-sidecar execution."""
+"""Regression coverage for bounded and isolated research-sidecar execution."""
 
 import asyncio
 
