@@ -1,0 +1,140 @@
+name: Patch v073 prospective live trigger
+
+on:
+  pull_request:
+    types: [synchronize]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.head_ref == 'research/v073-prospective-funnel-v1'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+      - name: Apply live-trigger provenance patch
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('bybit_eu_swing_radar/backend/research/prospective_funnel_v073.py')
+          text = p.read_text()
+
+          text = text.replace(
+              '    pass_strict_trade BOOLEAN NOT NULL,\n    first_failed_gate TEXT NOT NULL,',
+              '    pass_strict_trade BOOLEAN NOT NULL,\n    live_strict_trigger_observed BOOLEAN NOT NULL DEFAULT FALSE,\n    first_failed_gate TEXT NOT NULL,',
+              1,
+          )
+
+          anchor = '''def _analysis_snapshot_rows(\n'''
+          helper = '''def _live_strict_event_keys(setups: Iterable[dict[str, Any]]) -> set[str]:\n    """Return exact sweep keys that the live v0.7.3 worker triggered as STRICT."""\n    keys: set[str] = set()\n    for setup in setups:\n        if setup.get("category") != "STRICT":\n            continue\n        trigger = setup.get("trigger") or {}\n        if not trigger.get("triggered"):\n            continue\n        sweep = trigger.get("sweep_confirmation") or {}\n        sweep_time = str(sweep.get("sweep_time") or "")\n        symbol = str(setup.get("symbol") or "").upper()\n        side = str(setup.get("side") or "")\n        if symbol and side in {"long", "short"} and sweep_time:\n            keys.add(_event_key(symbol, side, sweep_time))\n    return keys\n\n\n'''
+          if helper not in text:
+              if anchor not in text:
+                  raise SystemExit('analysis function anchor missing')
+              text = text.replace(anchor, helper + anchor, 1)
+
+          old = '''    source_commit_sha: str | None,\n    volume_confirmation_ratio: float = 1.3,\n) -> list[dict[str, Any]]:\n'''
+          new = '''    source_commit_sha: str | None,\n    volume_confirmation_ratio: float = 1.3,\n    live_strict_event_keys: set[str] | None = None,\n) -> list[dict[str, Any]]:\n'''
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif new not in text:
+              raise SystemExit('analysis args anchor missing')
+
+          old = '''                output.append(\n                    {\n                        "spec_version": SPEC_VERSION,\n'''
+          new = '''                event_key = _event_key(symbol, side, sweep_time_text)\n                output.append(\n                    {\n                        "spec_version": SPEC_VERSION,\n'''
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif new not in text:
+              raise SystemExit('row append anchor missing')
+
+          text = text.replace(
+              '                        "event_key": _event_key(symbol, side, sweep_time_text),',
+              '                        "event_key": event_key,',
+              1,
+          )
+          text = text.replace(
+              '                        "pass_strict_trade": bool(gates.get("pass_strict_trade")),\n                        "first_failed_gate":',
+              '                        "pass_strict_trade": bool(gates.get("pass_strict_trade")),\n                        "live_strict_trigger_observed": event_key in (live_strict_event_keys or set()),\n                        "first_failed_gate":',
+              1,
+          )
+
+          text = text.replace(
+              '            pass_setup,pass_target_path,pass_rr,pass_strict_trade,\n            first_failed_gate,',
+              '            pass_setup,pass_target_path,pass_rr,pass_strict_trade,\n            live_strict_trigger_observed,first_failed_gate,',
+              1,
+          )
+          text = text.replace(
+              '            $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,\n            $35::jsonb,$36::jsonb',
+              '            $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,\n            $35,$36::jsonb,$37::jsonb',
+              1,
+          )
+          text = text.replace(
+              '        row["pass_strict_trade"], row["first_failed_gate"],\n        row["borrowability_status"],',
+              '        row["pass_strict_trade"], row["live_strict_trigger_observed"],\n        row["first_failed_gate"], row["borrowability_status"],',
+              1,
+          )
+
+          old = '''    source_commit_sha: str | None,\n    volume_confirmation_ratio: float,\n) -> dict[str, Any]:\n'''
+          new = '''    source_commit_sha: str | None,\n    volume_confirmation_ratio: float,\n    live_setups: Iterable[dict[str, Any]],\n) -> dict[str, Any]:\n'''
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif new not in text:
+              raise SystemExit('persist args anchor missing')
+
+          text = text.replace(
+              '        volume_confirmation_ratio=volume_confirmation_ratio,\n    )\n    inserted = 0',
+              '        volume_confirmation_ratio=volume_confirmation_ratio,\n        live_strict_event_keys=_live_strict_event_keys(live_setups),\n    )\n    inserted = 0',
+              1,
+          )
+
+          text = text.replace(
+              '            "No realized outcome, PnL, MFE/MAE or win/loss label is stored by this recorder.",',
+              '            "pass_strict_trade is the comparable gate-chain state; live_strict_trigger_observed separately records an exact live STRICT trigger on that run.",\n            "No realized outcome, PnL, MFE/MAE or win/loss label is stored by this recorder.",',
+              1,
+          )
+          text = text.replace(
+              '    "_event_key",\n    "persist_v073_prospective_funnel",',
+              '    "_event_key",\n    "_live_strict_event_keys",\n    "persist_v073_prospective_funnel",',
+              1,
+          )
+          p.write_text(text)
+
+          w = Path('bybit_eu_swing_radar/backend/day_worker.py')
+          text = w.read_text()
+          old = '''                        volume_confirmation_ratio=DAY_TRIGGER_VOLUME_RATIO,\n                    )\n'''
+          new = '''                        volume_confirmation_ratio=DAY_TRIGGER_VOLUME_RATIO,\n                        live_setups=setups,\n                    )\n'''
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif new not in text:
+              raise SystemExit('day worker call anchor missing')
+          w.write_text(text)
+
+          t = Path('bybit_eu_swing_radar/backend/test_v073_prospective_funnel.py')
+          text = t.read_text()
+          addition = '''\n\ndef test_live_strict_event_keys_require_exact_strict_trigger():\n    sweep_time = "2026-08-18T12:05:00+00:00"\n    setups = [\n        {\n            "symbol": "BTCUSDC",\n            "side": "long",\n            "category": "STRICT",\n            "trigger": {\n                "triggered": True,\n                "sweep_confirmation": {"sweep_time": sweep_time},\n            },\n        },\n        {\n            "symbol": "ETHUSDC",\n            "side": "long",\n            "category": "WATCH_ONLY",\n            "trigger": {\n                "triggered": True,\n                "sweep_confirmation": {"sweep_time": sweep_time},\n            },\n        },\n        {\n            "symbol": "SOLUSDC",\n            "side": "short",\n            "category": "STRICT",\n            "trigger": {"triggered": False, "sweep_confirmation": None},\n        },\n    ]\n    assert funnel._live_strict_event_keys(setups) == {\n        funnel._event_key("BTCUSDC", "long", sweep_time)\n    }\n'''
+          if 'test_live_strict_event_keys_require_exact_strict_trigger' not in text:
+              text += addition
+          t.write_text(text)
+
+          d = Path('bybit_eu_swing_radar/backend/V073_PROSPECTIVE_FUNNEL_V1.md')
+          text = d.read_text()
+          marker = '- source commit SHA\n- raw label-free sweep/gate snapshot payload\n'
+          replacement = '- source commit SHA\n- comparable gate-chain STRICT state\n- separate exact `live_strict_trigger_observed` flag from the authoritative live worker payload\n- raw label-free sweep/gate snapshot payload\n'
+          if marker in text:
+              text = text.replace(marker, replacement, 1)
+          d.write_text(text)
+          PY
+
+      - name: Remove temporary workflow and commit
+        run: |
+          rm -f .github/workflows/patch-v073-prospective-live-trigger.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bybit_eu_swing_radar/backend/research/prospective_funnel_v073.py bybit_eu_swing_radar/backend/day_worker.py bybit_eu_swing_radar/backend/test_v073_prospective_funnel.py bybit_eu_swing_radar/backend/V073_PROSPECTIVE_FUNNEL_V1.md .github/workflows/patch-v073-prospective-live-trigger.yml
+          git commit -m "Record exact live STRICT trigger provenance"
+          git push origin HEAD:${{ github.head_ref }}
