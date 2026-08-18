@@ -1,0 +1,31 @@
+name: Verify ETH on-chain production 70d7d90
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/verify-eth-onchain-70d7d90.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 70d7d904a9467c82c9d49f5f1436e7f1e0dcc66d
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 70d7d904a9467c82c9d49f5f1436e7f1e0dcc66d
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Exact-main ETH on-chain production smoke
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_eth_onchain_smoke.py
