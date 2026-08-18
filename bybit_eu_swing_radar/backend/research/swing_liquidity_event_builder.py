@@ -49,31 +49,26 @@ def select_pretrigger_snapshot(
     return max(matches, key=lambda item: item[0])[1]
 
 
-def build_trigger_events(
+def build_first_trigger_event(
     snapshots: Iterable[dict[str, Any]],
     candles: Iterable[dict[str, Any]],
     *,
     symbol: str,
     side: str,
-) -> list[dict[str, Any]]:
-    """Return all unique eligible closed-4H trigger-bar events in chronological order.
+) -> dict[str, Any] | None:
+    """Return the first chronological eligible closed-4H trigger event.
 
-    Repeated hourly snapshots are covariates, not outcomes: for each closed 4H
-    bar we select exactly one latest eligible pre-trigger snapshot. Event identity
-    is symbol + side + trigger close, so one trigger bar can produce at most one
-    event for a given symbol/side while later distinct trigger bars remain eligible.
+    Each candle must provide start_at, close_at and close. The candidate stored in
+    the chosen pre-trigger snapshot is authoritative and remains label-blind.
     """
-    snapshot_rows = list(snapshots)
     ordered = sorted(candles, key=lambda row: _ts(row["close_at"]))
-    events: list[dict[str, Any]] = []
-    seen_ids: set[str] = set()
     for candle in ordered:
         start_at = _ts(candle["start_at"])
         close_at = _ts(candle["close_at"])
         if close_at <= start_at:
             continue
         snapshot = select_pretrigger_snapshot(
-            snapshot_rows,
+            snapshots,
             symbol=symbol,
             side=side,
             trigger_close_at=close_at,
@@ -91,23 +86,7 @@ def build_trigger_events(
             trigger_bar_start_at=start_at,
             trigger_close_at=close_at,
         )
-        event_id = f"{metadata['symbol']}:{metadata['side']}:{metadata['trigger_close_at']}"
-        if event_id in seen_ids:
-            continue
-        seen_ids.add(event_id)
-        metadata["event_id"] = event_id
+        metadata["event_id"] = f"{metadata['symbol']}:{metadata['side']}:{metadata['trigger_close_at']}"
         metadata["source_capture_at"] = metadata["pretrigger_captured_at"]
-        events.append(metadata)
-    return events
-
-
-def build_first_trigger_event(
-    snapshots: Iterable[dict[str, Any]],
-    candles: Iterable[dict[str, Any]],
-    *,
-    symbol: str,
-    side: str,
-) -> dict[str, Any] | None:
-    """Backward-compatible helper returning the first eligible trigger event."""
-    events = build_trigger_events(snapshots, candles, symbol=symbol, side=side)
-    return events[0] if events else None
+        return metadata
+    return None
