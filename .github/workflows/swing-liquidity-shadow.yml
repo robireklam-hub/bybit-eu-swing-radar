@@ -3,6 +3,7 @@ name: Swing liquidity shadow capture
 on:
   schedule:
     - cron: "23 * * * *"
+    - cron: "53 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -30,11 +31,24 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Check whether durable capture is due
+        id: due
+        working-directory: bybit_eu_swing_radar/backend
+        env:
+          SWING_LIQUIDITY_MIN_AGE_SECONDS: ${{ github.event.schedule == '53 * * * *' && '4500' || '2700' }}
+        run: python scripts/swing_liquidity_capture_due.py
+
+      - name: Skip healthy duplicate capture
+        if: steps.due.outputs.capture_due != 'true'
+        run: echo "Durable swing-liquidity capture is recent enough; skipping this trigger."
+
       - name: Capture and durably persist label-blind swing liquidity snapshot
+        if: steps.due.outputs.capture_due == 'true'
         working-directory: bybit_eu_swing_radar/backend
         run: python research/swing_liquidity_shadow.py
 
       - name: Bind verifier to this exact capture
+        if: steps.due.outputs.capture_due == 'true'
         working-directory: bybit_eu_swing_radar/backend
         run: |
           python - <<'PY' >> "$GITHUB_ENV"
@@ -48,11 +62,12 @@ jobs:
           PY
 
       - name: Verify exact durable forward capture state
+        if: steps.due.outputs.capture_due == 'true'
         working-directory: bybit_eu_swing_radar/backend
         run: python scripts/production_swing_liquidity_forward_status.py
 
       - name: Upload immutable forward snapshot
-        if: always()
+        if: ${{ always() && steps.due.outputs.capture_due == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: swing-liquidity-shadow-${{ github.run_id }}
