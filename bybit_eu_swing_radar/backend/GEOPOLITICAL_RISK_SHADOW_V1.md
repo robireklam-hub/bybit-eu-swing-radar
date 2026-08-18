@@ -41,9 +41,11 @@ Only provider bins at or before `captured_at` are used.
 - Provider failures and missing bins remain explicit and are never interpreted as zero geopolitical risk.
 - Media attention can reflect reporting intensity, source mix, terminology, duplicate coverage, and editorial focus; it must not be treated as verified event severity.
 
-## Provider transport
+## Provider transport and rate limiting
 
 HTTPS is always attempted first. If and only if the GDELT HTTPS endpoint fails at the connection layer, the collector may use GDELT's officially supported HTTP DOC 2.0 endpoint. A successful HTTP fallback is recorded as `PARTIAL` with `transport=HTTP` and `transport_security=PLAINTEXT_PROVIDER_FALLBACK`; it is never represented as full-quality `LIVE` coverage. Non-connect HTTP errors, invalid payloads, and missing timeline bins do not silently downgrade to HTTP.
+
+GDELT documents rate limiting on its hosted APIs. The five fixed hourly topic queries are therefore deliberately executed **serially**, with 6 seconds between topics. HTTP 429 responses are the only HTTP status retried: at most two retries are allowed, using a bounded `Retry-After` value when supplied or fixed 12s/24s backoff otherwise. Other HTTP errors remain terminal and explicit. Successful recovery records `rate_limit_retries` in source provenance; the production coverage requirement is not relaxed.
 
 ## Persistence and routes
 
