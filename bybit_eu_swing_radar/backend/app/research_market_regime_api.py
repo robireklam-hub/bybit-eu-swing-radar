@@ -11,7 +11,6 @@ import asyncpg
 import httpx
 from fastapi import Depends, FastAPI, HTTPException
 
-from app.config import settings
 from research.market_regime_shadow import (
     SPEC_VERSION,
     build_market_snapshot,
@@ -21,6 +20,7 @@ from research.market_regime_shadow import (
 )
 
 TRACKED_UNIVERSE_SIZE = 8
+DEFAULT_BYBIT_BASE_URL = "https://api.bybit.eu"
 STABLE_BASES = {
     "USDC", "USDT", "DAI", "FDUSD", "TUSD", "USDE", "USDS", "PYUSD",
     "EUR", "EURC", "BUSD", "USD1", "RLUSD", "USDD", "USDQ",
@@ -45,6 +45,19 @@ ON research_market_regime_snapshots(captured_at DESC);
 """
 
 
+def _database_url() -> str:
+    """Resolve the database lazily so importing research helpers stays test-safe."""
+    value = os.getenv("DATABASE_URL", "").strip()
+    if not value:
+        raise RuntimeError("DATABASE_URL is not configured")
+    return value
+
+
+def _bybit_base_url() -> str:
+    value = os.getenv("BYBIT_BASE_URL", DEFAULT_BYBIT_BASE_URL).strip()
+    return (value or DEFAULT_BYBIT_BASE_URL).rstrip("/")
+
+
 def _safe_float(value: Any) -> float:
     try:
         return float(value or 0.0)
@@ -53,7 +66,7 @@ def _safe_float(value: Any) -> float:
 
 
 async def _bybit_get(client: httpx.AsyncClient, path: str, params: dict[str, Any]) -> dict[str, Any]:
-    response = await client.get(f"{settings.bybit_base_url.rstrip('/')}{path}", params=params, timeout=15.0)
+    response = await client.get(f"{_bybit_base_url()}{path}", params=params, timeout=15.0)
     response.raise_for_status()
     payload = response.json()
     if int(payload.get("retCode", -1)) != 0:
@@ -142,7 +155,7 @@ async def persist_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     captured_at = datetime.fromisoformat(str(snapshot["captured_at"]).replace("Z", "+00:00"))
     captured_hour = captured_at.replace(minute=0, second=0, microsecond=0)
     source_sha = os.getenv("RAILWAY_GIT_COMMIT_SHA") or None
-    connection = await asyncpg.connect(settings.database_url)
+    connection = await asyncpg.connect(_database_url())
     try:
         await connection.execute(SCHEMA_SQL)
         await connection.execute(
@@ -184,7 +197,7 @@ async def capture_current_snapshot() -> dict[str, Any]:
 
 
 async def status_payload() -> dict[str, Any]:
-    connection = await asyncpg.connect(settings.database_url)
+    connection = await asyncpg.connect(_database_url())
     try:
         await connection.execute(SCHEMA_SQL)
         latest = await connection.fetchrow(
@@ -236,6 +249,7 @@ async def status_payload() -> dict[str, Any]:
 def attach_market_regime_research(app: FastAPI, require_api_key: Callable[..., Any]) -> None:
     if not callable(getattr(app, "post", None)):
         return
+
     @app.get(
         "/v1/research/market-regime/spec",
         dependencies=[Depends(require_api_key)],
