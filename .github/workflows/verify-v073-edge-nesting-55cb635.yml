@@ -1,0 +1,109 @@
+name: Verify v0.7.3 edge nesting 55cb635
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 55cb63577e1f222ef007aec5c0ec0927dea7fc5d
+    steps:
+      - name: Check out exact merged main
+        uses: actions/checkout@v7
+        with:
+          ref: 55cb63577e1f222ef007aec5c0ec0927dea7fc5d
+      - name: Verify nested validation edge cohorts against waterfall
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import time
+          from urllib.request import Request, urlopen
+
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key = os.environ['PRODUCTION_RADAR_API_KEY']
+          expected_sha = os.environ['EXPECTED_SHA']
+
+          def get(path, timeout=45):
+              req = Request(base + path, headers={
+                  'Accept': 'application/json',
+                  'X-Radar-Key': key,
+                  'User-Agent': 'bybit-eu-v073-edge-nesting-verifier/1',
+              })
+              with urlopen(req, timeout=timeout) as response:
+                  payload = json.load(response)
+              if not isinstance(payload, dict):
+                  raise RuntimeError('non-object JSON')
+              return payload
+
+          deployed = False
+          for attempt in range(45):
+              try:
+                  version = get('/version', 20)
+              except Exception:
+                  version = {}
+              if version.get('commit_sha') == expected_sha:
+                  deployed = True
+                  break
+              if attempt < 44:
+                  time.sleep(5)
+          if not deployed:
+              raise SystemExit('FAIL exact merged main not deployed')
+
+          wf = get('/v1/day-trade/backtest/diagnostics/v073/waterfall?side=both&split=VALIDATION&primary_only=true')
+          edge = get('/v1/day-trade/backtest/diagnostics/v073/edge?side=both&split=VALIDATION&primary_only=true')
+
+          expected_names = [
+              'STRUCTURE_5M', 'VOLUME_PASS', 'STRUCTURE_15M_PASS',
+              'LIQUID_EXECUTABLE', 'SCORE_GATES_PASS',
+              'STRICT_ELIGIBLE', 'STRICT_TRADE',
+          ]
+          cohorts = edge.get('cohorts') or []
+          names = [item.get('cohort') for item in cohorts]
+          if names != expected_names:
+              raise SystemExit(f'FAIL unexpected cohort order: {names}')
+          counts = [int((item.get('stats') or {}).get('sample_size') or 0) for item in cohorts]
+          if counts != sorted(counts, reverse=True):
+              raise SystemExit(f'FAIL cohorts are not nested: {counts}')
+
+          gates = {item.get('gate'): item for item in (wf.get('waterfall') or [])}
+          def passed(name):
+              return int((gates.get(name) or {}).get('passed_count') or 0)
+
+          checks = {
+              'STRUCTURE_5M': passed('STRUCTURE_SHIFT_5M'),
+              'VOLUME_PASS': passed('VOLUME_1_3X'),
+              'STRUCTURE_15M_PASS': passed('STRUCTURE_15M_NON_OPPOSING'),
+              'LIQUID_EXECUTABLE': passed('SIDE_EXECUTION_MODEL'),
+              'STRICT_TRADE': passed('STRICT_TRADE'),
+          }
+          cohort_counts = dict(zip(names, counts))
+          for name, expected in checks.items():
+              actual = cohort_counts[name]
+              if actual != expected:
+                  raise SystemExit(f'FAIL {name} edge={actual} waterfall={expected}')
+
+          if cohort_counts['LIQUID_EXECUTABLE'] > cohort_counts['STRUCTURE_15M_PASS']:
+              raise SystemExit('FAIL liquid cohort exceeds 15m cohort')
+          if cohort_counts['STRICT_TRADE'] != int(wf.get('strict_trade_count') or 0):
+              raise SystemExit('FAIL strict trade summary mismatch')
+
+          safe = {
+              'expected_sha': expected_sha,
+              'validation_sweep_count': wf.get('sweep_count'),
+              'cohort_counts': cohort_counts,
+              'waterfall_reference': checks,
+              'strict_trade_count': wf.get('strict_trade_count'),
+              'evaluable_sample': edge.get('evaluable_sample'),
+          }
+          print('V073_EDGE_NESTING=' + json.dumps(safe, sort_keys=True))
+          print('V0.7.3 EDGE NESTING VERIFIED.')
+          PY
