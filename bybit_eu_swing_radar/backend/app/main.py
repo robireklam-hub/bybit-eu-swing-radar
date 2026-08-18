@@ -459,3 +459,9 @@ attach_cross_layer_context_v2_research(app, require_api_key)
 from app.research_signal_context_freeze_v2_api import attach_signal_context_freeze_v2_research
 
 attach_signal_context_freeze_v2_research(app, require_api_key)
+
+# Research-only geopolitical news-attention shadow. It measures fixed, sourced
+# media-attention context and has no live strategy/execution mutation path.
+from app.research_geopolitical_risk_api import attach_geopolitical_risk_research
+
+attach_geopolitical_risk_research(app, require_api_key)
