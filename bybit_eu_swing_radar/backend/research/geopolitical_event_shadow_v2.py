@@ -6,6 +6,7 @@ eligibility decision, or execution instruction.
 """
 from __future__ import annotations
 
+import re
 from collections import Counter
 from datetime import datetime, timezone
 from statistics import fmean
@@ -13,13 +14,13 @@ from typing import Any, Iterable, Mapping, Sequence
 
 SPEC_VERSION = "geopolitical-event-shadow-v2"
 PROVIDER = "GDELT 2.0 Event Database"
-MIN_EVENT_COLUMNS = 58
+MIN_EVENT_COLUMNS = 61
 MATERIAL_CONFLICT_QUAD_CLASS = 4
 SEVERE_NEGATIVE_GOLDSTEIN_CUTOFF = -7.0
 
-# Zero-based indices from the stable core Event Database schema. GDELT 2.0
-# retains the core event table while adding related tables/fields; v2 parsing
-# intentionally depends only on these long-standing core columns.
+# Zero-based GDELT 2.0 Event export indices. The event/scoring core through
+# AvgTone remains at positions 1-35. The 2.0 geography blocks include ADM2,
+# so ActionGeo starts at 1-based column 52 and the record ends at column 61.
 IDX_GLOBAL_EVENT_ID = 0
 IDX_SQLDATE = 1
 IDX_IS_ROOT_EVENT = 25
@@ -32,9 +33,10 @@ IDX_NUM_MENTIONS = 31
 IDX_NUM_SOURCES = 32
 IDX_NUM_ARTICLES = 33
 IDX_AVG_TONE = 34
-IDX_ACTION_GEO_COUNTRY_CODE = 51
-IDX_DATE_ADDED = 56
-IDX_SOURCE_URL = 57
+IDX_ACTION_GEO_TYPE = 51
+IDX_ACTION_GEO_COUNTRY_CODE = 53
+IDX_DATE_ADDED = 59
+IDX_SOURCE_URL = 60
 
 
 def spec() -> dict[str, Any]:
@@ -48,6 +50,7 @@ def spec() -> dict[str, Any]:
         "live_strategy_mutated": False,
         "source_family": "STATIC_GDELT_EVENT_EXPORT",
         "source_resolution": "15_MINUTE_FILE",
+        "schema_min_columns": MIN_EVENT_COLUMNS,
         "material_conflict_definition": "QuadClass == 4",
         "severe_negative_goldstein_cutoff": SEVERE_NEGATIVE_GOLDSTEIN_CUTOFF,
         "historical_backfill_allowed": False,
@@ -82,12 +85,21 @@ def _float(value: Any) -> float | None:
 
 
 def normalize_event_columns(columns: Sequence[str]) -> dict[str, Any] | None:
-    """Normalize the stable core fields needed by v2 from one TSV row."""
+    """Normalize stable GDELT 2.0 Event fields with schema sanity guards."""
     if len(columns) < MIN_EVENT_COLUMNS:
         return None
     global_event_id = str(columns[IDX_GLOBAL_EVENT_ID]).strip()
     quad_class = _int(columns[IDX_QUAD_CLASS])
+    action_geo_type = _int(columns[IDX_ACTION_GEO_TYPE])
+    country_code = str(columns[IDX_ACTION_GEO_COUNTRY_CODE]).strip().upper()
+    date_added = str(columns[IDX_DATE_ADDED]).strip()
     if not global_event_id or quad_class is None:
+        return None
+    if action_geo_type is None or action_geo_type < 0 or action_geo_type > 5:
+        return None
+    if country_code and re.fullmatch(r"[A-Z]{2}", country_code) is None:
+        return None
+    if re.fullmatch(r"\d{14}", date_added) is None:
         return None
     return {
         "global_event_id": global_event_id,
@@ -102,8 +114,9 @@ def normalize_event_columns(columns: Sequence[str]) -> dict[str, Any] | None:
         "num_sources": _int(columns[IDX_NUM_SOURCES]) or 0,
         "num_articles": _int(columns[IDX_NUM_ARTICLES]) or 0,
         "avg_tone": _float(columns[IDX_AVG_TONE]),
-        "action_geo_country_code": str(columns[IDX_ACTION_GEO_COUNTRY_CODE]).strip() or None,
-        "date_added": str(columns[IDX_DATE_ADDED]).strip() or None,
+        "action_geo_type": action_geo_type,
+        "action_geo_country_code": country_code or None,
+        "date_added": date_added,
         "source_url": str(columns[IDX_SOURCE_URL]).strip() or None,
     }
 
