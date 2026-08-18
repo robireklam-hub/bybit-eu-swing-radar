@@ -1,0 +1,67 @@
+name: Patch BTC macro provider concurrency
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+env:
+  DATABASE_URL: postgresql://test:test@localhost:5432/test
+  RADAR_API_KEY: test-radar-key
+  COINALYZE_API_KEY: test-coinalyze-key
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: fix/btc-macro-parallel-providers
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install backend test dependencies
+        working-directory: bybit_eu_swing_radar/backend
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install pytest pytest-asyncio
+      - name: Parallelize independent external providers
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('bybit_eu_swing_radar/backend/app/research_btc_macro_cycle_etf_api.py')
+          text = path.read_text()
+          if 'import asyncio\n' not in text:
+              text = text.replace('import csv\n', 'import asyncio\nimport csv\n', 1)
+          old = '''    async with httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=True) as client:\n        cycle_name, cycle, cycle_status = await _safe("cycle", _fetch_cycle(client))\n        price_name, btc_price, price_status = await _safe("btc_price", _fetch_btc_price(client))\n        macro_results = []\n        for name, series_id in FRED_SERIES.items():\n            try:\n                item_name, summary, status = await _fetch_fred_series(client, name, series_id)\n                macro_results.append((item_name, summary, status))\n            except Exception as exc:\n                macro_results.append((name, None, _source_status("ERROR", reason=f"{type(exc).__name__}: {str(exc)[:180]}", series_id=series_id)))\n        etf_name, etf, etf_status = await _safe("etf_flows", _fetch_etf(client))\n'''
+          new = '''    async with httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=True) as client:\n        tasks = [\n            _safe("cycle", _fetch_cycle(client)),\n            _safe("btc_price", _fetch_btc_price(client)),\n            *[\n                _safe(f"fred_{name}", _fetch_fred_series(client, name, series_id))\n                for name, series_id in FRED_SERIES.items()\n            ],\n            _safe("etf_flows", _fetch_etf(client)),\n        ]\n        results = await asyncio.gather(*tasks)\n\n    by_name = {name: (value, status) for name, value, status in results}\n    cycle, cycle_status = by_name["cycle"]\n    btc_price, price_status = by_name["btc_price"]\n    etf, etf_status = by_name["etf_flows"]\n    cycle_name = "cycle"\n    price_name = "btc_price"\n    etf_name = "etf_flows"\n    macro_results = []\n    for name, series_id in FRED_SERIES.items():\n        value, item_status = by_name[f"fred_{name}"]\n        if value is None:\n            macro_results.append((name, None, {**item_status, "series_id": series_id}))\n        else:\n            item_name, summary, nested_status = value\n            macro_results.append((item_name, summary, nested_status))\n'''
+          if old not in text and 'results = await asyncio.gather(*tasks)' not in text:
+              raise SystemExit('sequential provider block not found')
+          text = text.replace(old, new)
+          path.write_text(text)
+          PY
+      - name: Run focused and full-contract tests
+        working-directory: bybit_eu_swing_radar/backend
+        run: |
+          python -m pytest -q test_btc_macro_cycle_etf_shadow.py test_research_btc_macro_cycle_etf_api.py test_production_btc_macro_cycle_etf_shadow_smoke.py
+          python - <<'PY'
+          import inspect
+          from app import research_btc_macro_cycle_etf_api as api
+          source = inspect.getsource(api.build_current_snapshot)
+          assert 'asyncio.gather' in source
+          assert 'for name, series_id in FRED_SERIES.items()' in source
+          PY
+          python -m compileall -q app/research_btc_macro_cycle_etf_api.py
+      - name: Commit validated performance fix
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add bybit_eu_swing_radar/backend/app/research_btc_macro_cycle_etf_api.py
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Fix: parallelize BTC macro external providers"
+          git pull --rebase origin fix/btc-macro-parallel-providers
+          git push origin HEAD:fix/btc-macro-parallel-providers
