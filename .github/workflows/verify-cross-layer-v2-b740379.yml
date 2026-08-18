@@ -1,0 +1,29 @@
+name: Verify Cross-Layer v2 production b740379
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/verify-cross-layer-v2-b740379.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: b740379ac15d0904c6363dc0a88dcd434f598273
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: b740379ac15d0904c6363dc0a88dcd434f598273
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Exact-main Cross-Layer v2 production smoke
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_cross_layer_context_v2_smoke.py
