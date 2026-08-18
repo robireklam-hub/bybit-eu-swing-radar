@@ -1,0 +1,46 @@
+name: Temporary patch sector rotation routes
+
+on:
+  push:
+    branches:
+      - "research/sector-rotation-shadow-v1"
+    paths:
+      - ".github/workflows/patch-sector-rotation-routes.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Attach hidden sector rotation routes and self-remove
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          main = Path("bybit_eu_swing_radar/backend/app/main.py")
+          text = main.read_text()
+          attach = "attach_sector_rotation_research(app, require_api_key)"
+          if attach not in text:
+              text = text.rstrip() + "\n\n# Research-only sourced sector-taxonomy / rotation shadow. It aggregates\n# provider functional tags over relative strength without live mutation.\nfrom app.research_sector_rotation_api import attach_sector_rotation_research\n\nattach_sector_rotation_research(app, require_api_key)\n"
+              main.write_text(text)
+          Path(".github/workflows/patch-sector-rotation-routes.yml").unlink()
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bybit_eu_swing_radar/backend/app/main.py .github/workflows/patch-sector-rotation-routes.yml
+          if git diff --cached --quiet; then
+            echo "No patch required"
+            exit 0
+          fi
+          git commit -m "Research: attach sourced sector rotation routes"
+          git push origin HEAD:${GITHUB_REF_NAME}
