@@ -608,9 +608,10 @@ async def persist_day_journal(
         """
         SELECT *
         FROM day_trade_signal_journal
-        WHERE status = 'OPEN'
+        WHERE status = 'OPEN' AND strategy_version = $1
         ORDER BY opened_at ASC
-        """
+        """,
+        STRATEGY_VERSION,
     )
 
     evaluated = 0
@@ -628,7 +629,12 @@ async def persist_day_journal(
 
     active = int(
         await connection.fetchval(
-            "SELECT COUNT(*) FROM day_trade_signal_journal WHERE status = 'OPEN'"
+            """
+            SELECT COUNT(*)
+            FROM day_trade_signal_journal
+            WHERE status = 'OPEN' AND strategy_version = $1
+            """,
+            STRATEGY_VERSION,
         )
         or 0
     )
