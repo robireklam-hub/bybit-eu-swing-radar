@@ -71,6 +71,9 @@ def validate_capture(payload: dict[str, Any], expected_sha: str) -> tuple[bool, 
         bins = int((row.get("lookback_24h") or {}).get("bins") or 0)
         if bins < 1:
             continue
+        retries = int(status.get("rate_limit_retries") or 0)
+        if retries < 0 or retries > 2:
+            return False, f"invalid_rate_limit_retry_count:{name}"
         if state == "PARTIAL":
             if status.get("transport") != "HTTP":
                 return False, f"unexpected_partial_transport:{name}"
@@ -91,7 +94,7 @@ def run_smoke(
     api_key: str,
     expected_sha: str,
     *,
-    timeout: float = 45.0,
+    timeout: float = 180.0,
     fetch: Callable[..., dict[str, Any]] = fetch_json,
     sleep: Callable[[float], None] = time.sleep,
 ) -> int:
