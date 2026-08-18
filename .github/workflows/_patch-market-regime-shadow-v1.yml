@@ -35,6 +35,17 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+
+          api_path = Path('bybit_eu_swing_radar/backend/app/research_market_regime_api.py')
+          api_text = api_path.read_text()
+          signature = 'def attach_market_regime_research(app: FastAPI, require_api_key: Callable[..., Any]) -> None:\n'
+          guard = signature + '    if not callable(getattr(app, "post", None)):\n        return\n'
+          if guard not in api_text:
+              if signature not in api_text:
+                  raise SystemExit('market regime attach signature missing')
+              api_text = api_text.replace(signature, guard, 1)
+              api_path.write_text(api_text)
+
           path = Path('bybit_eu_swing_radar/backend/app/microstructure_research.py')
           text = path.read_text()
           import_line = 'from app.research_market_regime_api import attach_market_regime_research\n'
@@ -74,6 +85,6 @@ jobs:
           rm .github/workflows/_patch-market-regime-shadow-v1.yml
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add bybit_eu_swing_radar/backend/app/microstructure_research.py .github/workflows/_patch-market-regime-shadow-v1.yml
+          git add bybit_eu_swing_radar/backend/app/microstructure_research.py bybit_eu_swing_radar/backend/app/research_market_regime_api.py .github/workflows/_patch-market-regime-shadow-v1.yml
           git commit -m "Research: wire market regime shadow routes"
           git push origin HEAD:research/market-regime-shadow-v1
