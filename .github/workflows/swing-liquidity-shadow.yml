@@ -34,7 +34,20 @@ jobs:
         working-directory: bybit_eu_swing_radar/backend
         run: python research/swing_liquidity_shadow.py
 
-      - name: Verify durable forward capture state
+      - name: Bind verifier to this exact capture
+        working-directory: bybit_eu_swing_radar/backend
+        run: |
+          python - <<'PY' >> "$GITHUB_ENV"
+          import json
+          from pathlib import Path
+          payload = json.loads(Path("swing-liquidity-shadow.json").read_text())
+          captured_at = payload.get("captured_at")
+          if not captured_at:
+              raise SystemExit("captured_at missing from forward snapshot")
+          print(f"EXPECTED_SWING_LIQUIDITY_CAPTURE_AT={captured_at}")
+          PY
+
+      - name: Verify exact durable forward capture state
         working-directory: bybit_eu_swing_radar/backend
         run: python scripts/production_swing_liquidity_forward_status.py
 
