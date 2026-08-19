@@ -7,8 +7,10 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 ENDPOINT = "https://backboard.railway.com/graphql/v2"
@@ -20,6 +22,8 @@ CRON_SCHEDULE = "2-57/5 * * * *"
 RAILWAY_REGION = "europe-west4-drams3a"
 DEPLOYMENT_POLL_SECONDS = 5
 DEPLOYMENT_MAX_WAIT_SECONDS = 900
+GQL_RETRY_ATTEMPTS = 4
+TRANSIENT_HTTP_CODES = {429, 500, 502, 503, 504}
 REQUIRED_VARIABLES = (
     "BYBIT_BASE_URL",
     "COINALYZE_API_KEY",
@@ -30,6 +34,7 @@ STATE_FILE = Path(".prospective_funnel_deployment.json")
 
 
 def _gql(query: str, variables: dict[str, Any]) -> dict[str, Any]:
+    """Call Railway GraphQL with bounded retries for transient transport failures."""
     token = os.environ["RAILWAY_API_TOKEN"]
     request = Request(
         ENDPOINT,
@@ -41,15 +46,25 @@ def _gql(query: str, variables: dict[str, Any]) -> dict[str, Any]:
             "User-Agent": "prospective-funnel-provisioner/1",
         },
     )
-    with urlopen(request, timeout=30) as response:
-        payload = json.loads(response.read().decode())
-    if payload.get("errors"):
-        safe = [
-            {"message": item.get("message"), "path": item.get("path")}
-            for item in payload["errors"]
-        ]
-        raise RuntimeError("Railway GraphQL error: " + json.dumps(safe))
-    return payload.get("data") or {}
+    for attempt in range(GQL_RETRY_ATTEMPTS):
+        try:
+            with urlopen(request, timeout=30) as response:
+                payload = json.loads(response.read().decode())
+            if payload.get("errors"):
+                safe = [
+                    {"message": item.get("message"), "path": item.get("path")}
+                    for item in payload["errors"]
+                ]
+                raise RuntimeError("Railway GraphQL error: " + json.dumps(safe))
+            return payload.get("data") or {}
+        except HTTPError as exc:
+            if exc.code not in TRANSIENT_HTTP_CODES or attempt + 1 >= GQL_RETRY_ATTEMPTS:
+                raise
+        except URLError:
+            if attempt + 1 >= GQL_RETRY_ATTEMPTS:
+                raise
+        time.sleep(min(2 ** attempt, 8))
+    raise RuntimeError("Railway GraphQL retry loop exhausted")
 
 
 def _services(project_id: str) -> list[dict[str, str]]:
@@ -190,6 +205,57 @@ def _deployment_status(deployment_id: str) -> str:
     return str(deployment.get("status") or "UNKNOWN")
 
 
+def _recent_deployments(project_id: str, service_id: str) -> list[dict[str, Any]]:
+    """List recent service deployments using Railway's documented public API query."""
+    query = """
+    query deployments($input:DeploymentListInput!){
+      deployments(input:$input,first:20){edges{node{id status createdAt}}}
+    }
+    """
+    data = _gql(query, {"input": {"projectId": project_id, "serviceId": service_id}})
+    edges = ((data.get("deployments") or {}).get("edges") or [])
+    return [dict(edge.get("node") or {}) for edge in edges]
+
+
+def _parse_created_at(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _successful_same_run_deployment(
+    deployments: list[dict[str, Any]],
+    *,
+    requested_id: str,
+    not_before: datetime,
+) -> str | None:
+    """Return a sibling SUCCESS created by this provisioning run, if any.
+
+    Railway may create a sibling deployment when service variables/configuration
+    are updated immediately before the explicit exact-commit deploy. We only use
+    a sibling as a transport-level provisioning success if it was created during
+    this run. The following production smoke remains the exact-SHA semantic gate.
+    """
+    cutoff = not_before.astimezone(timezone.utc) - timedelta(seconds=5)
+    for item in deployments:
+        deployment_id = str(item.get("id") or "")
+        if not deployment_id or deployment_id == requested_id:
+            continue
+        if str(item.get("status") or "").upper() != "SUCCESS":
+            continue
+        created_at = _parse_created_at(item.get("createdAt"))
+        if created_at is not None and created_at >= cutoff:
+            return deployment_id
+    return None
+
+
 def main() -> int:
     project_id = os.environ["RAILWAY_PROJECT_ID"]
     environment_id = os.environ["RAILWAY_ENVIRONMENT_ID"]
@@ -198,24 +264,41 @@ def main() -> int:
 
     service_id, created = _ensure_service(project_id)
     source_vars = _source_variables(project_id, environment_id, day_service_id)
+    provision_started_at = datetime.now(timezone.utc)
     _upsert_variables(project_id, environment_id, service_id, source_vars)
     _configure_service(environment_id, service_id)
-    deployment_id = _deploy(environment_id, service_id, commit_sha)
+    requested_deployment_id = _deploy(environment_id, service_id, commit_sha)
+    effective_deployment_id = requested_deployment_id
 
     print("PROSPECTIVE_SERVICE_ID=" + service_id, flush=True)
     print("PROSPECTIVE_SERVICE_CREATED=" + str(created).lower(), flush=True)
-    print("PROSPECTIVE_DEPLOYMENT_ID=" + deployment_id, flush=True)
+    print("PROSPECTIVE_DEPLOYMENT_ID=" + requested_deployment_id, flush=True)
     print("PROSPECTIVE_REGION=" + RAILWAY_REGION, flush=True)
     print("VARIABLE_NAMES_COPIED=" + json.dumps(sorted(source_vars)), flush=True)
 
     final_status = "UNKNOWN"
     max_attempts = max(1, DEPLOYMENT_MAX_WAIT_SECONDS // DEPLOYMENT_POLL_SECONDS)
     for attempt in range(max_attempts):
-        final_status = _deployment_status(deployment_id)
+        final_status = _deployment_status(requested_deployment_id)
         if attempt % 6 == 0:
             print("DEPLOYMENT_STATUS=" + final_status, flush=True)
         if final_status == "SUCCESS":
             break
+
+        sibling_id = None
+        if attempt % 6 == 0 or final_status in {"FAILED", "CRASHED", "REMOVED", "CANCELLED"}:
+            sibling_id = _successful_same_run_deployment(
+                _recent_deployments(project_id, service_id),
+                requested_id=requested_deployment_id,
+                not_before=provision_started_at,
+            )
+        if sibling_id:
+            effective_deployment_id = sibling_id
+            final_status = "SUCCESS"
+            print("PROSPECTIVE_EFFECTIVE_DEPLOYMENT_ID=" + sibling_id, flush=True)
+            print("DEPLOYMENT_STATUS=SUCCESS_SIBLING", flush=True)
+            break
+
         if final_status in {"FAILED", "CRASHED", "REMOVED", "CANCELLED"}:
             raise RuntimeError("Standalone prospective deployment ended: " + final_status)
         time.sleep(DEPLOYMENT_POLL_SECONDS)
@@ -231,7 +314,8 @@ def main() -> int:
         json.dumps(
             {
                 "service_id": service_id,
-                "deployment_id": deployment_id,
+                "deployment_id": effective_deployment_id,
+                "requested_deployment_id": requested_deployment_id,
                 "commit_sha": commit_sha,
                 "region": RAILWAY_REGION,
                 "created": created,
