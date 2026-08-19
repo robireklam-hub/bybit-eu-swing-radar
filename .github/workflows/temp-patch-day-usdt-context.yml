@@ -1,0 +1,57 @@
+name: Temporary patch day USDT Coinalyze context
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.head_ref == 'fix/day-coinalyze-usdt-context'
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: fix/day-coinalyze-usdt-context
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        working-directory: bybit_eu_swing_radar/backend
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
+      - name: Apply minimal context-market patch
+        working-directory: bybit_eu_swing_radar/backend
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path=Path('worker.py')
+          src=path.read_text()
+          old='''    exchange_names: dict[str, str] = {}\n    exchange_metadata_error: str | None = None\n    quote_order = ("USDC", "USDT", "USD")\n    # Coinalyze future-markets exposes an exchange code, not a venue name.\n    # Resolve that code for both engines before venue ranking. Day keeps its\n    # historical USDC-first quote preference and score-enrichment semantics;\n    # swing keeps USDT-first context selection and partial-safe endpoints.\n    try:\n        exchange_rows = await api.exchanges()\n        exchange_names = {\n            str(row.get("code", "")).upper(): str(row.get("name", ""))\n            for row in exchange_rows\n            if isinstance(row, dict) and row.get("code") and row.get("name")\n        }\n    except Exception as exc:\n        exchange_metadata_error = f"exchanges: {type(exc).__name__}: {exc}"\n        if not partial_safe:\n            for item in selected_analyses:\n                item.missing_data.append(\n                    "Coinalyze exchange metadata unavailable; derivatives enrichment skipped"\n                )\n            return False, exchange_metadata_error\n\n    if partial_safe:\n        quote_order = ("USDT", "USDC", "USD")\n'''
+          new='''    exchange_names: dict[str, str] = {}\n    exchange_metadata_error: str | None = None\n    # Derivatives are context-only for execution semantics. Prefer the more\n    # complete/liquid Bybit USDT perpetual context for both day and swing,\n    # while all executable spot instruments remain strictly USDC-only.\n    quote_order = ("USDT", "USDC", "USD")\n    # Coinalyze future-markets exposes an exchange code, not a venue name.\n    # Resolve that code before venue ranking for both engines.\n    try:\n        exchange_rows = await api.exchanges()\n        exchange_names = {\n            str(row.get("code", "")).upper(): str(row.get("name", ""))\n            for row in exchange_rows\n            if isinstance(row, dict) and row.get("code") and row.get("name")\n        }\n    except Exception as exc:\n        exchange_metadata_error = f"exchanges: {type(exc).__name__}: {exc}"\n        if not partial_safe:\n            for item in selected_analyses:\n                item.missing_data.append(\n                    "Coinalyze exchange metadata unavailable; derivatives enrichment skipped"\n                )\n            return False, exchange_metadata_error\n'''
+          if src.count(old) != 1:
+              raise SystemExit(f'expected one quote-order anchor, got {src.count(old)}')
+          path.write_text(src.replace(old,new,1))
+          PY
+      - name: Verify focused and full backend suite
+        working-directory: bybit_eu_swing_radar/backend
+        run: |
+          pytest -q test_day_coinalyze_context.py test_swing_coinalyze_context.py
+          pytest -q
+          python -m compileall -q .
+          git diff --check
+      - name: Commit production patch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add bybit_eu_swing_radar/backend/worker.py
+          if ! git diff --cached --quiet; then
+            git commit -m 'fix: prefer USDT derivatives context for day Coinalyze'
+            git push origin HEAD:fix/day-coinalyze-usdt-context
+          fi
