@@ -46,6 +46,7 @@ from worker import (
     ema,
     coinalyze_payload_complete,
     enrich_coinalyze,
+    select_coinalyze_targets,
     mean,
     return_pct,
     round_to_tick,
@@ -1125,11 +1126,17 @@ def build_day_regime(
     coinalyze_enriched_symbols: int,
     borrowability_ok: bool,
     coinalyze_complete_symbols: int | None = None,
+    coinalyze_target_symbols: int | None = None,
 ) -> dict[str, Any]:
     complete_symbols = (
         coinalyze_enriched_symbols
         if coinalyze_complete_symbols is None
         else coinalyze_complete_symbols
+    )
+    target_symbols = (
+        len(analyses)
+        if coinalyze_target_symbols is None
+        else coinalyze_target_symbols
     )
     btc = next(
         (item for item in analyses if item.instrument.symbol == "BTCUSDC"), None
@@ -1155,7 +1162,8 @@ def build_day_regime(
     if (
         len(analyses) > 0
         and coinalyze_request_ok
-        and complete_symbols == len(analyses)
+        and target_symbols > 0
+        and complete_symbols == target_symbols
     ):
         coinalyze_quality = "GOOD"
     elif coinalyze_enriched_symbols > 0:
@@ -1190,6 +1198,57 @@ def build_day_regime(
             "4H conflict is context-only and does not veto strict eligibility or execution.",
             "Coinalyze data is aggregated and not Bybit EU-specific unless explicitly marked.",
         ],
+    }
+
+
+def build_day_coinalyze_source_status(
+    *,
+    now: datetime,
+    request_ok: bool,
+    request_error: str | None,
+    enriched_count: int,
+    complete_count: int,
+    target_count: int,
+    analysis_count: int,
+) -> dict[str, Any]:
+    """Report target health separately from budget-bounded analysis coverage."""
+    target_complete = (
+        request_ok
+        and target_count > 0
+        and complete_count == target_count
+    )
+    budget_bounded = analysis_count > target_count
+    return {
+        "source": "Coinalyze",
+        "status": (
+            "ok"
+            if target_complete
+            else "partial"
+            if enriched_count > 0
+            else "degraded"
+        ),
+        "data_as_of": now.isoformat() if enriched_count > 0 else None,
+        # Canonical source-health coverage is measured against the intentional
+        # rate-budget target set, not every deep-analyzed spot symbol.
+        "coverage": f"{complete_count}/{target_count}",
+        "any_field_coverage": f"{enriched_count}/{target_count}",
+        "complete_coverage": f"{complete_count}/{target_count}",
+        "target_count": target_count,
+        "target_any_field_coverage": f"{enriched_count}/{target_count}",
+        "target_complete_coverage": f"{complete_count}/{target_count}",
+        "analysis_count": analysis_count,
+        "analysis_any_field_coverage": f"{enriched_count}/{analysis_count}",
+        "analysis_complete_coverage": f"{complete_count}/{analysis_count}",
+        "analysis_coverage_mode": "budget_bounded" if budget_bounded else "full",
+        "budget_bounded": budget_bounded,
+        "missing_fields": (
+            []
+            if target_complete
+            else [
+                request_error
+                or "Targeted derivatives enrichment is only partially available"
+            ]
+        ),
     }
 
 
@@ -1409,8 +1468,13 @@ async def run() -> None:
                     "reason": str(exc),
                 })
 
+        # Freeze the intentional rate-budget target set so downstream health
+        # uses the same denominator as the enrichment call. This does not
+        # change which symbols are selected or any score/execution semantics.
+        coinalyze_targets = select_coinalyze_targets(analyses)
+        coinalyze_target_count = len(coinalyze_targets)
         coinalyze_ok, coinalyze_error = await enrich_coinalyze(
-            analyses, coinalyze
+            analyses, coinalyze, target_analyses=coinalyze_targets
         )
         borrow_ok, borrow_error = await apply_shortability(analyses, bybit)
         now = datetime.now(timezone.utc)
@@ -1468,6 +1532,7 @@ async def run() -> None:
             coinalyze_enriched_count,
             borrow_ok,
             coinalyze_complete_symbols=coinalyze_complete_count,
+            coinalyze_target_symbols=coinalyze_target_count,
         )
         data_quality = regime["data_quality"]
         coverage = {
@@ -1486,6 +1551,9 @@ async def run() -> None:
             "deep_calculation_failures": calculation_failures,
             "coinalyze_enriched_symbols": coinalyze_enriched_count,
             "coinalyze_complete_symbols": coinalyze_complete_count,
+            "coinalyze_target_symbols": coinalyze_target_count,
+            "coinalyze_analysis_symbols": len(analyses),
+            "coinalyze_budget_bounded": len(analyses) > coinalyze_target_count,
             "borrowability_checked_symbols": len(analyses) if borrow_ok else 0,
         }
 
@@ -1553,38 +1621,15 @@ async def run() -> None:
                         borrow_error or "Borrowability unavailable"
                     ],
                 },
-                {
-                    "source": "Coinalyze",
-                    "status": (
-                        "ok"
-                        if (
-                            coinalyze_ok
-                            and coinalyze_complete_count == len(analyses)
-                            and len(analyses) > 0
-                        )
-                        else "partial"
-                        if coinalyze_enriched_count > 0
-                        else "degraded"
-                    ),
-                    "data_as_of": (
-                        now.isoformat() if coinalyze_enriched_count > 0 else None
-                    ),
-                    "coverage": f"{coinalyze_complete_count}/{len(analyses)}",
-                    "any_field_coverage": f"{coinalyze_enriched_count}/{len(analyses)}",
-                    "complete_coverage": f"{coinalyze_complete_count}/{len(analyses)}",
-                    "missing_fields": (
-                        []
-                        if (
-                            coinalyze_ok
-                            and coinalyze_complete_count == len(analyses)
-                            and len(analyses) > 0
-                        )
-                        else [
-                            coinalyze_error
-                            or "Derivatives enrichment is only partially available"
-                        ]
-                    ),
-                },
+                build_day_coinalyze_source_status(
+                    now=now,
+                    request_ok=coinalyze_ok,
+                    request_error=coinalyze_error,
+                    enriched_count=coinalyze_enriched_count,
+                    complete_count=coinalyze_complete_count,
+                    target_count=coinalyze_target_count,
+                    analysis_count=len(analyses),
+                ),
             ],
         }
 
