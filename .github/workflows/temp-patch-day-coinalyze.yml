@@ -21,6 +21,9 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
+      - name: Install backend dependencies
+        working-directory: bybit_eu_swing_radar/backend
+        run: pip install -r requirements.txt
       - name: Apply deterministic patch
         working-directory: bybit_eu_swing_radar/backend
         run: |
