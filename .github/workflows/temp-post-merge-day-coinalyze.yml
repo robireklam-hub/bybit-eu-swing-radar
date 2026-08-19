@@ -1,0 +1,189 @@
+name: Temporary post-merge day Coinalyze verification
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.head_ref == 'diag/post-merge-day-coinalyze-27737fb'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      EXACT_MAIN_SHA: 27737fbe3caacdd2efbe72ca0acdfc0ebc6cc88f
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.EXACT_MAIN_SHA }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Verify exact production day Coinalyze semantics
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXACT_MAIN_SHA"
+          python - <<'PY'
+          import json, os, time
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+          from urllib.error import HTTPError
+
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key = os.environ['PRODUCTION_RADAR_API_KEY']
+          exact = os.environ['EXACT_MAIN_SHA']
+
+          def get(path, auth=True):
+              headers = {'Accept':'application/json','User-Agent':'day-coinalyze-post-merge/1'}
+              if auth:
+                  headers['X-Radar-Key'] = key
+              req = Request(base + path, headers=headers)
+              with urlopen(req, timeout=40) as response:
+                  return json.load(response)
+
+          # Wait for the API deployment itself to expose the exact merge SHA.
+          version = None
+          for _ in range(60):
+              try:
+                  version = get('/version', False)
+                  if version.get('commit_sha') == exact:
+                      break
+              except Exception:
+                  pass
+              time.sleep(5)
+          assert version and version.get('commit_sha') == exact, version
+
+          # A new day-worker cache is required: the new complete-count field did
+          # not exist before PR #223, so this cannot accidentally validate stale data.
+          status = None
+          for _ in range(90):
+              try:
+                  candidate = get('/v1/day-trade/status')
+                  coverage = candidate.get('coverage') or {}
+                  if 'coinalyze_complete_symbols' in coverage:
+                      status = candidate
+                      break
+              except Exception:
+                  pass
+              time.sleep(5)
+          assert status is not None, 'new day-worker cache with complete coverage did not appear'
+
+          coverage = status.get('coverage') or {}
+          analyzed = int(coverage.get('deep_analyzed_pairs') or coverage.get('analyzed_pairs') or 0)
+          any_count = int(coverage.get('coinalyze_enriched_symbols') or 0)
+          complete_count = int(coverage.get('coinalyze_complete_symbols') or 0)
+          assert 0 <= complete_count <= any_count
+          if analyzed:
+              assert any_count <= analyzed
+
+          sources = status.get('sources') or []
+          coinalyze = next((x for x in sources if str(x.get('source','')).lower() == 'coinalyze'), None)
+          assert coinalyze is not None, sources
+          source_status = str(coinalyze.get('status') or '').lower()
+          complete_cov = coinalyze.get('complete_coverage') or coinalyze.get('coverage')
+          any_cov = coinalyze.get('any_field_coverage')
+          assert complete_cov is not None
+          assert any_cov is not None
+          if analyzed:
+              assert str(complete_cov) == f'{complete_count}/{analyzed}'
+              assert str(any_cov) == f'{any_count}/{analyzed}'
+          if source_status == 'ok':
+              assert analyzed > 0 and complete_count == analyzed
+              assert not (coinalyze.get('missing_fields') or [])
+          else:
+              assert source_status in {'partial','degraded'}
+              assert (coinalyze.get('missing_fields') or [])
+
+          scan = get('/v1/day-trade/scan?' + urlencode({
+              'direction':'both','limit':20,'min_score':0,'include_watchlist':'true'
+          }))
+          top = get('/v1/day-trade/top-candidates?' + urlencode({
+              'limit':5,'include_watchlist':'true'
+          }))
+
+          def flatten_candidates(payload):
+              out=[]
+              if isinstance(payload, list):
+                  return payload
+              if not isinstance(payload, dict):
+                  return out
+              for key, value in payload.items():
+                  if isinstance(value, list) and any(k in key.lower() for k in ('candidate','long','short','watch','result','setup')):
+                      out.extend(x for x in value if isinstance(x, dict))
+              return out
+
+          scan_candidates = flatten_candidates(scan)
+          top_candidates = flatten_candidates(top)
+          candidates = scan_candidates + top_candidates
+          for item in candidates:
+              symbol = str(item.get('symbol') or '').upper()
+              if symbol:
+                  assert symbol.endswith('USDC'), symbol
+
+          # Read a bounded set of concrete setup/audit payloads for routing evidence.
+          symbols=[]
+          for item in candidates:
+              sym=str(item.get('symbol') or '').upper()
+              if sym and sym not in symbols:
+                  symbols.append(sym)
+              if len(symbols) >= 8:
+                  break
+          setup_rows=[]
+          for sym in symbols:
+              row={'symbol':sym}
+              for kind, path in (
+                  ('setup', f'/v1/day-trade/setup/{sym}'),
+                  ('audit', f'/v1/day-trade/audit/{sym}'),
+              ):
+                  try:
+                      row[kind]=get(path)
+                  except HTTPError as exc:
+                      row[kind+'_http']=exc.code
+              setup_rows.append(row)
+
+          def find_derivatives(obj):
+              found=[]
+              def walk(v, path=''):
+                  if isinstance(v, dict):
+                      keys=set(v)
+                      if 'derivatives_market_symbol' in keys or 'coinalyze_market_symbol' in keys or (
+                          'quote_asset' in keys and ('exchange_name' in keys or 'exchange_code' in keys)
+                      ):
+                          found.append({'path':path, **v})
+                      for k, x in v.items():
+                          if k in {'derivatives','coinalyze','derivatives_context'} and isinstance(x, dict):
+                              found.append({'path':path+'/'+k, **x})
+                          walk(x, path+'/'+str(k))
+                  elif isinstance(v, list):
+                      for i,x in enumerate(v): walk(x, path+f'/{i}')
+              walk(obj)
+              return found
+
+          derivative_rows=[]
+          for row in setup_rows:
+              ds=find_derivatives(row)
+              if ds:
+                  derivative_rows.append({'symbol':row['symbol'],'rows':ds[:8]})
+
+          summary = {
+              'exact_sha': exact,
+              'strategy_version': status.get('strategy_version'),
+              'data_as_of': status.get('data_as_of') or status.get('checked_at'),
+              'analyzed': analyzed,
+              'coinalyze_any_field': any_count,
+              'coinalyze_complete': complete_count,
+              'coinalyze_source': coinalyze,
+              'scan_candidate_count_observed': len(scan_candidates),
+              'top_candidate_count_observed': len(top_candidates),
+              'sample_symbols': symbols,
+              'derivatives_evidence': derivative_rows,
+              'status_keys': sorted(status.keys()),
+              'coverage': coverage,
+          }
+          print('DAY_COINALYZE_PRODUCTION_SUMMARY=' + json.dumps(summary, sort_keys=True, default=str))
+          print('DAY COINALYZE EXACT-SHA PRODUCTION VERIFIED.')
+          PY
