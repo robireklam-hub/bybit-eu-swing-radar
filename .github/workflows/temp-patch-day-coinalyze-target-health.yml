@@ -1,15 +1,16 @@
 name: Temporary patch day Coinalyze target health
 
 on:
-  push:
-    branches: [fix/day-coinalyze-target-health]
+  pull_request:
+    types: [synchronize]
+    branches: [main]
 
 permissions:
   contents: write
 
 jobs:
   patch:
-    if: github.actor != 'github-actions[bot]'
+    if: github.head_ref == 'fix/day-coinalyze-target-health' && github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
