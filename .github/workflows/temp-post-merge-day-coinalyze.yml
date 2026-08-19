@@ -12,7 +12,7 @@ jobs:
   verify:
     if: github.head_ref == 'diag/post-merge-day-coinalyze-27737fb'
     runs-on: macos-latest
-    timeout-minutes: 12
+    timeout-minutes: 5
     env:
       EXACT_MAIN_SHA: 27737fbe3caacdd2efbe72ca0acdfc0ebc6cc88f
       PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
@@ -21,165 +21,110 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ env.EXACT_MAIN_SHA }}
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.12'
       - name: Verify exact production day Coinalyze semantics
         run: |
           test "$(git rev-parse HEAD)" = "$EXACT_MAIN_SHA"
           python - <<'PY'
-          import json, os, time
+          import json, os
           from urllib.parse import urlencode
           from urllib.request import Request, urlopen
           from urllib.error import HTTPError
 
-          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
-          key = os.environ['PRODUCTION_RADAR_API_KEY']
-          exact = os.environ['EXACT_MAIN_SHA']
-
+          base=os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key=os.environ['PRODUCTION_RADAR_API_KEY']
+          exact=os.environ['EXACT_MAIN_SHA']
           def get(path, auth=True):
-              headers = {'Accept':'application/json','User-Agent':'day-coinalyze-post-merge/1'}
-              if auth:
-                  headers['X-Radar-Key'] = key
-              req = Request(base + path, headers=headers)
-              with urlopen(req, timeout=40) as response:
-                  return json.load(response)
+              h={'Accept':'application/json','User-Agent':'day-coinalyze-post-merge/2'}
+              if auth: h['X-Radar-Key']=key
+              with urlopen(Request(base+path,headers=h),timeout=40) as r:
+                  return json.load(r)
 
-          version = None
-          for _ in range(60):
-              try:
-                  version = get('/version', False)
-                  if version.get('commit_sha') == exact:
-                      break
-              except Exception:
-                  pass
-              time.sleep(5)
-          assert version and version.get('commit_sha') == exact, version
+          version=get('/version',False)
+          assert version.get('commit_sha') == exact, version
+          status=get('/v1/day-trade/status')
+          worker=status.get('worker') or {}
+          assert worker.get('source_commit_sha') == exact, worker
+          analyzed=int(worker.get('deep_analyzed_pairs') or 0)
+          any_count=int(worker.get('coinalyze_enriched_symbols') or 0)
+          complete_count=int(worker.get('coinalyze_complete_symbols') or 0)
+          assert 0 <= complete_count <= any_count <= 9
+          assert any_count <= analyzed
 
-          status = None
-          for _ in range(90):
-              try:
-                  candidate = get('/v1/day-trade/status')
-                  coverage = candidate.get('coverage') or {}
-                  if 'coinalyze_complete_symbols' in coverage:
-                      status = candidate
-                      break
-              except Exception:
-                  pass
-              time.sleep(5)
-          assert status is not None, 'new day-worker cache with complete coverage did not appear'
-
-          coverage = status.get('coverage') or {}
-          analyzed = int(coverage.get('deep_analyzed_pairs') or coverage.get('analyzed_pairs') or 0)
-          any_count = int(coverage.get('coinalyze_enriched_symbols') or 0)
-          complete_count = int(coverage.get('coinalyze_complete_symbols') or 0)
-          assert 0 <= complete_count <= any_count
-          if analyzed:
-              assert any_count <= analyzed
-
-          sources = status.get('sources') or []
-          coinalyze = next((x for x in sources if str(x.get('source','')).lower() == 'coinalyze'), None)
+          sources=status.get('sources') or []
+          coinalyze=next((x for x in sources if str(x.get('source','')).lower()=='coinalyze'),None)
           assert coinalyze is not None, sources
-          source_status = str(coinalyze.get('status') or '').lower()
-          complete_cov = coinalyze.get('complete_coverage') or coinalyze.get('coverage')
-          any_cov = coinalyze.get('any_field_coverage')
-          assert complete_cov is not None
-          assert any_cov is not None
-          if analyzed:
-              assert str(complete_cov) == f'{complete_count}/{analyzed}'
-              assert str(any_cov) == f'{any_count}/{analyzed}'
+          assert coinalyze.get('any_field_coverage') == f'{any_count}/{analyzed}'
+          assert coinalyze.get('complete_coverage') == f'{complete_count}/{analyzed}'
+          assert coinalyze.get('coverage') == f'{complete_count}/{analyzed}'
+          source_status=str(coinalyze.get('status') or '').lower()
           if source_status == 'ok':
-              assert analyzed > 0 and complete_count == analyzed
+              assert complete_count == analyzed and analyzed > 0
               assert not (coinalyze.get('missing_fields') or [])
           else:
               assert source_status in {'partial','degraded'}
-              assert (coinalyze.get('missing_fields') or [])
+              assert coinalyze.get('missing_fields')
 
-          scan = get('/v1/day-trade/scan?' + urlencode({
-              'direction':'both','limit':20,'min_score':0,'include_watchlist':'true'
-          }))
-          top = get('/v1/day-trade/top-candidates?' + urlencode({
-              'limit':5,'include_watchlist':'true'
-          }))
-
-          def flatten_candidates(payload):
+          scan=get('/v1/day-trade/scan?'+urlencode({'direction':'both','limit':20,'min_score':0,'include_watchlist':'true'}))
+          top=get('/v1/day-trade/top-candidates?'+urlencode({'limit':5,'include_watchlist':'true'}))
+          def flatten(payload):
               out=[]
-              if isinstance(payload, list):
-                  return payload
-              if not isinstance(payload, dict):
-                  return out
-              for key, value in payload.items():
-                  if isinstance(value, list) and any(k in key.lower() for k in ('candidate','long','short','watch','result','setup')):
-                      out.extend(x for x in value if isinstance(x, dict))
+              if isinstance(payload,list): return [x for x in payload if isinstance(x,dict)]
+              if not isinstance(payload,dict): return out
+              for k,v in payload.items():
+                  if isinstance(v,list) and any(token in k.lower() for token in ('candidate','long','short','watch','result','setup')):
+                      out.extend(x for x in v if isinstance(x,dict))
               return out
-
-          scan_candidates = flatten_candidates(scan)
-          top_candidates = flatten_candidates(top)
-          candidates = scan_candidates + top_candidates
+          candidates=flatten(scan)+flatten(top)
           for item in candidates:
-              symbol = str(item.get('symbol') or '').upper()
-              if symbol:
-                  assert symbol.endswith('USDC'), symbol
+              sym=str(item.get('symbol') or '').upper()
+              if sym: assert sym.endswith('USDC'), sym
 
           symbols=[]
           for item in candidates:
               sym=str(item.get('symbol') or '').upper()
-              if sym and sym not in symbols:
-                  symbols.append(sym)
-              if len(symbols) >= 8:
-                  break
-          setup_rows=[]
-          for sym in symbols:
-              row={'symbol':sym}
-              for kind, path in (
-                  ('setup', f'/v1/day-trade/setup/{sym}'),
-                  ('audit', f'/v1/day-trade/audit/{sym}'),
-              ):
-                  try:
-                      row[kind]=get(path)
-                  except HTTPError as exc:
-                      row[kind+'_http']=exc.code
-              setup_rows.append(row)
+              if sym and sym not in symbols: symbols.append(sym)
+              if len(symbols)>=10: break
+          # Ensure known enriched symbols from missing_fields are sampled too.
+          for sym in ('BTCUSDC','ETHUSDC','SOLUSDC','XRPUSDC','LINKUSDC','LTCUSDC','INJUSDC','UNIUSDC'):
+              if sym not in symbols: symbols.append(sym)
 
-          def find_derivatives(obj):
-              found=[]
-              def walk(v, path=''):
-                  if isinstance(v, dict):
-                      keys=set(v)
-                      if 'derivatives_market_symbol' in keys or 'coinalyze_market_symbol' in keys or (
-                          'quote_asset' in keys and ('exchange_name' in keys or 'exchange_code' in keys)
-                      ):
-                          found.append({'path':path, **v})
-                      for k, x in v.items():
-                          if k in {'derivatives','coinalyze','derivatives_context'} and isinstance(x, dict):
-                              found.append({'path':path+'/'+k, **x})
-                          walk(x, path+'/'+str(k))
-                  elif isinstance(v, list):
-                      for i,x in enumerate(v): walk(x, path+f'/{i}')
-              walk(obj)
-              return found
+          evidence=[]
+          for sym in symbols[:14]:
+              try:
+                  setup=get(f'/v1/day-trade/setup/{sym}')
+              except HTTPError as exc:
+                  evidence.append({'symbol':sym,'setup_http':exc.code}); continue
+              derivatives=setup.get('derivatives') if isinstance(setup,dict) else None
+              if isinstance(derivatives,dict) and derivatives:
+                  evidence.append({
+                      'symbol':sym,
+                      'market_symbol':derivatives.get('market_symbol') or derivatives.get('symbol'),
+                      'exchange_code':derivatives.get('exchange_code'),
+                      'exchange_name':derivatives.get('exchange_name') or derivatives.get('exchange'),
+                      'quote_asset':derivatives.get('quote_asset'),
+                      'availability':derivatives.get('availability'),
+                      'endpoint_errors':derivatives.get('endpoint_errors'),
+                      'is_bybit_specific':derivatives.get('is_bybit_specific'),
+                  })
 
-          derivative_rows=[]
-          for row in setup_rows:
-              ds=find_derivatives(row)
-              if ds:
-                  derivative_rows.append({'symbol':row['symbol'],'rows':ds[:8]})
+          # Every populated day derivatives payload must resolve to Bybit after PR #223.
+          populated=[x for x in evidence if x.get('market_symbol')]
+          for row in populated:
+              name=str(row.get('exchange_name') or '').lower()
+              assert 'bybit' in name, row
 
-          summary = {
-              'exact_sha': exact,
-              'strategy_version': status.get('strategy_version'),
-              'data_as_of': status.get('data_as_of') or status.get('checked_at'),
-              'analyzed': analyzed,
-              'coinalyze_any_field': any_count,
-              'coinalyze_complete': complete_count,
-              'coinalyze_source': coinalyze,
-              'scan_candidate_count_observed': len(scan_candidates),
-              'top_candidate_count_observed': len(top_candidates),
-              'sample_symbols': symbols,
-              'derivatives_evidence': derivative_rows,
-              'status_keys': sorted(status.keys()),
-              'coverage': coverage,
+          summary={
+              'exact_sha':exact,
+              'checked_at':status.get('checked_at'),
+              'worker_duration_seconds':worker.get('duration_seconds'),
+              'deep_requested':worker.get('deep_requested_pairs'),
+              'deep_analyzed':analyzed,
+              'coinalyze_any_field':any_count,
+              'coinalyze_complete':complete_count,
+              'coinalyze_source':coinalyze,
+              'candidate_count_observed':len(candidates),
+              'routing_evidence':evidence,
           }
-          print('DAY_COINALYZE_PRODUCTION_SUMMARY=' + json.dumps(summary, sort_keys=True, default=str))
+          print('DAY_COINALYZE_PRODUCTION_SUMMARY='+json.dumps(summary,sort_keys=True,default=str))
           print('DAY COINALYZE EXACT-SHA PRODUCTION VERIFIED.')
           PY
