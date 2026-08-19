@@ -1,14 +1,22 @@
-"""Read-only API for standalone v0.7.3 prospective funnel research status."""
+"""Read-only API composition for standalone prospective research status routes."""
 from __future__ import annotations
 
 from fastapi import Depends, HTTPException
 
 from app.repository import RadarRepository
+from app.research_microstructure_alignment_v2_api import (
+    attach_microstructure_alignment_v2_research,
+)
 
 CACHE_KEY = "day_trade_prospective_funnel_status"
 
 
 def attach_prospective_funnel_research(app, require_api_key) -> None:
+    # Keep the independently preregistered v0.7.4 microstructure cohort observable
+    # through the same research-only API composition point. This adds a read-only
+    # status route only; it has no live strategy/scoring/eligibility/execution path.
+    attach_microstructure_alignment_v2_research(app, require_api_key)
+
     repo = RadarRepository()
 
     @app.get(
