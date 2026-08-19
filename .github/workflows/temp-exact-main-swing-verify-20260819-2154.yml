@@ -1,0 +1,33 @@
+name: Temp exact-main swing verification 20260819 2154
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: d0bd8d4b4bab1b2e27dacafc5a9a49a016245ef8
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: d0bd8d4b4bab1b2e27dacafc5a9a49a016245ef8
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Verify swing Coinalyze candidate semantics
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_coinalyze_smoke.py
+      - name: Verify swing liquidity label-blind events
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_event_smoke.py
+      - name: Verify swing liquidity maturity status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_maturity_status.py
