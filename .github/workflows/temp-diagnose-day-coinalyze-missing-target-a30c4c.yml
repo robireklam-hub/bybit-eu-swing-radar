@@ -5,6 +5,10 @@ on:
     types: [opened, synchronize]
     branches: [main]
 
+concurrency:
+  group: diag-day-coinalyze-missing-target-a30c4c
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -12,7 +16,7 @@ jobs:
   diagnose:
     if: github.head_ref == 'diag/day-coinalyze-missing-target-a30c4c'
     runs-on: macos-26
-    timeout-minutes: 8
+    timeout-minutes: 5
     env:
       EXACT_MAIN_SHA: a30c4c806b520b11d619c2610ffc206456ee0f1a
       PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
@@ -25,6 +29,7 @@ jobs:
         shell: bash
         run: |
           python - <<'PY'
+          import concurrent.futures
           import json, os
           from datetime import datetime
           from urllib.parse import urlencode
@@ -34,8 +39,8 @@ jobs:
           base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
           key = os.environ['PRODUCTION_RADAR_API_KEY']
 
-          def get(path, auth=True, timeout=35):
-              headers = {'Accept':'application/json','User-Agent':'day-coinalyze-cache-diag/4'}
+          def get(path, auth=True, timeout=25):
+              headers = {'Accept':'application/json','User-Agent':'day-coinalyze-cache-diag/5'}
               if auth:
                   headers['X-Radar-Key'] = key
               with urlopen(Request(base + path, headers=headers), timeout=timeout) as response:
@@ -46,10 +51,10 @@ jobs:
 
           version = get('/version', False)
           assert version.get('commit_sha') == exact, version
-          status = get('/v1/day-trade/status')
-          worker = status.get('worker') or {}
+          status_before = get('/v1/day-trade/status')
+          worker = status_before.get('worker') or {}
           assert worker.get('source_commit_sha') == exact, worker
-          checked_at = status.get('checked_at')
+          checked_at = status_before.get('checked_at')
 
           scan = get('/v1/day-trade/scan?' + urlencode({
               'direction':'both','limit':20,'min_score':0,'include_watchlist':'true'
@@ -64,10 +69,20 @@ jobs:
                           symbols.add(str(item['symbol']).upper())
           assert symbols, scan.keys()
 
+          def read_setup(symbol):
+              return symbol, get('/v1/day-trade/setup/' + symbol)
+
+          with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+              setup_pairs = list(pool.map(read_setup, sorted(symbols)))
+
+          status_after = get('/v1/day-trade/status')
+          assert ts(status_after.get('checked_at')) == ts(checked_at), (
+              'cache generation changed during diagnostic', checked_at, status_after.get('checked_at')
+          )
+
           target_details = []
           observed = []
-          for symbol in sorted(symbols):
-              setup = get('/v1/day-trade/setup/' + symbol)
+          for symbol, setup in setup_pairs:
               if ts(setup.get('data_as_of')) != ts(checked_at):
                   continue
               derivatives = setup.get('derivatives') or {}
@@ -97,6 +112,7 @@ jobs:
               if is_target:
                   target_details.append(row)
 
+          worker = status_after.get('worker') or {}
           target_count = int(worker.get('coinalyze_target_symbols') or 0)
           enriched_count = int(worker.get('coinalyze_enriched_symbols') or 0)
           complete_count = int(worker.get('coinalyze_complete_symbols') or 0)
@@ -110,10 +126,10 @@ jobs:
           assert actual_complete == complete_count, (actual_complete, complete_count, target_details)
           assert len(no_match) == target_count - enriched_count, (no_match, target_count, enriched_count)
 
-          source = next((x for x in status.get('sources',[]) if str(x.get('source','')).lower() == 'coinalyze'), {})
+          source = next((x for x in status_after.get('sources',[]) if str(x.get('source','')).lower() == 'coinalyze'), {})
           result = {
               'exact_sha': exact,
-              'checked_at': checked_at,
+              'checked_at': status_after.get('checked_at'),
               'analysis_count': analysis_count,
               'scan_unique_symbol_count': len(symbols),
               'target_count': target_count,
