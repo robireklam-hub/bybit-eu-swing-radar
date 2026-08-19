@@ -12,198 +12,138 @@ jobs:
   diagnose:
     if: github.head_ref == 'diag/day-coinalyze-missing-target-a30c4c'
     runs-on: macos-26
-    timeout-minutes: 10
+    timeout-minutes: 8
     env:
       EXACT_MAIN_SHA: a30c4c806b520b11d619c2610ffc206456ee0f1a
       PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
       PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
-      COINALYZE_API_KEY: ${{ secrets.COINALYZE_API_KEY }}
     steps:
       - uses: actions/checkout@v7
         with:
           ref: a30c4c806b520b11d619c2610ffc206456ee0f1a
-      - name: Diagnose persisted target miss without running a new worker scan
+      - name: Reconstruct exact target set from persisted cache only
         shell: bash
         run: |
           cd bybit_eu_swing_radar/backend
           python - <<'PY'
-          import concurrent.futures
-          import json
-          import os
-          import sys
-          from urllib.error import HTTPError
+          import json, os
           from urllib.parse import urlencode
           from urllib.request import Request, urlopen
 
           exact = os.environ['EXACT_MAIN_SHA']
           base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
-          radar_key = os.environ['PRODUCTION_RADAR_API_KEY']
-          coinalyze_key = os.environ['COINALYZE_API_KEY']
+          key = os.environ['PRODUCTION_RADAR_API_KEY']
 
-          def get_json(url, headers=None, timeout=30):
-              request = Request(url, headers=headers or {})
-              with urlopen(request, timeout=timeout) as response:
+          def get(path, auth=True, timeout=35):
+              headers = {'Accept':'application/json','User-Agent':'day-coinalyze-cache-diag/2'}
+              if auth:
+                  headers['X-Radar-Key'] = key
+              with urlopen(Request(base + path, headers=headers), timeout=timeout) as response:
                   return json.load(response)
 
-          def radar_get(path):
-              return get_json(
-                  base + path,
-                  headers={
-                      'Accept': 'application/json',
-                      'X-Radar-Key': radar_key,
-                      'User-Agent': 'day-coinalyze-missing-target-diag/1',
-                  },
-                  timeout=30,
-              )
-
-          version = get_json(base + '/version', headers={'User-Agent':'day-coinalyze-missing-target-diag/1'})
+          version = get('/version', False)
           assert version.get('commit_sha') == exact, version
+          status = get('/v1/day-trade/status')
+          worker = status.get('worker') or {}
+          assert worker.get('source_commit_sha') == exact, worker
+          checked_at = status.get('checked_at')
 
-          # One public Bybit metadata call gives the finite USDC symbol list.
-          bybit = get_json(
-              'https://api.bybit.eu/v5/market/instruments-info?' + urlencode({
-                  'category':'spot', 'limit':1000,
-              }),
-              headers={'Accept':'application/json','User-Agent':'day-coinalyze-missing-target-diag/1'},
-              timeout=30,
-          )
-          assert int(bybit.get('retCode', -1)) == 0, bybit
-          rows = (bybit.get('result') or {}).get('list') or []
-          symbols = sorted({
-              str(row.get('symbol') or '').upper()
-              for row in rows
-              if str(row.get('quoteCoin') or '').upper() == 'USDC'
-              and str(row.get('status') or '').lower() in {'trading','available',''}
-              and row.get('symbol')
-          })
-          assert symbols, 'No Bybit EU USDC symbols returned'
+          scan = get('/v1/day-trade/scan?' + urlencode({
+              'direction':'both', 'limit':20, 'min_score':0, 'include_watchlist':'true'
+          }))
+          assert scan.get('data_as_of') == checked_at, (scan.get('data_as_of'), checked_at)
 
-          def read_setup(symbol):
-              try:
-                  return symbol, radar_get('/v1/day-trade/setup/' + symbol)
-              except HTTPError as exc:
-                  if exc.code == 404:
-                      return symbol, None
-                  raise
+          candidates = []
+          for name, value in scan.items():
+              if isinstance(value, list) and any(token in name.lower() for token in ('long','short','candidate','watch','setup')):
+                  candidates.extend(item for item in value if isinstance(item, dict) and item.get('symbol'))
+          assert candidates, scan.keys()
 
-          # Avoid a mixed cache generation: retry if checked_at changes while setup cache is read.
-          stable_status = None
-          current_setups = None
-          for attempt in range(3):
-              status_before = radar_get('/v1/day-trade/status')
-              worker_before = status_before.get('worker') or {}
-              assert worker_before.get('source_commit_sha') == exact, worker_before
-              checked_at = status_before.get('checked_at')
-              with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
-                  pairs = list(pool.map(read_setup, symbols))
-              status_after = radar_get('/v1/day-trade/status')
-              if (
-                  status_after.get('checked_at') == checked_at
-                  and (status_after.get('worker') or {}).get('source_commit_sha') == exact
-              ):
-                  stable_status = status_after
-                  current_setups = {
-                      symbol: setup
-                      for symbol, setup in pairs
-                      if isinstance(setup, dict) and setup.get('data_as_of') == checked_at
-                  }
-                  break
-          assert stable_status is not None and current_setups is not None, 'Could not obtain one stable setup-cache generation'
+          from worker import DISCOVERY_SYMBOLS, COINALYZE_ENRICH_LIMIT
 
-          worker = stable_status.get('worker') or {}
+          # For each symbol, the direction-aligned candidate's setup_score equals
+          # setup_score(expansion, abs(direction), quality). Add the selector's
+          # fixed discovery bonus exactly as select_coinalyze_targets does.
+          by_symbol = {}
+          for item in candidates:
+              symbol = str(item.get('symbol')).upper()
+              if item.get('data_as_of') != checked_at:
+                  continue
+              row = by_symbol.setdefault(symbol, {
+                  'symbol': symbol,
+                  'base_score': -1.0,
+                  'selector_score': -1.0,
+                  'candidate': None,
+              })
+              base_score = float(item.get('setup_score') or 0.0)
+              selector_score = base_score + (5.0 if symbol in DISCOVERY_SYMBOLS else 0.0)
+              if selector_score > row['selector_score']:
+                  row.update({
+                      'base_score': base_score,
+                      'selector_score': selector_score,
+                      'candidate': item,
+                  })
+
+          ranked = sorted(by_symbol.values(), key=lambda row: row['selector_score'], reverse=True)
           target_count = int(worker.get('coinalyze_target_symbols') or 0)
           enriched_count = int(worker.get('coinalyze_enriched_symbols') or 0)
           complete_count = int(worker.get('coinalyze_complete_symbols') or 0)
           analysis_count = int(worker.get('coinalyze_analysis_symbols') or worker.get('deep_analyzed_pairs') or 0)
-          assert len(current_setups) == analysis_count, (len(current_setups), analysis_count, sorted(current_setups))
+          assert target_count == min(COINALYZE_ENRICH_LIMIT, analysis_count), (target_count, analysis_count, COINALYZE_ENRICH_LIMIT)
+          assert len(ranked) >= target_count, (len(ranked), target_count)
+          targets = ranked[:target_count]
 
-          explicit_market_misses = []
-          enriched_symbols = []
-          incomplete_symbols = []
-          for symbol, setup in current_setups.items():
-              missing = setup.get('missing_data') or []
+          target_details = []
+          for target in targets:
+              symbol = target['symbol']
+              setup = get('/v1/day-trade/setup/' + symbol)
+              assert setup.get('data_as_of') == checked_at, (symbol, setup.get('data_as_of'), checked_at)
               derivatives = setup.get('derivatives') or {}
-              if any('No matching Coinalyze perpetual market' in str(item) for item in missing):
-                  explicit_market_misses.append(symbol)
-              if derivatives:
-                  enriched_symbols.append(symbol)
-                  availability = derivatives.get('availability') or {}
-                  if derivatives.get('endpoint_errors') or not all(
-                      availability.get(field) is True
-                      for field in ('current_oi','funding','oi_history','liquidations')
-                  ):
-                      incomplete_symbols.append(symbol)
-
-          # Metadata-only Coinalyze calls; no OI/funding/history symbol-call burst.
-          c_headers = {'api_key': coinalyze_key, 'Accept':'application/json', 'User-Agent':'day-coinalyze-missing-target-diag/1'}
-          markets = get_json('https://api.coinalyze.net/v1/future-markets', headers=c_headers, timeout=30)
-          exchanges = get_json('https://api.coinalyze.net/v1/exchanges', headers=c_headers, timeout=30)
-          exchange_names = {
-              str(row.get('code') or '').upper(): str(row.get('name') or '')
-              for row in exchanges if isinstance(row, dict)
-          }
-
-          sys.path.insert(0, '.')
-          from worker import select_coinalyze_markets
-
-          miss_details = []
-          for symbol in explicit_market_misses:
-              base_asset = symbol[:-4] if symbol.endswith('USDC') else symbol
-              base_markets = [
-                  row for row in markets
-                  if isinstance(row, dict)
-                  and str(row.get('base_asset') or '').upper() == base_asset
-              ]
-              selected = select_coinalyze_markets(
-                  markets,
-                  [base_asset],
-                  exchange_names=exchange_names,
-                  quote_order=('USDT','USDC','USD'),
-              ).get(base_asset)
-              miss_details.append({
+              missing = setup.get('missing_data') or []
+              availability = derivatives.get('availability') or {}
+              explicit_no_match = any('No matching Coinalyze perpetual market' in str(x) for x in missing)
+              complete = bool(
+                  derivatives
+                  and not derivatives.get('endpoint_errors')
+                  and all(availability.get(field) is True for field in ('current_oi','funding','oi_history','liquidations'))
+              )
+              target_details.append({
                   'symbol': symbol,
-                  'base_asset': base_asset,
-                  'current_selector_match': selected,
-                  'all_coinalyze_base_markets': [
-                      {
-                          'symbol': row.get('symbol'),
-                          'exchange_code': row.get('exchange'),
-                          'exchange_name': exchange_names.get(str(row.get('exchange') or '').upper(), row.get('exchange')),
-                          'quote_asset': row.get('quote_asset'),
-                          'is_perpetual': row.get('is_perpetual'),
-                      }
-                      for row in base_markets
-                  ],
+                  'selector_score': round(target['selector_score'], 4),
+                  'base_score': round(target['base_score'], 4),
+                  'discovery_bonus': 5.0 if symbol in DISCOVERY_SYMBOLS else 0.0,
+                  'has_derivatives': bool(derivatives),
+                  'complete': complete,
+                  'explicit_no_match': explicit_no_match,
+                  'missing_data': missing,
+                  'market_symbol': derivatives.get('market_symbol') or derivatives.get('symbol'),
+                  'exchange_name': derivatives.get('exchange_name') or derivatives.get('exchange'),
+                  'quote_asset': derivatives.get('quote_asset'),
+                  'endpoint_errors': derivatives.get('endpoint_errors') or [],
+                  'availability': availability,
               })
 
-          source = next((x for x in stable_status.get('sources',[]) if str(x.get('source','')).lower() == 'coinalyze'), {})
+          actual_enriched = sum(1 for row in target_details if row['has_derivatives'])
+          actual_complete = sum(1 for row in target_details if row['complete'])
+          no_match = [row['symbol'] for row in target_details if row['explicit_no_match']]
+          assert actual_enriched == enriched_count, (actual_enriched, enriched_count, target_details)
+          assert actual_complete == complete_count, (actual_complete, complete_count, target_details)
+          assert len(no_match) == target_count - enriched_count, (no_match, target_count, enriched_count)
+
+          source = next((x for x in status.get('sources',[]) if str(x.get('source','')).lower() == 'coinalyze'), {})
           result = {
               'exact_sha': exact,
-              'checked_at': stable_status.get('checked_at'),
+              'checked_at': checked_at,
+              'analysis_count': analysis_count,
               'target_count': target_count,
               'enriched_count': enriched_count,
               'complete_count': complete_count,
-              'analysis_count': analysis_count,
               'source': source,
-              'current_setup_count': len(current_setups),
-              'explicit_market_miss_symbols': sorted(explicit_market_misses),
-              'enriched_symbols': sorted(enriched_symbols),
-              'incomplete_enriched_symbols': sorted(incomplete_symbols),
-              'market_miss_details': miss_details,
+              'reconstructed_target_symbols': [row['symbol'] for row in target_details],
+              'explicit_no_match_symbols': no_match,
+              'target_details': target_details,
+              'ranked_cache_symbol_count': len(ranked),
           }
-          print('DAY_COINALYZE_MISSING_TARGET_DIAG=' + json.dumps(result, sort_keys=True, default=str))
-
-          gap = target_count - enriched_count
-          if gap > 0:
-              assert len(explicit_market_misses) == gap, (gap, explicit_market_misses, result)
-              for detail in miss_details:
-                  # If the same live catalog now contains an allowed perp match,
-                  # classify it as transient catalog/race evidence instead of changing code blindly.
-                  if detail['current_selector_match']:
-                      print('TRANSIENT_OR_TIMING_MATCH_NOW=' + json.dumps(detail, sort_keys=True, default=str))
-                  else:
-                      print('LEGITIMATE_CURRENT_COVERAGE_GAP=' + json.dumps(detail, sort_keys=True, default=str))
-          else:
-              assert not explicit_market_misses, explicit_market_misses
-              print('CURRENT_TARGET_COVERAGE_SELF_RECOVERED_TO_FULL')
+          print('DAY_COINALYZE_CACHE_ONLY_DIAG=' + json.dumps(result, sort_keys=True, default=str))
+          print('DAY COINALYZE MISSING TARGET IDENTIFIED FROM EXACT CACHE.')
           PY
