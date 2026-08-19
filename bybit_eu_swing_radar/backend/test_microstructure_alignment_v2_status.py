@@ -1,5 +1,7 @@
-from app.main import app
+from fastapi import FastAPI
+
 from app.research_microstructure_alignment_v2_api import build_alignment_v2_status
+from app.research_prospective_funnel_api import attach_prospective_funnel_research
 
 
 SYMBOLS = ["BTCUSDC", "ETHUSDC", "SOLUSDC"]
@@ -15,9 +17,16 @@ def _features(counts):
     return rows
 
 
-def test_v2_route_is_attached_to_production_app():
+def test_v2_route_is_attached_by_production_research_composition():
+    app = FastAPI()
+
+    def require_api_key():
+        return None
+
+    attach_prospective_funnel_research(app, require_api_key)
     paths = {route.path for route in app.routes}
     assert "/v1/research/microstructure/alignment-status-v2" in paths
+    assert "/v1/day-trade/research/prospective-funnel/status" in paths
 
 
 def test_v2_status_is_v074_label_blind_and_closed_to_promotion():
