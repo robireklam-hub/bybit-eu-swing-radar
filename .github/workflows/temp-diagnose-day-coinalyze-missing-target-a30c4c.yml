@@ -21,10 +21,9 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: a30c4c806b520b11d619c2610ffc206456ee0f1a
-      - name: Reconstruct exact target set from persisted cache only
+      - name: Identify target membership from persisted cache markers
         shell: bash
         run: |
-          cd bybit_eu_swing_radar/backend
           python - <<'PY'
           import json, os
           from datetime import datetime
@@ -36,16 +35,14 @@ jobs:
           key = os.environ['PRODUCTION_RADAR_API_KEY']
 
           def get(path, auth=True, timeout=35):
-              headers = {'Accept':'application/json','User-Agent':'day-coinalyze-cache-diag/3'}
+              headers = {'Accept':'application/json','User-Agent':'day-coinalyze-cache-diag/4'}
               if auth:
                   headers['X-Radar-Key'] = key
               with urlopen(Request(base + path, headers=headers), timeout=timeout) as response:
                   return json.load(response)
 
           def ts(value):
-              if value is None:
-                  return None
-              return datetime.fromisoformat(str(value).replace('Z', '+00:00')).timestamp()
+              return None if value is None else datetime.fromisoformat(str(value).replace('Z','+00:00')).timestamp()
 
           version = get('/version', False)
           assert version.get('commit_sha') == exact, version
@@ -55,75 +52,60 @@ jobs:
           checked_at = status.get('checked_at')
 
           scan = get('/v1/day-trade/scan?' + urlencode({
-              'direction':'both', 'limit':20, 'min_score':0, 'include_watchlist':'true'
+              'direction':'both','limit':20,'min_score':0,'include_watchlist':'true'
           }))
           assert ts(scan.get('data_as_of')) == ts(checked_at), (scan.get('data_as_of'), checked_at)
 
-          candidates = []
+          symbols = set()
           for name, value in scan.items():
               if isinstance(value, list) and any(token in name.lower() for token in ('long','short','candidate','watch','setup')):
-                  candidates.extend(item for item in value if isinstance(item, dict) and item.get('symbol'))
-          assert candidates, scan.keys()
-
-          from worker import DISCOVERY_SYMBOLS, COINALYZE_ENRICH_LIMIT
-
-          by_symbol = {}
-          for item in candidates:
-              symbol = str(item.get('symbol')).upper()
-              if ts(item.get('data_as_of')) != ts(checked_at):
-                  continue
-              row = by_symbol.setdefault(symbol, {
-                  'symbol': symbol,
-                  'base_score': -1.0,
-                  'selector_score': -1.0,
-              })
-              base_score = float(item.get('setup_score') or 0.0)
-              selector_score = base_score + (5.0 if symbol in DISCOVERY_SYMBOLS else 0.0)
-              if selector_score > row['selector_score']:
-                  row.update({'base_score': base_score, 'selector_score': selector_score})
-
-          ranked = sorted(by_symbol.values(), key=lambda row: row['selector_score'], reverse=True)
-          target_count = int(worker.get('coinalyze_target_symbols') or 0)
-          enriched_count = int(worker.get('coinalyze_enriched_symbols') or 0)
-          complete_count = int(worker.get('coinalyze_complete_symbols') or 0)
-          analysis_count = int(worker.get('coinalyze_analysis_symbols') or worker.get('deep_analyzed_pairs') or 0)
-          assert target_count == min(COINALYZE_ENRICH_LIMIT, analysis_count), (target_count, analysis_count, COINALYZE_ENRICH_LIMIT)
-          assert len(ranked) >= target_count, (len(ranked), target_count)
-          targets = ranked[:target_count]
+                  for item in value:
+                      if isinstance(item, dict) and item.get('symbol') and ts(item.get('data_as_of')) == ts(checked_at):
+                          symbols.add(str(item['symbol']).upper())
+          assert symbols, scan.keys()
 
           target_details = []
-          for target in targets:
-              symbol = target['symbol']
+          observed = []
+          for symbol in sorted(symbols):
               setup = get('/v1/day-trade/setup/' + symbol)
-              assert ts(setup.get('data_as_of')) == ts(checked_at), (symbol, setup.get('data_as_of'), checked_at)
+              if ts(setup.get('data_as_of')) != ts(checked_at):
+                  continue
               derivatives = setup.get('derivatives') or {}
               missing = setup.get('missing_data') or []
               availability = derivatives.get('availability') or {}
               explicit_no_match = any('No matching Coinalyze perpetual market' in str(x) for x in missing)
+              is_target = bool(derivatives) or explicit_no_match
               complete = bool(
                   derivatives
                   and not derivatives.get('endpoint_errors')
                   and all(availability.get(field) is True for field in ('current_oi','funding','oi_history','liquidations'))
               )
-              target_details.append({
+              row = {
                   'symbol': symbol,
-                  'selector_score': round(target['selector_score'], 4),
-                  'base_score': round(target['base_score'], 4),
-                  'discovery_bonus': 5.0 if symbol in DISCOVERY_SYMBOLS else 0.0,
+                  'is_target': is_target,
                   'has_derivatives': bool(derivatives),
                   'complete': complete,
                   'explicit_no_match': explicit_no_match,
-                  'missing_data': missing,
                   'market_symbol': derivatives.get('market_symbol') or derivatives.get('symbol'),
                   'exchange_name': derivatives.get('exchange_name') or derivatives.get('exchange'),
                   'quote_asset': derivatives.get('quote_asset'),
-                  'endpoint_errors': derivatives.get('endpoint_errors') or [],
                   'availability': availability,
-              })
+                  'endpoint_errors': derivatives.get('endpoint_errors') or [],
+                  'missing_data': missing,
+              }
+              observed.append(row)
+              if is_target:
+                  target_details.append(row)
 
+          target_count = int(worker.get('coinalyze_target_symbols') or 0)
+          enriched_count = int(worker.get('coinalyze_enriched_symbols') or 0)
+          complete_count = int(worker.get('coinalyze_complete_symbols') or 0)
+          analysis_count = int(worker.get('coinalyze_analysis_symbols') or worker.get('deep_analyzed_pairs') or 0)
           actual_enriched = sum(1 for row in target_details if row['has_derivatives'])
           actual_complete = sum(1 for row in target_details if row['complete'])
           no_match = [row['symbol'] for row in target_details if row['explicit_no_match']]
+
+          assert len(target_details) == target_count, (len(target_details), target_count, sorted(symbols), observed)
           assert actual_enriched == enriched_count, (actual_enriched, enriched_count, target_details)
           assert actual_complete == complete_count, (actual_complete, complete_count, target_details)
           assert len(no_match) == target_count - enriched_count, (no_match, target_count, enriched_count)
@@ -133,14 +115,14 @@ jobs:
               'exact_sha': exact,
               'checked_at': checked_at,
               'analysis_count': analysis_count,
+              'scan_unique_symbol_count': len(symbols),
               'target_count': target_count,
               'enriched_count': enriched_count,
               'complete_count': complete_count,
               'source': source,
-              'reconstructed_target_symbols': [row['symbol'] for row in target_details],
+              'target_symbols': [row['symbol'] for row in target_details],
               'explicit_no_match_symbols': no_match,
               'target_details': target_details,
-              'ranked_cache_symbol_count': len(ranked),
           }
           print('DAY_COINALYZE_CACHE_ONLY_DIAG=' + json.dumps(result, sort_keys=True, default=str))
           print('DAY COINALYZE MISSING TARGET IDENTIFIED FROM EXACT CACHE.')
