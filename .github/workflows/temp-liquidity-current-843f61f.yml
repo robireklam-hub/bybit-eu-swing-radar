@@ -1,0 +1,28 @@
+name: Temporary current-main liquidity semantic verifier 843f61f
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 843f61f70f1ec10b2edf0ef67455a0d772a39c9e
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 843f61f70f1ec10b2edf0ef67455a0d772a39c9e
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Verify exact production liquidity event semantics
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_event_smoke.py
