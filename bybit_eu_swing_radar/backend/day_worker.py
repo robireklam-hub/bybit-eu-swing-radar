@@ -672,6 +672,8 @@ def compact_day_audit_side(candidate: dict[str, Any]) -> dict[str, Any]:
             "requires_close": bool(trigger.get("requires_close", True)),
             "volume_confirmation": trigger.get("volume_confirmation", ""),
             "triggered": bool(trigger.get("triggered")),
+            "route": trigger.get("route", "NONE"),
+            "model": trigger.get("model", ""),
         },
         "entry": entry,
         "entry_zone": candidate["entry_zone"],
@@ -758,7 +760,10 @@ def build_day_candidate(
     )
     last = analysis.bars_5m[-1]
     previous_close = analysis.bars_5m[-2].close
-    triggered = (
+    # Closed-5m range breakout is a first-class live trigger route.
+    # Keep it separate from the sweep detector so a missing sweep can never
+    # overwrite a valid direct impulse breakout again.
+    range_breakout_triggered = (
         last.close > trigger_price and previous_close <= trigger_price
         if side == "long"
         else last.close < trigger_price and previous_close >= trigger_price
@@ -790,9 +795,20 @@ def build_day_candidate(
         bars_15m=analysis.bars_15m,
         config=sweep_config,
     )
-    # v0.7.3: a live trigger requires the complete closed-bar sequence:
-    # sweep -> reclaim -> 5m structure shift -> non-opposing 15m structure -> volume.
-    triggered = sweep_trigger is not None
+    # Both routes use CLOSED 5m candles. The sweep route keeps its full
+    # reclaim/structure/volume confirmation; the range-breakout route restores
+    # the direct breakout trigger that was previously calculated and then
+    # accidentally overwritten here. All STRICT score/RR/execution gates below
+    # remain unchanged.
+    sweep_triggered = sweep_trigger is not None
+    triggered = range_breakout_triggered or sweep_triggered
+    trigger_route = (
+        "LIQUIDITY_SWEEP_RECLAIM"
+        if sweep_triggered
+        else "CLOSED_5M_RANGE_BREAKOUT"
+        if range_breakout_triggered
+        else "NONE"
+    )
 
     previous_above_vwap = previous_close > analysis.rolling_vwap_24h
     current_above_vwap = current > analysis.rolling_vwap_24h
@@ -803,8 +819,10 @@ def build_day_candidate(
     )
     near_ema = abs(current - analysis.ema20_15m) <= 0.5 * analysis.atr_15m
 
-    if triggered:
+    if sweep_triggered:
         setup_type = "LIQUIDITY_SWEEP_RECLAIM"
+    elif range_breakout_triggered:
+        setup_type = "IMPULSE_BREAKOUT"
     elif vwap_reclaim and aligned_1h:
         setup_type = "VWAP_RECLAIM" if side == "long" else "VWAP_REJECTION"
     elif near_ema and aligned_15m and aligned_1h:
@@ -965,15 +983,24 @@ def build_day_candidate(
     if category == "WATCH_ONLY":
         decision = "NO_TRADE"
 
-    trigger_condition = (
-        "Closed 5m liquidity sweep below prior liquidity -> reclaim -> bullish 5m "
-        f"structure shift confirmation near {round_to_tick(trigger_price, analysis.instrument.tick_size)}, "
-        "with non-opposing closed 15m structure"
-        if side == "long"
-        else "Closed 5m liquidity sweep above prior liquidity -> reclaim -> bearish 5m "
-        f"structure shift confirmation near {round_to_tick(trigger_price, analysis.instrument.tick_size)}, "
-        "with non-opposing closed 15m structure"
-    )
+    if sweep_triggered:
+        trigger_condition = (
+            "Closed 5m liquidity sweep below prior liquidity -> reclaim -> bullish 5m "
+            f"structure shift confirmation near {round_to_tick(trigger_price, analysis.instrument.tick_size)}, "
+            "with non-opposing closed 15m structure"
+            if side == "long"
+            else "Closed 5m liquidity sweep above prior liquidity -> reclaim -> bearish 5m "
+            f"structure shift confirmation near {round_to_tick(trigger_price, analysis.instrument.tick_size)}, "
+            "with non-opposing closed 15m structure"
+        )
+    else:
+        trigger_condition = (
+            f"Closed 5m candle crosses above the prior 12-bar high near "
+            f"{round_to_tick(trigger_price, analysis.instrument.tick_size)}"
+            if side == "long"
+            else f"Closed 5m candle crosses below the prior 12-bar low near "
+            f"{round_to_tick(trigger_price, analysis.instrument.tick_size)}"
+        )
 
     derivatives = analysis.derivatives or {}
     missing = list(analysis.missing_data)
@@ -996,8 +1023,10 @@ def build_day_candidate(
         f"5m relative volume: {analysis.volume_ratio_5m:.2f}x",
         f"Relative strength vs BTC: 1H {analysis.relative_strength_1h:+.2f}%, 4H {analysis.relative_strength_4h:+.2f}%",
     ]
-    if triggered:
+    if sweep_triggered:
         why_now.append("Latest closed 5m bar completed the sweep/reclaim/structure confirmation sequence")
+    elif range_breakout_triggered:
+        why_now.append("Latest closed 5m bar crossed the prior 12-bar range boundary")
     if conflict_4h:
         why_now.append("4H structure conflicts with the side but is context-only in v0.7.3")
     if vwap_reclaim:
@@ -1039,9 +1068,18 @@ def build_day_candidate(
             "condition": trigger_condition,
             "price": round_to_tick(trigger_price, analysis.instrument.tick_size),
             "requires_close": True,
-            "volume_confirmation": f">={DAY_TRIGGER_VOLUME_RATIO:.1f}x prior 20-bar mean volume on confirmation",
+            "volume_confirmation": (
+                f">={DAY_TRIGGER_VOLUME_RATIO:.1f}x prior 20-bar mean volume on confirmation"
+                if sweep_triggered
+                else "No standalone volume hard gate; existing STRICT expansion/quality gates still apply"
+            ),
             "triggered": triggered,
-            "model": "LIQUIDITY_SWEEP_RECLAIM_5M_STRUCTURE_15M_CONFIRMATION",
+            "route": trigger_route,
+            "model": (
+                "LIQUIDITY_SWEEP_RECLAIM_5M_STRUCTURE_15M_CONFIRMATION"
+                if sweep_triggered
+                else "CLOSED_5M_12_BAR_RANGE_BREAKOUT"
+            ),
             "sweep_confirmation": sweep_trigger,
         },
         "entry_zone": {
@@ -1194,7 +1232,7 @@ def build_day_regime(
             "Coinalyze derivatives": coinalyze_quality,
         },
         "notes": [
-            "Day-trade v0.7.3 uses 4H/1H as context; live trigger is closed 5m sweep/reclaim/structure confirmation with non-opposing closed 15m structure.",
+            "Day-trade v0.7.3 uses 4H/1H as context; live trigger routes are a closed 5m 12-bar range breakout or the closed 5m sweep/reclaim/structure sequence; 15m confirmation applies to the sweep route.",
             "4H conflict is context-only and does not veto strict eligibility or execution.",
             "Coinalyze data is aggregated and not Bybit EU-specific unless explicitly marked.",
         ],
@@ -1572,7 +1610,7 @@ async def run() -> None:
                 "holding_time": "30 minutes to 8 hours",
                 "context_timeframes": ["4H", "1H"],
                 "setup_timeframe": "15m",
-                "trigger_timeframe": "5m closed sweep/reclaim/structure confirmation",
+                "trigger_timeframe": "5m closed 12-bar range breakout OR sweep/reclaim/structure confirmation",
                 "confirmation_timeframe": "15m closed non-opposing structure",
                 "four_hour_role": "CONTEXT_ONLY",
                 "strategy_version": DAY_STRATEGY_VERSION,
