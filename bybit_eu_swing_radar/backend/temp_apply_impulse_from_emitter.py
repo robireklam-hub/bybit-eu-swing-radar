@@ -5,6 +5,7 @@ import base64
 import builtins
 import gzip
 from pathlib import Path
+import shutil
 import subprocess
 
 import test_zzzz_emit_impulse_patch_bytes as emitter
@@ -19,6 +20,12 @@ def run(*args: str, cwd: Path) -> None:
 def main() -> None:
     backend = Path(__file__).resolve().parent
     repo = backend.parent.parent
+
+    # PR workflows start on a synthetic merge ref. Move explicitly to the real
+    # head branch before creating the final commit so the push is fast-forward.
+    run("git", "fetch", "origin", BRANCH, cwd=repo)
+    run("git", "checkout", "-B", BRANCH, f"origin/{BRANCH}", cwd=repo)
+
     captured: dict[str, str] = {}
     original_print = builtins.print
 
@@ -65,6 +72,10 @@ def main() -> None:
         path = repo / relative
         if path.exists():
             path.unlink()
+
+    for pycache in backend.rglob("__pycache__"):
+        if pycache.is_dir():
+            shutil.rmtree(pycache)
 
     run("git", "diff", "--check", cwd=repo)
     run("git", "config", "user.name", "github-actions[bot]", cwd=repo)
