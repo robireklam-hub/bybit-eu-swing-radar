@@ -81,6 +81,44 @@ def test_build_events_uses_durable_snapshot_and_closed_4h_trigger_without_outcom
     assert "outcome" not in event and "net_r" not in event and "mfe_r" not in event
 
 
+def test_build_events_keeps_distinct_trigger_bars_and_dedupes_hourly_snapshots():
+    first_close = datetime(2026, 8, 18, 20, tzinfo=timezone.utc)
+    second_close = first_close + timedelta(hours=4)
+    snapshots = [
+        {
+            "captured_at": (first_close - timedelta(minutes=55)).isoformat(),
+            "symbol": "BTCUSDC",
+            "side": "long",
+            "candidate": _candidate("long"),
+        },
+        {
+            "captured_at": (first_close - timedelta(minutes=15)).isoformat(),
+            "symbol": "BTCUSDC",
+            "side": "long",
+            "candidate": _candidate("long"),
+        },
+        {
+            "captured_at": (second_close - timedelta(minutes=25)).isoformat(),
+            "symbol": "BTCUSDC",
+            "side": "long",
+            "candidate": _candidate("long"),
+        },
+    ]
+    klines = {
+        "BTCUSDC": _payload(
+            _row(first_close - timedelta(hours=4), 101),
+            _row(second_close - timedelta(hours=4), 104),
+        )
+    }
+
+    events = build_events_from_snapshots_and_klines(snapshots, klines, now=second_close)
+
+    assert len(events) == 2
+    assert [event["trigger_close_at"] for event in events] == [first_close.isoformat(), second_close.isoformat()]
+    assert events[0]["pretrigger_captured_at"] == (first_close - timedelta(minutes=15)).isoformat()
+    assert len({event["event_id"] for event in events}) == 2
+
+
 def test_missing_kline_symbol_fails_closed_without_fabricating_event():
     t = datetime(2026, 8, 18, 20, tzinfo=timezone.utc)
     snapshots = [
