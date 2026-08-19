@@ -1,0 +1,143 @@
+name: Temporary post-merge day USDT context verification
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.head_ref == 'diag/post-merge-day-usdt-context-099d3e0'
+    runs-on: macos-latest
+    timeout-minutes: 10
+    env:
+      EXACT_MAIN_SHA: 099d3e011950f3a023d040b290fbe7b19d0b2c1b
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.EXACT_MAIN_SHA }}
+      - name: Verify exact production coverage and context routing
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXACT_MAIN_SHA"
+          python - <<'PY'
+          import json, os, time
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+          from urllib.error import HTTPError
+
+          base=os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key=os.environ['PRODUCTION_RADAR_API_KEY']
+          exact=os.environ['EXACT_MAIN_SHA']
+          def get(path,auth=True):
+              h={'Accept':'application/json','User-Agent':'day-usdt-context-post-merge/1'}
+              if auth: h['X-Radar-Key']=key
+              with urlopen(Request(base+path,headers=h),timeout=40) as r: return json.load(r)
+
+          version=None
+          for _ in range(60):
+              try:
+                  version=get('/version',False)
+                  if version.get('commit_sha')==exact: break
+              except Exception: pass
+              time.sleep(5)
+          assert version and version.get('commit_sha')==exact, version
+
+          status=None
+          for _ in range(90):
+              try:
+                  row=get('/v1/day-trade/status')
+                  worker=row.get('worker') or {}
+                  if worker.get('source_commit_sha')==exact:
+                      status=row; break
+              except Exception: pass
+              time.sleep(5)
+          assert status is not None, 'fresh exact-SHA day worker cache did not appear'
+          worker=status.get('worker') or {}
+          analyzed=int(worker.get('deep_analyzed_pairs') or 0)
+          any_count=int(worker.get('coinalyze_enriched_symbols') or 0)
+          complete_count=int(worker.get('coinalyze_complete_symbols') or 0)
+          assert 0 <= complete_count <= any_count <= 9
+          assert any_count <= analyzed
+          assert complete_count > 2, f'no improvement vs pre-fix complete baseline 2/9: {complete_count}'
+
+          source=next((x for x in status.get('sources',[]) if str(x.get('source','')).lower()=='coinalyze'),None)
+          assert source is not None
+          assert source.get('any_field_coverage') == f'{any_count}/{analyzed}'
+          assert source.get('complete_coverage') == f'{complete_count}/{analyzed}'
+          assert source.get('coverage') == f'{complete_count}/{analyzed}'
+          if complete_count == analyzed and analyzed > 0:
+              assert str(source.get('status') or '').lower()=='ok'
+          else:
+              assert str(source.get('status') or '').lower() in {'partial','degraded'}
+
+          scan=get('/v1/day-trade/scan?'+urlencode({'direction':'both','limit':20,'min_score':0,'include_watchlist':'true'}))
+          def flatten(payload):
+              out=[]
+              if isinstance(payload,list): return [x for x in payload if isinstance(x,dict)]
+              if not isinstance(payload,dict): return out
+              for k,v in payload.items():
+                  if isinstance(v,list) and any(t in k.lower() for t in ('candidate','long','short','watch','result','setup')):
+                      out.extend(x for x in v if isinstance(x,dict))
+              return out
+          candidates=flatten(scan)
+          for row in candidates:
+              sym=str(row.get('symbol') or '').upper()
+              if sym: assert sym.endswith('USDC'), sym
+
+          sample=[]
+          for sym in ('ETHUSDC','SOLUSDC','LINKUSDC','BTCUSDC','XRPUSDC','LTCUSDC','UNIUSDC','INJUSDC'):
+              try:
+                  setup=get(f'/v1/day-trade/setup/{sym}')
+              except HTTPError as exc:
+                  sample.append({'symbol':sym,'http':exc.code}); continue
+              d=setup.get('derivatives') if isinstance(setup,dict) else None
+              if isinstance(d,dict) and d:
+                  row={
+                    'symbol':sym,
+                    'market_symbol':d.get('market_symbol') or d.get('symbol'),
+                    'exchange_code':d.get('exchange_code'),
+                    'exchange_name':d.get('exchange_name') or d.get('exchange'),
+                    'quote_asset':d.get('quote_asset'),
+                    'availability':d.get('availability'),
+                    'endpoint_errors':d.get('endpoint_errors'),
+                    'is_bybit_specific':d.get('is_bybit_specific'),
+                  }
+                  sample.append(row)
+
+          routed=[x for x in sample if x.get('market_symbol')]
+          assert routed, sample
+          for row in routed:
+              assert 'bybit' in str(row.get('exchange_name') or '').lower(), row
+              assert row.get('quote_asset') == 'USDT', row
+              assert row.get('is_bybit_specific') is True, row
+
+          overlap={x['symbol']:x for x in routed if x.get('symbol') in {'ETHUSDC','SOLUSDC','LINKUSDC'}}
+          assert overlap, sample
+          complete_overlap=[]
+          for sym,row in overlap.items():
+              avail=row.get('availability') or {}
+              if all(avail.get(k) is True for k in ('current_oi','funding','oi_history','liquidations')) and not (row.get('endpoint_errors') or []):
+                  complete_overlap.append(sym)
+          assert complete_overlap, f'no complete ETH/SOL/LINK overlap after USDT routing: {overlap}'
+
+          summary={
+            'exact_sha':exact,
+            'checked_at':status.get('checked_at'),
+            'deep_requested':worker.get('deep_requested_pairs'),
+            'deep_analyzed':analyzed,
+            'coinalyze_any_field':any_count,
+            'coinalyze_complete':complete_count,
+            'pre_fix_complete_baseline':2,
+            'coinalyze_source':source,
+            'routing_samples':sample,
+            'complete_overlap':complete_overlap,
+            'candidate_count_observed':len(candidates),
+          }
+          print('DAY_USDT_CONTEXT_PRODUCTION_SUMMARY='+json.dumps(summary,sort_keys=True,default=str))
+          print('DAY USDT CONTEXT EXACT-SHA PRODUCTION VERIFIED.')
+          PY
