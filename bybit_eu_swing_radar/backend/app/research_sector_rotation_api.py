@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 import asyncpg
+from research.research_snapshot_history import append_snapshot_history
 import httpx
 from fastapi import Depends, FastAPI, HTTPException
 
@@ -158,6 +159,16 @@ async def persist_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     connection = await asyncpg.connect(_database_url(), timeout=30)
     try:
         await connection.execute(SCHEMA_SQL)
+        history = await append_snapshot_history(
+            connection,
+            research_family="sector-rotation",
+            spec_version=SPEC_VERSION,
+            captured_at=captured_at,
+            capture_bucket=captured_day,
+            source_commit_sha=snapshot.get("source_commit_sha"),
+            snapshot=snapshot,
+        )
+        snapshot["immutable_history"] = history
         await connection.execute(
             """
             INSERT INTO research_sector_rotation_snapshots (

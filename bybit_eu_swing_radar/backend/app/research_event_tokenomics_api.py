@@ -10,6 +10,7 @@ from typing import Any, Callable, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
 import asyncpg
+from research.research_snapshot_history import append_snapshot_history
 import httpx
 from fastapi import Depends, FastAPI, HTTPException
 
@@ -596,6 +597,16 @@ async def persist_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     source.get("name"),
                     json.dumps(event, separators=(",", ":")),
                 )
+            history = await append_snapshot_history(
+                connection,
+                research_family="event-tokenomics",
+                spec_version=SPEC_VERSION,
+                captured_at=captured_at,
+                capture_bucket=captured_hour,
+                source_commit_sha=snapshot.get("source_commit_sha"),
+                snapshot=snapshot,
+            )
+            snapshot["immutable_history"] = history
             await connection.execute(
                 """
                 INSERT INTO research_event_tokenomics_snapshots (
