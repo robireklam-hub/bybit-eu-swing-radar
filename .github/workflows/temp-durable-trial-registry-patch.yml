@@ -9,6 +9,10 @@ permissions:
   contents: write
   statuses: write
 
+concurrency:
+  group: durable-trial-registry-patch
+  cancel-in-progress: true
+
 jobs:
   patch:
     runs-on: ubuntu-latest
@@ -91,3 +95,21 @@ jobs:
           git diff --cached --check
           git commit -m 'Register frozen research trials durably'
           git push origin HEAD:research/durable-trial-registry-v1
+
+      - name: Mark patch success
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -d "{\"state\":\"success\",\"context\":\"research/trial-registry-patch\",\"description\":\"Immutable trial registry patch and tests passed\"}"
+
+      - name: Mark patch failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -d "{\"state\":\"failure\",\"context\":\"research/trial-registry-patch\",\"description\":\"Immutable trial registry patch failed\"}"
