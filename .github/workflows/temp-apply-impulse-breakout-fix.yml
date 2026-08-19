@@ -2,7 +2,7 @@ name: Temp apply impulse breakout fix
 
 on:
   pull_request:
-    branches: [main]
+    branches: [diag/impulse-patch-base]
     types: [opened, reopened, synchronize]
 
 permissions:
@@ -82,9 +82,6 @@ def _bar(index: int, *, close: float = 99.5, high: float = 100.0, low: float = 9
 
 def _analysis(*, expansion: float = 80.0, direction: float = 80.0, quality: float = 90.0) -> DayAnalysis:
     prior = [_bar(i) for i in range(12)]
-    # Previous close is still inside the prior range; latest CLOSED 5m candle
-    # crosses the prior 12-bar high. This is the exact route that used to be
-    # computed and then overwritten by the sweep-only assignment.
     prior[-1] = _bar(11, close=99.8, high=100.0, low=99.0)
     latest = _bar(12, close=101.2, high=101.5, low=99.5)
     bars_5m = prior + [latest]
@@ -93,62 +90,29 @@ def _analysis(*, expansion: float = 80.0, direction: float = 80.0, quality: floa
         for i in range(4)
     ]
     instrument = Instrument(
-        symbol="BTCUSDC",
-        base="BTC",
-        quote="USDC",
-        margin_trading="both",
-        tick_size=0.1,
-        turnover_24h=1_000_000_000.0,
-        volume_24h=10_000.0,
-        last_price=101.2,
-        bid=101.1,
-        ask=101.2,
-        spread_bps=1.0,
-        price_change_24h_pct=1.0,
-        tradeable=True,
-        liquidity_reasons=[],
+        symbol="BTCUSDC", base="BTC", quote="USDC", margin_trading="both",
+        tick_size=0.1, turnover_24h=1_000_000_000.0, volume_24h=10_000.0,
+        last_price=101.2, bid=101.1, ask=101.2, spread_bps=1.0,
+        price_change_24h_pct=1.0, tradeable=True, liquidity_reasons=[],
         discovery_source="mandatory",
     )
     return DayAnalysis(
-        instrument=instrument,
-        bars_5m=bars_5m,
-        bars_15m=bars_15m,
-        bars_1h=[],
-        bars_4h=[],
-        atr_5m=1.0,
-        atr_15m=2.0,
-        rolling_vwap_24h=99.0,
-        ema20_15m=99.0,
-        ema50_15m=98.5,
-        ema20_1h=99.0,
-        ema50_1h=98.0,
-        ema20_4h=99.0,
-        ema50_4h=98.0,
-        return_15m_pct=1.0,
-        return_1h_pct=1.0,
-        return_4h_pct=1.0,
-        relative_strength_1h=0.0,
-        relative_strength_4h=0.0,
-        volume_ratio_5m=5.0,
-        volume_ratio_15m=2.0,
-        atr_ratio_15m=1.2,
-        structure_15m="bullish",
-        structure_1h="bullish",
-        structure_4h="bullish",
-        expansion_score=expansion,
-        direction_score=direction,
-        quality_score=quality,
-        derivatives={},
-        missing_data=[],
-        shortable=True,
-        max_borrowing_amount=10.0,
+        instrument=instrument, bars_5m=bars_5m, bars_15m=bars_15m,
+        bars_1h=[], bars_4h=[], atr_5m=1.0, atr_15m=2.0,
+        rolling_vwap_24h=99.0, ema20_15m=99.0, ema50_15m=98.5,
+        ema20_1h=99.0, ema50_1h=98.0, ema20_4h=99.0, ema50_4h=98.0,
+        return_15m_pct=1.0, return_1h_pct=1.0, return_4h_pct=1.0,
+        relative_strength_1h=0.0, relative_strength_4h=0.0,
+        volume_ratio_5m=5.0, volume_ratio_15m=2.0, atr_ratio_15m=1.2,
+        structure_15m="bullish", structure_1h="bullish", structure_4h="bullish",
+        expansion_score=expansion, direction_score=direction, quality_score=quality,
+        derivatives={}, missing_data=[], shortable=True, max_borrowing_amount=10.0,
     )
 
 
 def test_direct_closed_5m_breakout_is_not_overwritten_by_missing_sweep(monkeypatch):
     monkeypatch.setattr(day_worker, "latest_bar_sweep_setup", lambda *args, **kwargs: None)
     candidate = build_day_candidate(_analysis(), "long", datetime(2026, 8, 19, tzinfo=timezone.utc))
-
     assert candidate is not None
     assert candidate["category"] == "STRICT"
     assert candidate["state"] == "TRIGGERED"
@@ -163,10 +127,8 @@ def test_direct_breakout_does_not_bypass_strict_score_gates(monkeypatch):
     monkeypatch.setattr(day_worker, "latest_bar_sweep_setup", lambda *args, **kwargs: None)
     candidate = build_day_candidate(
         _analysis(expansion=30.0, direction=20.0, quality=70.0),
-        "long",
-        datetime(2026, 8, 19, tzinfo=timezone.utc),
+        "long", datetime(2026, 8, 19, tzinfo=timezone.utc),
     )
-
     assert candidate is not None
     assert candidate["trigger"]["triggered"] is True
     assert candidate["trigger"]["route"] == "CLOSED_5M_RANGE_BREAKOUT"
@@ -175,15 +137,9 @@ def test_direct_breakout_does_not_bypass_strict_score_gates(monkeypatch):
 
 
 def test_sweep_route_still_takes_precedence(monkeypatch):
-    sweep = {
-        "candidate_entry": 100.8,
-        "candidate_invalidation": 99.2,
-        "sweep_index": 8,
-        "entry_ready": True,
-    }
+    sweep = {"candidate_entry": 100.8, "candidate_invalidation": 99.2, "sweep_index": 8, "entry_ready": True}
     monkeypatch.setattr(day_worker, "latest_bar_sweep_setup", lambda *args, **kwargs: sweep)
     candidate = build_day_candidate(_analysis(), "long", datetime(2026, 8, 19, tzinfo=timezone.utc))
-
     assert candidate is not None
     assert candidate["category"] == "STRICT"
     assert candidate["state"] == "TRIGGERED"
@@ -196,7 +152,7 @@ def test_sweep_route_still_takes_precedence(monkeypatch):
 
           cd bybit_eu_swing_radar/backend
           python -m pip install -q -r requirements.txt pytest pytest-asyncio
-          pytest -q test_day_impulse_breakout_trigger.py test_day_trade_trigger_sequence.py 2>/dev/null || pytest -q test_day_impulse_breakout_trigger.py
+          pytest -q test_day_impulse_breakout_trigger.py
           python -m compileall -q day_worker.py test_day_impulse_breakout_trigger.py
           git diff --check
           cd ../..
