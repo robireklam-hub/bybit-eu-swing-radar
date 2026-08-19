@@ -1,0 +1,102 @@
+name: Temporary day Coinalyze exact-main audit
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    if: github.head_ref == 'diag/day-coinalyze-audit-31e4c2b'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      EXACT_MAIN_SHA: 31e4c2be5383d20904b5ef5110e9f424315cbfdf
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+    steps:
+      - name: Check out exact main
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.EXACT_MAIN_SHA }}
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Inspect day Coinalyze code and production routes
+        working-directory: bybit_eu_swing_radar/backend
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXACT_MAIN_SHA"
+          python - <<'PY'
+          import inspect, json, os
+          import worker
+
+          print('EXACT_SHA=' + os.environ['EXACT_MAIN_SHA'])
+          names = []
+          for name, obj in inspect.getmembers(worker):
+              if not (inspect.isfunction(obj) or inspect.iscoroutinefunction(obj)):
+                  continue
+              try:
+                  src = inspect.getsource(obj)
+              except Exception:
+                  continue
+              if 'coinalyze' in src.lower():
+                  names.append(name)
+                  print('\n===== FUNCTION ' + name + ' =====')
+                  print(src)
+          print('COINALYZE_FUNCTIONS=' + json.dumps(names))
+
+          # Import the API application and enumerate day/flow/coinalyze routes.
+          route_rows = []
+          app = None
+          for module_name in ('main', 'app.main'):
+              try:
+                  mod = __import__(module_name, fromlist=['app'])
+                  app = getattr(mod, 'app', None)
+                  if app is not None:
+                      break
+              except Exception as exc:
+                  print('APP_IMPORT_FAIL', module_name, type(exc).__name__, str(exc)[:300])
+          if app is not None:
+              for route in getattr(app, 'routes', []):
+                  path = getattr(route, 'path', '')
+                  if any(k in path.lower() for k in ('day', 'flow', 'coinalyze')):
+                      methods = sorted(getattr(route, 'methods', []) or [])
+                      endpoint = getattr(getattr(route, 'endpoint', None), '__name__', None)
+                      row = {'path': path, 'methods': methods, 'endpoint': endpoint}
+                      route_rows.append(row)
+              print('DAY_FLOW_ROUTES=' + json.dumps(route_rows, sort_keys=True))
+          PY
+      - name: Inspect production OpenAPI and safe status endpoints
+        working-directory: bybit_eu_swing_radar/backend
+        run: |
+          python - <<'PY'
+          import json, os
+          from urllib.request import Request, urlopen
+          from urllib.error import HTTPError
+
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key = os.environ['PRODUCTION_RADAR_API_KEY']
+          def get(path, auth=True):
+              headers={'Accept':'application/json','User-Agent':'day-coinalyze-audit/1'}
+              if auth:
+                  headers['X-Radar-Key']=key
+              req=Request(base+path,headers=headers)
+              with urlopen(req,timeout=35) as r:
+                  return json.load(r)
+          version=get('/version',False)
+          assert version.get('commit_sha') == os.environ['EXACT_MAIN_SHA'], version
+          print('VERSION=' + json.dumps(version,sort_keys=True))
+          try:
+              api=get('/openapi.json',False)
+              paths=[p for p in (api.get('paths') or {}) if any(k in p.lower() for k in ('day','flow','coinalyze'))]
+              print('PRODUCTION_DAY_FLOW_OPENAPI_PATHS=' + json.dumps(sorted(paths)))
+              for path in sorted(paths):
+                  spec=(api.get('paths') or {}).get(path) or {}
+                  print('OPENAPI_PATH_SPEC ' + path + '=' + json.dumps(spec,sort_keys=True)[:12000])
+          except Exception as exc:
+              print('OPENAPI_FAIL=' + type(exc).__name__ + ':' + str(exc)[:500])
+          PY
