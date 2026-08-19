@@ -1,0 +1,156 @@
+name: Temporary verify unified data quality f0cc12a
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.head_ref == 'diag/post-merge-unified-dq-f0cc12a'
+    runs-on: macos-26
+    timeout-minutes: 12
+    env:
+      EXACT_MAIN_SHA: f0cc12ae60fab198f33b4e19b20acad7f38c7bf8
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: f0cc12ae60fab198f33b4e19b20acad7f38c7bf8
+      - name: Verify exact production DQ contract and one research-only capture
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, time
+          from datetime import datetime
+          from urllib.request import Request, urlopen
+
+          exact = os.environ['EXACT_MAIN_SHA']
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key = os.environ['PRODUCTION_RADAR_API_KEY']
+          expected_sources = {
+              'market_regime', 'derivatives_positioning', 'event_tokenomics',
+              'btc_macro_cycle_etf', 'relative_strength', 'sector_rotation',
+              'btc_onchain', 'eth_onchain',
+          }
+
+          def request(path, method='GET', auth=True, timeout=40):
+              headers = {'Accept':'application/json','User-Agent':'unified-dq-f0cc12a/1'}
+              if auth:
+                  headers['X-Radar-Key'] = key
+              req = Request(base + path, headers=headers, method=method)
+              with urlopen(req, timeout=timeout) as response:
+                  return json.load(response)
+
+          def ts(value):
+              return datetime.fromisoformat(str(value).replace('Z','+00:00')).timestamp()
+
+          version = None
+          for attempt in range(72):
+              try:
+                  version = request('/version', auth=False, timeout=20)
+                  if version.get('commit_sha') == exact:
+                      break
+              except Exception:
+                  pass
+              if attempt % 12 == 0:
+                  print('WAIT_API_EXACT_SHA=' + json.dumps(version, sort_keys=True, default=str), flush=True)
+              time.sleep(5)
+          assert version and version.get('commit_sha') == exact, version
+
+          spec = request('/v1/research/cross-layer-context-v2/spec')
+          assert spec.get('data_quality_contract_version') == 'research-data-quality-contract-v1', spec
+          manifest = spec.get('data_quality_contract') or {}
+          assert manifest.get('contract_version') == 'research-data-quality-contract-v1', manifest
+          assert manifest.get('research_only') is True, manifest
+          assert manifest.get('live_strategy_mutated') is False, manifest
+          assert manifest.get('production_eligibility_mutated') is False, manifest
+          assert manifest.get('provider_availability_inference') == 'FORBIDDEN_FROM_CAPTURE_TIME_ALONE', manifest
+          assert set((manifest.get('sources') or {}).keys()) == expected_sources, manifest
+          for source, contract in (manifest.get('sources') or {}).items():
+              assert contract.get('production_eligible') is False, (source, contract)
+              assert contract.get('provider_availability_inference') == 'FORBIDDEN_FROM_CAPTURE_TIME_ALONE', (source, contract)
+
+          # Controlled research-only capture. This is normal research persistence only;
+          # no live strategy, scoring, eligibility or execution state is mutated.
+          capture = request('/v1/research/cross-layer-context-v2/capture', method='POST', timeout=90)
+          assert capture.get('source_commit_sha') == exact, capture.get('source_commit_sha')
+          assert capture.get('research_only') is True, capture
+          assert capture.get('label_free') is True, capture
+          assert capture.get('context_only') is True, capture
+          assert capture.get('live_strategy_mutated') is False, capture
+          assert capture.get('promotion_allowed') is False, capture
+          assert capture.get('composite_score_emitted') is False, capture
+          assert capture.get('execution_proof') is False, capture
+
+          layers = capture.get('layers') or {}
+          assert set(layers) == expected_sources, layers.keys()
+          fresh_count = sum(1 for row in layers.values() if row.get('status') == 'FRESH')
+          expected_legacy_quality = 'COMPLETE' if fresh_count == len(layers) else ('PARTIAL' if fresh_count else 'MISSING')
+          assert capture.get('data_quality') == expected_legacy_quality, (capture.get('data_quality'), fresh_count)
+          assert capture.get('layer_fresh_count') == fresh_count, capture.get('layer_fresh_count')
+
+          dq = capture.get('data_quality_contract') or {}
+          assert dq.get('contract_version') == 'research-data-quality-contract-v1', dq
+          assert dq.get('source_count') == 8, dq
+          assert dq.get('production_gate') == 'BLOCK', dq
+          assert dq.get('production_severity') == 'PRODUCTION_BLOCK', dq
+          assert dq.get('live_strategy_mutated') is False, dq
+          assert dq.get('production_eligibility_mutated') is False, dq
+          assert dq.get('provider_availability_inferred_from_capture_time') is False, dq
+          assert dq.get('research_gate') in {'PASS','BLOCK'}, dq
+          assert dq.get('severity') in {'INFO','WARNING','RESEARCH_BLOCK'}, dq
+
+          for source, row in layers.items():
+              assert row.get('contract_version') == 'research-data-quality-contract-v1', (source, row)
+              assert row.get('status') in {'FRESH','STALE','MISSING','INVALID_TIMESTAMP','FUTURE_REJECTED'}, (source, row)
+              assert row.get('severity') in {'INFO','WARNING','RESEARCH_BLOCK'}, (source, row)
+              assert row.get('production_usable') is False, (source, row)
+              assert row.get('production_severity') == 'PRODUCTION_BLOCK', (source, row)
+              lineage = row.get('lineage') or {}
+              assert lineage.get('availability_semantics') in {
+                  'CAPTURE_TIME_ONLY_NOT_PROVIDER_AVAILABILITY',
+                  'PROVIDER_AVAILABILITY_VERIFIED',
+              }, (source, lineage)
+              if lineage.get('provider_availability_verified') is not True:
+                  assert lineage.get('availability_semantics') == 'CAPTURE_TIME_ONLY_NOT_PROVIDER_AVAILABILITY', (source, lineage)
+
+          status = request('/v1/research/cross-layer-context-v2/status')
+          latest = status.get('latest') or {}
+          assert ts(latest.get('captured_at')) == ts(capture.get('captured_at')), (latest.get('captured_at'), capture.get('captured_at'))
+          assert (latest.get('data_quality_contract') or {}).get('contract_version') == 'research-data-quality-contract-v1', latest
+          assert status.get('research_only') is True, status
+          assert status.get('live_strategy_mutated') is False, status
+          assert status.get('promotion_allowed') is False, status
+
+          summary = {
+              'exact_sha': exact,
+              'captured_at': capture.get('captured_at'),
+              'legacy_data_quality': capture.get('data_quality'),
+              'fresh_count': fresh_count,
+              'dq': dq,
+              'layer_results': {
+                  name: {
+                      'status': row.get('status'),
+                      'contract_status': row.get('contract_status'),
+                      'severity': row.get('severity'),
+                      'research_usable': row.get('research_usable'),
+                      'required_field_coverage': (row.get('completeness') or {}).get('required_field_coverage'),
+                      'immutable_history_present': (row.get('lineage') or {}).get('immutable_history_present'),
+                      'immutable': (row.get('lineage') or {}).get('immutable'),
+                      'point_in_time_verified': (row.get('lineage') or {}).get('point_in_time_verified'),
+                      'provider_availability_verified': (row.get('lineage') or {}).get('provider_availability_verified'),
+                      'availability_semantics': (row.get('lineage') or {}).get('availability_semantics'),
+                      'blocking_reasons': row.get('blocking_reasons'),
+                      'warning_reasons': row.get('warning_reasons'),
+                  }
+                  for name, row in layers.items()
+              },
+          }
+          print('UNIFIED_DQ_PRODUCTION_SUMMARY=' + json.dumps(summary, sort_keys=True, default=str))
+          print('UNIFIED RESEARCH DATA QUALITY CONTRACT EXACT-SHA PRODUCTION VERIFIED.')
+          PY
