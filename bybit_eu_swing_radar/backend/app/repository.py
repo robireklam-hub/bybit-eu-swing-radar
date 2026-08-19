@@ -43,7 +43,7 @@ from app.models import (
     WatchlistResponse,
 )
 
-CURRENT_DAY_STRATEGY_VERSION = "0.7.3"
+CURRENT_DAY_STRATEGY_VERSION = "0.7.4"
 
 
 class RadarRepository:

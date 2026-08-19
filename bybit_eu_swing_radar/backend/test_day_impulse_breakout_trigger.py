@@ -77,3 +77,19 @@ def test_sweep_route_still_takes_precedence(monkeypatch):
     assert c["setup_type"] == "LIQUIDITY_SWEEP_RECLAIM"
     assert c["trigger"]["route"] == "LIQUIDITY_SWEEP_RECLAIM"
     assert c["trigger"]["price"] == 100.8
+
+
+def test_v073_policy_keeps_direct_breakout_non_executable(monkeypatch):
+    monkeypatch.setattr(day_worker, "latest_bar_sweep_setup", lambda *args, **kwargs: None)
+    c = build_day_candidate(
+        _analysis(),
+        "long",
+        datetime(2026, 8, 19, tzinfo=timezone.utc),
+        strategy_version="0.7.3",
+    )
+    assert c is not None
+    assert c["strategy_version"] == "0.7.3"
+    assert c["trigger"]["triggered"] is False
+    assert c["trigger"]["route"] == "NONE"
+    assert c["trigger"]["model"] == "NONE"
+    assert c["decision"] != "TRADE"

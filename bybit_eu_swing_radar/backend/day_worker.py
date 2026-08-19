@@ -1,4 +1,4 @@
-"""Bybit EU Trading Radar — day-trade worker v0.7.3.
+"""Bybit EU Trading Radar — day-trade worker v0.7.4.
 
 Separate engine from the swing worker:
 - universe: active Bybit EU USDC spot pairs
@@ -77,7 +77,8 @@ def env_int(name: str, default: int) -> int:
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 SOURCE_COMMIT_SHA = os.getenv("RAILWAY_GIT_COMMIT_SHA") or None
-DAY_STRATEGY_VERSION = "0.7.3"
+LEGACY_DAY_STRATEGY_VERSION = "0.7.3"
+DAY_STRATEGY_VERSION = "0.7.4"
 DAY_MIN_TURNOVER_USDC = env_float("DAY_MIN_TURNOVER_USDC", 250_000.0)
 DAY_MAX_SPREAD_BPS = env_float("DAY_MAX_SPREAD_BPS", 25.0)
 DAY_DISCOVERY_MAX_SPREAD_BPS = env_float("DAY_DISCOVERY_MAX_SPREAD_BPS", 150.0)
@@ -94,6 +95,7 @@ DAY_MIN_DIRECTION_SCORE = env_float("DAY_MIN_DIRECTION_SCORE", 35.0)
 DAY_MIN_QUALITY_SCORE = env_float("DAY_MIN_QUALITY_SCORE", 65.0)
 DAY_TRIGGER_VOLUME_RATIO = env_float("DAY_TRIGGER_VOLUME_RATIO", 1.3)
 PROSPECTIVE_FUNNEL_SPEC_VERSION = "v073-prospective-funnel-v1"
+PROSPECTIVE_FUNNEL_STRATEGY_VERSION = "0.7.3"
 DAY_BARRIER_LOOKBACK_15M = min(max(env_int("DAY_BARRIER_LOOKBACK_15M", 96), 32), 240)
 DAY_BARRIER_PIVOT_LEFT = min(max(env_int("DAY_BARRIER_PIVOT_LEFT", 2), 1), 5)
 DAY_BARRIER_PIVOT_RIGHT = min(max(env_int("DAY_BARRIER_PIVOT_RIGHT", 2), 1), 5)
@@ -732,10 +734,37 @@ def watch_rank(item: dict[str, Any]) -> tuple:
         item["metrics"].get("turnover_24h_usdc", 0.0),
     )
 
+
+def resolve_day_trigger_policy(
+    strategy_version: str,
+    *,
+    range_breakout_triggered: bool,
+    sweep_triggered: bool,
+) -> tuple[bool, str]:
+    """Resolve versioned day-trigger semantics without rewriting history.
+
+    v0.7.3 remains sweep-only for historical reproducibility. v0.7.4 adds a
+    closed-5m 12-bar range-breakout route while preserving the full sweep route.
+    """
+    if strategy_version == LEGACY_DAY_STRATEGY_VERSION:
+        return (
+            sweep_triggered,
+            "LIQUIDITY_SWEEP_RECLAIM" if sweep_triggered else "NONE",
+        )
+    if strategy_version == DAY_STRATEGY_VERSION:
+        if sweep_triggered:
+            return True, "LIQUIDITY_SWEEP_RECLAIM"
+        if range_breakout_triggered:
+            return True, "CLOSED_5M_RANGE_BREAKOUT"
+        return False, "NONE"
+    raise ValueError(f"Unsupported day strategy version: {strategy_version}")
+
+
 def build_day_candidate(
     analysis: DayAnalysis,
     side: str,
     now: datetime,
+    strategy_version: str = DAY_STRATEGY_VERSION,
 ) -> dict[str, Any] | None:
     if side not in {"long", "short"}:
         return None
@@ -801,13 +830,10 @@ def build_day_candidate(
     # accidentally overwritten here. All STRICT score/RR/execution gates below
     # remain unchanged.
     sweep_triggered = sweep_trigger is not None
-    triggered = range_breakout_triggered or sweep_triggered
-    trigger_route = (
-        "LIQUIDITY_SWEEP_RECLAIM"
-        if sweep_triggered
-        else "CLOSED_5M_RANGE_BREAKOUT"
-        if range_breakout_triggered
-        else "NONE"
+    triggered, trigger_route = resolve_day_trigger_policy(
+        strategy_version,
+        range_breakout_triggered=range_breakout_triggered,
+        sweep_triggered=sweep_triggered,
     )
 
     previous_above_vwap = previous_close > analysis.rolling_vwap_24h
@@ -819,9 +845,9 @@ def build_day_candidate(
     )
     near_ema = abs(current - analysis.ema20_15m) <= 0.5 * analysis.atr_15m
 
-    if sweep_triggered:
+    if trigger_route == "LIQUIDITY_SWEEP_RECLAIM":
         setup_type = "LIQUIDITY_SWEEP_RECLAIM"
-    elif range_breakout_triggered:
+    elif trigger_route == "CLOSED_5M_RANGE_BREAKOUT":
         setup_type = "IMPULSE_BREAKOUT"
     elif vwap_reclaim and aligned_1h:
         setup_type = "VWAP_RECLAIM" if side == "long" else "VWAP_REJECTION"
@@ -983,7 +1009,7 @@ def build_day_candidate(
     if category == "WATCH_ONLY":
         decision = "NO_TRADE"
 
-    if sweep_triggered:
+    if trigger_route == "LIQUIDITY_SWEEP_RECLAIM":
         trigger_condition = (
             "Closed 5m liquidity sweep below prior liquidity -> reclaim -> bullish 5m "
             f"structure shift confirmation near {round_to_tick(trigger_price, analysis.instrument.tick_size)}, "
@@ -993,7 +1019,7 @@ def build_day_candidate(
             f"structure shift confirmation near {round_to_tick(trigger_price, analysis.instrument.tick_size)}, "
             "with non-opposing closed 15m structure"
         )
-    else:
+    elif trigger_route == "CLOSED_5M_RANGE_BREAKOUT":
         trigger_condition = (
             f"Closed 5m candle crosses above the prior 12-bar high near "
             f"{round_to_tick(trigger_price, analysis.instrument.tick_size)}"
@@ -1001,6 +1027,8 @@ def build_day_candidate(
             else f"Closed 5m candle crosses below the prior 12-bar low near "
             f"{round_to_tick(trigger_price, analysis.instrument.tick_size)}"
         )
+    else:
+        trigger_condition = "No closed 5m live trigger confirmed"
 
     derivatives = analysis.derivatives or {}
     missing = list(analysis.missing_data)
@@ -1023,12 +1051,12 @@ def build_day_candidate(
         f"5m relative volume: {analysis.volume_ratio_5m:.2f}x",
         f"Relative strength vs BTC: 1H {analysis.relative_strength_1h:+.2f}%, 4H {analysis.relative_strength_4h:+.2f}%",
     ]
-    if sweep_triggered:
+    if trigger_route == "LIQUIDITY_SWEEP_RECLAIM":
         why_now.append("Latest closed 5m bar completed the sweep/reclaim/structure confirmation sequence")
-    elif range_breakout_triggered:
+    elif trigger_route == "CLOSED_5M_RANGE_BREAKOUT":
         why_now.append("Latest closed 5m bar crossed the prior 12-bar range boundary")
     if conflict_4h:
-        why_now.append("4H structure conflicts with the side but is context-only in v0.7.3")
+        why_now.append(f"4H structure conflicts with the side but is context-only in v{strategy_version}")
     if vwap_reclaim:
         why_now.append("Rolling 24H VWAP reclaim/rejection detected")
 
@@ -1037,6 +1065,7 @@ def build_day_candidate(
         "base_asset": analysis.instrument.base,
         "quote_asset": "USDC",
         "strategy_mode": "DAY_TRADE",
+        "strategy_version": strategy_version,
         "side": side,
         "category": category,
         "state": state,
@@ -1070,15 +1099,19 @@ def build_day_candidate(
             "requires_close": True,
             "volume_confirmation": (
                 f">={DAY_TRIGGER_VOLUME_RATIO:.1f}x prior 20-bar mean volume on confirmation"
-                if sweep_triggered
+                if trigger_route == "LIQUIDITY_SWEEP_RECLAIM"
                 else "No standalone volume hard gate; existing STRICT expansion/quality gates still apply"
+                if trigger_route == "CLOSED_5M_RANGE_BREAKOUT"
+                else "Not triggered"
             ),
             "triggered": triggered,
             "route": trigger_route,
             "model": (
                 "LIQUIDITY_SWEEP_RECLAIM_5M_STRUCTURE_15M_CONFIRMATION"
-                if sweep_triggered
+                if trigger_route == "LIQUIDITY_SWEEP_RECLAIM"
                 else "CLOSED_5M_12_BAR_RANGE_BREAKOUT"
+                if trigger_route == "CLOSED_5M_RANGE_BREAKOUT"
+                else "NONE"
             ),
             "sweep_confirmation": sweep_trigger,
         },
@@ -1149,7 +1182,7 @@ def build_day_candidate(
             "5m signals are vulnerable to false breakouts",
             "A 2–3% BTC move against the trade can invalidate intraday structure",
             "Model RR uses a configurable cost assumption, not the account's exact fee tier",
-            "Only backtests and journal records matching strategy v0.7.3 are comparable with this live engine",
+            f"Only backtests and journal records matching strategy v{strategy_version} are comparable with this candidate",
         ],
         "data_quality": "GOOD" if analysis.instrument.tradeable else "PARTIAL",
         "missing_data": sorted(set(missing)),
@@ -1232,7 +1265,7 @@ def build_day_regime(
             "Coinalyze derivatives": coinalyze_quality,
         },
         "notes": [
-            "Day-trade v0.7.3 uses 4H/1H as context; live trigger routes are a closed 5m 12-bar range breakout or the closed 5m sweep/reclaim/structure sequence; 15m confirmation applies to the sweep route.",
+            "Day-trade v0.7.4 uses 4H/1H as context; live trigger routes are a closed 5m 12-bar range breakout or the closed 5m sweep/reclaim/structure sequence; 15m confirmation applies to the sweep route.",
             "4H conflict is context-only and does not veto strict eligibility or execution.",
             "Coinalyze data is aggregated and not Bybit EU-specific unless explicitly marked.",
         ],
@@ -1333,7 +1366,8 @@ async def persist_day_results(
                 "label_free": True,
                 "outcome_labels_stored": False,
                 "spec_version": PROSPECTIVE_FUNNEL_SPEC_VERSION,
-                "strategy_version": DAY_STRATEGY_VERSION,
+                "strategy_version": PROSPECTIVE_FUNNEL_STRATEGY_VERSION,
+                "live_strategy_version": DAY_STRATEGY_VERSION,
                 "captured_at": scan["data_as_of"],
                 "source_commit_sha": SOURCE_COMMIT_SHA,
                 "reason": "STANDALONE_RECORDER_OWNS_CAPTURE",
@@ -1624,7 +1658,7 @@ async def run() -> None:
             },
             "exclusions": exclusions[:100],
             "notes": [
-                "Prospective journal records are version-separated; v0.7.3 creates no historical backfill.",
+                "Prospective journal records are version-separated; v0.7.4 creates no historical backfill into earlier strategy cohorts.",
                 "Fast coverage scans all eligible USDC pairs on 5m/15m; 1H/4H deep context is limited to promoted symbols.",
                 "WATCH_ONLY items are not entries.",
             ],

@@ -200,6 +200,7 @@ def test_legacy_breakout_without_sweep_confirmation_cannot_trade(monkeypatch):
         analysis,
         "long",
         datetime.now(timezone.utc),
+        strategy_version="0.7.3",
     )
     assert candidate is not None
     assert candidate["category"] == "STRICT"
@@ -225,7 +226,11 @@ def test_short_borrowability_remains_hard_gate(monkeypatch):
     assert candidate["execution_status"] == "DAY_TRADE_BLOCKED"
 
 
-def test_v073_strategy_versions_are_separated():
-    assert day_worker.DAY_STRATEGY_VERSION == "0.7.3"
-    assert journal.STRATEGY_VERSION == "0.7.3"
-    assert backtest.STRATEGY_VERSION == "0.7.3"
+def test_v073_history_is_frozen_while_current_strategy_is_v074():
+    assert day_worker.LEGACY_DAY_STRATEGY_VERSION == "0.7.3"
+    assert day_worker.DAY_STRATEGY_VERSION == "0.7.4"
+    assert journal.STRATEGY_VERSION == "0.7.4"
+    assert backtest.STRATEGY_VERSION == "0.7.4"
+    assert day_worker.resolve_day_trigger_policy(
+        "0.7.3", range_breakout_triggered=True, sweep_triggered=False
+    ) == (False, "NONE")

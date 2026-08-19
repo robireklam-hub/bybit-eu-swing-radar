@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: Bybit EU Trading Radar API
-  version: 0.7.3
-  description: Bybit EU Trading Radar with day-trade strategy v0.7.3, compact audit,
+  version: 0.7.4
+  description: Bybit EU Trading Radar with day-trade strategy v0.7.4, compact audit,
     and context-only derivatives OI/funding Flow feature v0.7.2.2.
 servers:
 - url: https://bybit-eu-swing-radar-production.up.railway.app
@@ -215,7 +215,7 @@ paths:
     get:
       operationId: getDayTradeScan
       summary: Return the cached v0.7.3 day-trade scan using 4H/1H context and
-        closed 5m sweep/reclaim/structure confirmation with closed 15m confirmation.
+        closed 5m 12-bar range breakout OR sweep/reclaim/structure confirmation with closed 15m confirmation.
       parameters:
       - in: query
         name: direction
@@ -608,7 +608,7 @@ paths:
       operationId: getDayTradeFlowContext
       summary: Return context-only OI/funding flow data for one cached day-trade symbol.
       description: Bybit global linear derivatives plus already-cached Coinalyze secondary
-        context. This endpoint does not change v0.7.3 STRICT gates or prove Bybit
+        context. This endpoint does not change v0.7.4 STRICT gates or prove Bybit
         EU execution conditions.
       parameters:
       - in: path
