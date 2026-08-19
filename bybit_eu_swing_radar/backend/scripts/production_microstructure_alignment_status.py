@@ -9,6 +9,8 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+PREREGISTERED_STRATEGY_VERSION = "0.7.3"
+
 
 def fetch_json(url: str, api_key: str, timeout: float = 15.0) -> dict[str, Any]:
     request = Request(
@@ -43,6 +45,10 @@ def validate_alignment_status(payload: dict[str, Any]) -> tuple[bool, str]:
     spec = payload.get("spec")
     if not isinstance(spec, dict) or spec.get("spec_version") != "microstructure-forward-alignment-v1":
         return False, "unexpected_alignment_spec"
+    if spec.get("preregistered_strategy_version") != PREREGISTERED_STRATEGY_VERSION:
+        return False, "unexpected_preregistered_strategy_version"
+    if spec.get("strategy_version_isolated") is not True:
+        return False, "strategy_version_isolation_not_true"
     sample = payload.get("sample")
     if not isinstance(sample, dict):
         return False, "sample_missing"
@@ -134,6 +140,7 @@ def main() -> int:
         return 1
 
     ok, reason = validate_alignment_status(payload)
+    spec = payload.get("spec") or {}
     safe = {
         "data_quality_ready": payload.get("data_quality_ready"),
         "alignment_coverage_ready": payload.get("alignment_coverage_ready"),
@@ -141,7 +148,9 @@ def main() -> int:
         "ready_for_preregistered_effect_test": payload.get("ready_for_preregistered_effect_test"),
         "sample": payload.get("sample"),
         "interval": payload.get("interval"),
-        "spec_version": (payload.get("spec") or {}).get("spec_version"),
+        "spec_version": spec.get("spec_version"),
+        "preregistered_strategy_version": spec.get("preregistered_strategy_version"),
+        "strategy_version_isolated": spec.get("strategy_version_isolated"),
         "promotion_allowed": payload.get("promotion_allowed"),
     }
     print("ALIGNMENT_STATUS=" + json.dumps(safe, sort_keys=True))

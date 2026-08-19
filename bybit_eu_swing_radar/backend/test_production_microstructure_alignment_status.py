@@ -8,7 +8,11 @@ def _payload(**overrides):
         "label_blind": True,
         "post_signal_data_used": False,
         "promotion_allowed": False,
-        "spec": {"spec_version": "microstructure-forward-alignment-v1"},
+        "spec": {
+            "spec_version": "microstructure-forward-alignment-v1",
+            "preregistered_strategy_version": "0.7.3",
+            "strategy_version_isolated": True,
+        },
         "alignment_coverage_ready": True,
         "alignment_coverage": {
             "status": "ALIGNED",
@@ -46,6 +50,19 @@ def test_alignment_status_contract_rejects_label_leakage_or_gate_mutation():
     mutated = _payload()
     mutated["sample"] = dict(mutated["sample"], minimum_total=50)
     assert validate_alignment_status(mutated)[1] == "sample_gate_mutated"
+
+
+def test_alignment_status_contract_rejects_strategy_version_contamination():
+    wrong_version = _payload()
+    wrong_version["spec"] = dict(
+        wrong_version["spec"],
+        preregistered_strategy_version="0.7.4",
+    )
+    assert validate_alignment_status(wrong_version)[1] == "unexpected_preregistered_strategy_version"
+
+    not_isolated = _payload()
+    not_isolated["spec"] = dict(not_isolated["spec"], strategy_version_isolated=False)
+    assert validate_alignment_status(not_isolated)[1] == "strategy_version_isolation_not_true"
 
 
 def test_alignment_status_contract_accepts_waiting_for_forward_signals():

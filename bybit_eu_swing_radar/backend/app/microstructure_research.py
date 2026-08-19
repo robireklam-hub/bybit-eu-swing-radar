@@ -15,6 +15,7 @@ import asyncpg
 from fastapi import Depends, FastAPI, HTTPException, Query
 
 from research.microstructure.alignment import (
+    PREREGISTERED_STRATEGY_VERSION,
     alignment_spec,
     load_feature_rows,
     sample_readiness,
@@ -123,7 +124,7 @@ async def _load_journal_signal_counts(
     since: datetime,
     until: datetime,
 ) -> dict[str, int]:
-    """Count forward journal signals without reading any post-signal labels."""
+    """Count only preregistered-v0.7.3 forward signals without reading labels."""
     if not database_url:
         raise RuntimeError("DATABASE_URL is not configured")
     wanted = tuple(dict.fromkeys(str(symbol).upper() for symbol in symbols))
@@ -137,12 +138,14 @@ async def _load_journal_signal_counts(
             WHERE symbol = ANY($1::text[])
               AND opened_at >= $2
               AND opened_at < $3
+              AND strategy_version = $4
             GROUP BY symbol
             ORDER BY symbol
             """,
             list(wanted),
             since,
             until,
+            PREREGISTERED_STRATEGY_VERSION,
         )
     finally:
         await connection.close()
@@ -350,8 +353,6 @@ def attach_microstructure_research(
                     recorder.config.symbols,
                 )
             _ensure_task_started()
-            # Yield once so the newly scheduled collector can set its initial
-            # runtime state before we report status on first access.
             await asyncio.sleep(0)
         except Exception as exc:
             logger.exception("microstructure recorder status failed")
