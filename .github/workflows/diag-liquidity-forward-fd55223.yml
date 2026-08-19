@@ -1,0 +1,58 @@
+name: Diag liquidity forward fd55223
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.head_ref == 'diag/liquidity-forward-fd55223'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: fd55223fca5281785e8d42c49e8e5bc9d110f1c7
+    steps:
+      - name: Read current production liquidity forward state
+        run: |
+          python - <<'PY'
+          import json, os
+          from urllib.request import Request, urlopen
+
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key = os.environ['PRODUCTION_RADAR_API_KEY']
+          expected = os.environ['EXPECTED_SHA']
+          def get(path):
+              req = Request(base + path, headers={'Accept':'application/json','User-Agent':'liquidity-forward-diag/1','X-Radar-Key':key})
+              with urlopen(req, timeout=30) as response:
+                  return json.load(response)
+
+          version = get('/version')
+          actual = version.get('commit_sha')
+          print('VERSION=' + json.dumps({'expected': expected, 'actual': actual}, sort_keys=True))
+          if actual != expected:
+              raise SystemExit('FAIL expected current main is not deployed')
+
+          forward = get('/v1/research/swing-liquidity/forward-status')
+          safe_forward = {k: forward.get(k) for k in [
+              'study','research_only','live_strategy_mutated','promotion_allowed','capture_count','first_capture_at','last_capture_at',
+              'candidate_observations','orderbook_errors','turnover_tiers','spread_tiers','development_target_matured_events','validation_target_matured_events'
+          ]}
+          print('SWING_LIQUIDITY_FORWARD_STATUS=' + json.dumps(safe_forward, sort_keys=True))
+
+          events = get('/v1/research/swing-liquidity/forward-event-status')
+          safe_events = {k: events.get(k) for k in [
+              'study','builder_version','checked_at','durable_snapshot_rows','symbol_count','kline_symbol_count','kline_errors','event_count',
+              'matured_event_count','research_only','label_blind','outcome_visible','live_strategy_mutated','promotion_allowed'
+          ]}
+          safe_events['events'] = [
+              {k: row.get(k) for k in ['event_id','symbol','side','pretrigger_captured_at','trigger_close_at','matures_at','pretrigger_snapshot_age_seconds']}
+              for row in (events.get('events') or [])
+          ]
+          print('SWING_LIQUIDITY_EVENT_STATUS=' + json.dumps(safe_events, sort_keys=True))
+          PY
