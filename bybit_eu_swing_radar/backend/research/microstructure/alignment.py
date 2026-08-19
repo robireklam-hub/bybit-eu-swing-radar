@@ -14,6 +14,7 @@ from typing import Any, Iterable, Mapping
 import asyncpg
 
 SPEC_VERSION = "microstructure-forward-alignment-v1"
+PREREGISTERED_STRATEGY_VERSION = "0.7.3"
 LOOKBACK_SECONDS = 60
 WINDOW_SECONDS = (5, 15, 60)
 MIN_SIGNAL_SAMPLE_TOTAL = 60
@@ -47,6 +48,8 @@ HYPOTHESES = (
 )
 
 # Deliberately excludes status/closed_at/exit_reason/gross_r/net_r/outcome columns.
+# The v1 study was preregistered while the live day strategy was v0.7.3; keep
+# this prospective cohort version-isolated even after later live strategy bumps.
 ALIGNMENT_SQL = """
 SELECT
     j.id AS signal_id,
@@ -80,6 +83,7 @@ JOIN microstructure_buckets AS b
 WHERE j.symbol = ANY($1::text[])
   AND j.opened_at >= $2
   AND j.opened_at < $3
+  AND j.strategy_version = $4
 ORDER BY j.id, b.bucket_start
 """
 
@@ -89,6 +93,8 @@ def alignment_spec() -> dict[str, Any]:
         "research_only": True,
         "live_strategy_mutated": False,
         "spec_version": SPEC_VERSION,
+        "preregistered_strategy_version": PREREGISTERED_STRATEGY_VERSION,
+        "strategy_version_isolated": True,
         "label_blind": True,
         "post_signal_data_used": False,
         "lookback_seconds": LOOKBACK_SECONDS,
@@ -244,13 +250,19 @@ def sample_readiness(features: Iterable[Mapping[str, Any]], symbols: Iterable[st
 
 async def load_feature_rows(database_url: str, symbols: Iterable[str], since: datetime,
                             until: datetime, bucket_seconds: int = 5) -> list[dict[str, Any]]:
-    """Load label-blind, strictly pre-signal feature rows for a fixed time interval."""
+    """Load label-blind, strictly pre-signal feature rows for the fixed v0.7.3 study cohort."""
     if not database_url:
         raise RuntimeError("DATABASE_URL is not configured")
     wanted = tuple(dict.fromkeys(str(symbol).upper() for symbol in symbols))
     connection = await asyncpg.connect(database_url)
     try:
-        rows = await connection.fetch(ALIGNMENT_SQL, list(wanted), since, until)
+        rows = await connection.fetch(
+            ALIGNMENT_SQL,
+            list(wanted),
+            since,
+            until,
+            PREREGISTERED_STRATEGY_VERSION,
+        )
     finally:
         await connection.close()
     return build_feature_rows(rows, bucket_seconds=bucket_seconds)
