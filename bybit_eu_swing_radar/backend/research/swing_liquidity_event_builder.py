@@ -49,26 +49,33 @@ def select_pretrigger_snapshot(
     return max(matches, key=lambda item: item[0])[1]
 
 
-def build_first_trigger_event(
+def build_trigger_events(
     snapshots: Iterable[dict[str, Any]],
     candles: Iterable[dict[str, Any]],
     *,
     symbol: str,
     side: str,
-) -> dict[str, Any] | None:
-    """Return the first chronological eligible closed-4H trigger event.
+) -> list[dict[str, Any]]:
+    """Return unique eligible first-trigger-bar events in chronological order.
 
-    Each candle must provide start_at, close_at and close. The candidate stored in
-    the chosen pre-trigger snapshot is authoritative and remains label-blind.
+    The preregistration defines event identity by symbol, side, and first
+    qualifying closed-4H trigger bar. Repeated hourly snapshots are covariates:
+    for each trigger bar exactly one latest strictly pre-trigger <=90m snapshot
+    is authoritative. A later bar may form another independent event only when
+    it has its own eligible prospective snapshot; the same old snapshot cannot
+    leak forward across 4H bars because of the fixed 90-minute boundary.
     """
+    snapshot_rows = list(snapshots)
     ordered = sorted(candles, key=lambda row: _ts(row["close_at"]))
+    events: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
     for candle in ordered:
         start_at = _ts(candle["start_at"])
         close_at = _ts(candle["close_at"])
         if close_at <= start_at:
             continue
         snapshot = select_pretrigger_snapshot(
-            snapshots,
+            snapshot_rows,
             symbol=symbol,
             side=side,
             trigger_close_at=close_at,
@@ -86,7 +93,23 @@ def build_first_trigger_event(
             trigger_bar_start_at=start_at,
             trigger_close_at=close_at,
         )
-        metadata["event_id"] = f"{metadata['symbol']}:{metadata['side']}:{metadata['trigger_close_at']}"
+        event_id = f"{metadata['symbol']}:{metadata['side']}:{metadata['trigger_close_at']}"
+        if event_id in seen_ids:
+            continue
+        seen_ids.add(event_id)
+        metadata["event_id"] = event_id
         metadata["source_capture_at"] = metadata["pretrigger_captured_at"]
-        return metadata
-    return None
+        events.append(metadata)
+    return events
+
+
+def build_first_trigger_event(
+    snapshots: Iterable[dict[str, Any]],
+    candles: Iterable[dict[str, Any]],
+    *,
+    symbol: str,
+    side: str,
+) -> dict[str, Any] | None:
+    """Compatibility helper returning the first chronological trigger event."""
+    events = build_trigger_events(snapshots, candles, symbol=symbol, side=side)
+    return events[0] if events else None

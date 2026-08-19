@@ -37,6 +37,7 @@ def _payload(events=None):
         "promotion_allowed": False,
         "study": "swing-liquidity-validation-v1",
         "builder_version": "swing-liquidity-event-builder-v1",
+        "event_identity": "symbol_side_first_qualifying_4h_trigger_bar",
         "checked_at": datetime(2026, 8, 19, tzinfo=timezone.utc).isoformat(),
         "durable_snapshot_rows": 12,
         "symbol_count": 3,
@@ -77,7 +78,7 @@ def test_event_smoke_rejects_wrong_maturity_horizon():
     assert any("wrong_maturity_horizon" in failure for failure in validate_event_payload(payload))
 
 
-def test_event_smoke_rejects_multiple_first_triggers_for_same_symbol_side():
+def test_event_smoke_allows_distinct_trigger_bars_for_same_symbol_side():
     first = _event()
     second = dict(first)
     later_trigger = datetime.fromisoformat(first["trigger_close_at"]) + timedelta(hours=4)
@@ -88,6 +89,14 @@ def test_event_smoke_rejects_multiple_first_triggers_for_same_symbol_side():
     second["source_capture_at"] = second["pretrigger_captured_at"]
     second["event_id"] = f"BTCUSDC:long:{later_trigger.isoformat()}"
 
-    failures = validate_event_payload(_payload(events=[first, second]))
+    assert validate_event_payload(_payload(events=[first, second])) == []
 
-    assert any("duplicate_symbol_side_first_trigger" in failure for failure in failures)
+
+def test_event_smoke_rejects_duplicate_symbol_side_trigger_bar():
+    first = _event()
+    duplicate = dict(first)
+    duplicate["event_id"] = "different-id-but-same-trigger-bar"
+
+    failures = validate_event_payload(_payload(events=[first, duplicate]))
+
+    assert any("duplicate_symbol_side_trigger_bar" in failure for failure in failures)
