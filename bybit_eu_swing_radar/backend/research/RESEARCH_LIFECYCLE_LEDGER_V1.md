@@ -21,7 +21,7 @@ Feature evidence follows the same governance chain, preceded by:
 
 `HYPOTHESIS_RECORDED → FEATURE_CARD_RECORDED`
 
-Exact retries are idempotent. Reusing an event identity with different content fails closed. Once a later lifecycle stage has been recorded, an earlier stage cannot be appended retroactively. `DECISION_RECORDED` is terminal for that entity/specification.
+Exact retries are idempotent. Reusing an event identity with different content fails closed. Every advancing non-decision milestone requires its direct predecessor to have already been recorded, so lifecycle gates cannot be skipped. Once a later lifecycle stage has been recorded, an earlier stage cannot be appended retroactively. `DECISION_RECORDED` is terminal for that entity/specification.
 
 ## Evidence model
 
