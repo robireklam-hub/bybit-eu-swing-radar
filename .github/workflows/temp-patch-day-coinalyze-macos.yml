@@ -23,7 +23,9 @@ jobs:
           python-version: '3.12'
       - name: Install backend dependencies
         working-directory: bybit_eu_swing_radar/backend
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
       - name: Apply patch
         run: python scripts/temp_patch_day_coinalyze.py
       - name: Run focused tests and compile
