@@ -1,0 +1,33 @@
+name: Diag exact-main research ff4b45c
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  production-semantic-verification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: ff4b45c1c7fc390f5e694f8f1cb76d024fe1af9b
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ff4b45c1c7fc390f5e694f8f1cb76d024fe1af9b
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Verify post-merge immutable-history capture path
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_signal_context_freeze_v3_smoke.py
+      - name: Verify swing Coinalyze candidate semantics
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_coinalyze_smoke.py
+      - name: Verify swing liquidity label-blind event semantics
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_event_smoke.py
