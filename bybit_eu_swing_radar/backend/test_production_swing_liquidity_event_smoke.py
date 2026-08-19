@@ -14,6 +14,7 @@ def _event():
         "symbol": "BTCUSDC",
         "side": "long",
         "pretrigger_captured_at": captured.isoformat(),
+        "pretrigger_available_at": captured.isoformat(),
         "pretrigger_snapshot_age_seconds": 1800.0,
         "trigger_bar_start_at": (trigger - timedelta(hours=4)).isoformat(),
         "trigger_close_at": trigger.isoformat(),
@@ -53,6 +54,39 @@ def test_event_smoke_accepts_label_blind_complete_payload():
     assert validate_event_payload(_payload()) == []
 
 
+def test_event_smoke_accepts_pit_availability_later_than_capture():
+    payload = _payload()
+    event = payload["events"][0]
+    trigger = datetime.fromisoformat(event["trigger_close_at"])
+    event["pretrigger_captured_at"] = (trigger - timedelta(minutes=30)).isoformat()
+    event["source_capture_at"] = event["pretrigger_captured_at"]
+    event["pretrigger_available_at"] = (trigger - timedelta(minutes=20)).isoformat()
+    event["pretrigger_snapshot_age_seconds"] = 1200.0
+    event["point_in_time_verified"] = True
+
+    assert validate_event_payload(payload) == []
+
+
+def test_event_smoke_rejects_age_measured_from_capture_when_pit_availability_differs():
+    payload = _payload()
+    event = payload["events"][0]
+    trigger = datetime.fromisoformat(event["trigger_close_at"])
+    event["pretrigger_available_at"] = (trigger - timedelta(minutes=20)).isoformat()
+    event["pretrigger_snapshot_age_seconds"] = 1800.0
+    event["point_in_time_verified"] = True
+
+    assert any("snapshot_age_mismatch" in failure for failure in validate_event_payload(payload))
+
+
+def test_event_smoke_rejects_verified_pit_without_available_at():
+    payload = _payload()
+    event = payload["events"][0]
+    event.pop("pretrigger_available_at")
+    event["point_in_time_verified"] = True
+
+    assert any("verified_pit_missing_available_at" in failure for failure in validate_event_payload(payload))
+
+
 def test_event_smoke_allows_zero_events_but_requires_real_input_coverage():
     assert validate_event_payload(_payload(events=[])) == []
 
@@ -86,6 +120,7 @@ def test_event_smoke_allows_distinct_trigger_bars_for_same_symbol_side():
     second["trigger_close_at"] = later_trigger.isoformat()
     second["matures_at"] = (later_trigger + timedelta(days=10)).isoformat()
     second["pretrigger_captured_at"] = (later_trigger - timedelta(minutes=30)).isoformat()
+    second["pretrigger_available_at"] = second["pretrigger_captured_at"]
     second["source_capture_at"] = second["pretrigger_captured_at"]
     second["event_id"] = f"BTCUSDC:long:{later_trigger.isoformat()}"
 
