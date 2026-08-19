@@ -11,7 +11,7 @@ permissions:
 jobs:
   verify:
     if: github.head_ref == 'diag/post-merge-day-coinalyze-27737fb'
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     timeout-minutes: 12
     env:
       EXACT_MAIN_SHA: 27737fbe3caacdd2efbe72ca0acdfc0ebc6cc88f
@@ -45,7 +45,6 @@ jobs:
               with urlopen(req, timeout=40) as response:
                   return json.load(response)
 
-          # Wait for the API deployment itself to expose the exact merge SHA.
           version = None
           for _ in range(60):
               try:
@@ -57,8 +56,6 @@ jobs:
               time.sleep(5)
           assert version and version.get('commit_sha') == exact, version
 
-          # A new day-worker cache is required: the new complete-count field did
-          # not exist before PR #223, so this cannot accidentally validate stale data.
           status = None
           for _ in range(90):
               try:
@@ -124,7 +121,6 @@ jobs:
               if symbol:
                   assert symbol.endswith('USDC'), symbol
 
-          # Read a bounded set of concrete setup/audit payloads for routing evidence.
           symbols=[]
           for item in candidates:
               sym=str(item.get('symbol') or '').upper()
