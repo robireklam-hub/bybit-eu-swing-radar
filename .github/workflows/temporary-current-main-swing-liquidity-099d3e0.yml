@@ -8,6 +8,7 @@ on:
 permissions:
   contents: read
 
+# Read-only diagnostic; never merge.
 jobs:
   verify:
     if: github.head_ref == 'diag/current-main-swing-liquidity-099d3e0'
