@@ -64,10 +64,19 @@ def build_feature_rows(
     rows: Iterable[Mapping[str, Any]],
     bucket_seconds: int = 5,
 ) -> list[dict[str, Any]]:
-    features = v1.build_feature_rows(rows, bucket_seconds=bucket_seconds)
+    source_rows = list(rows)
+    contaminated = sorted({
+        str(row.get("strategy_version") or "")
+        for row in source_rows
+        if str(row.get("strategy_version") or "") != PREREGISTERED_STRATEGY_VERSION
+    })
+    if contaminated:
+        raise ValueError(
+            "v2 alignment strategy contamination: " + ",".join(contaminated)
+        )
+    features = v1.build_feature_rows(source_rows, bucket_seconds=bucket_seconds)
     for feature in features:
         feature["spec_version"] = SPEC_VERSION
-        feature["strategy_version"] = PREREGISTERED_STRATEGY_VERSION
     return features
 
 
