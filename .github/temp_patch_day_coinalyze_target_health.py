@@ -1,0 +1,50 @@
+from pathlib import Path
+import re
+
+path = Path('bybit_eu_swing_radar/backend/day_worker.py')
+text = path.read_text()
+
+old = '''    coinalyze_payload_complete,\n    enrich_coinalyze,\n    mean,'''
+new = '''    coinalyze_payload_complete,\n    enrich_coinalyze,\n    select_coinalyze_targets,\n    mean,'''
+assert old in text
+text = text.replace(old, new, 1)
+
+old = '''def build_day_regime(\n    analyses: list[DayAnalysis],\n    now: datetime,\n    coinalyze_request_ok: bool,\n    coinalyze_enriched_symbols: int,\n    borrowability_ok: bool,\n    coinalyze_complete_symbols: int | None = None,\n) -> dict[str, Any]:\n    complete_symbols = (\n        coinalyze_enriched_symbols\n        if coinalyze_complete_symbols is None\n        else coinalyze_complete_symbols\n    )'''
+new = '''def build_day_regime(\n    analyses: list[DayAnalysis],\n    now: datetime,\n    coinalyze_request_ok: bool,\n    coinalyze_enriched_symbols: int,\n    borrowability_ok: bool,\n    coinalyze_complete_symbols: int | None = None,\n    coinalyze_target_symbols: int | None = None,\n) -> dict[str, Any]:\n    complete_symbols = (\n        coinalyze_enriched_symbols\n        if coinalyze_complete_symbols is None\n        else coinalyze_complete_symbols\n    )\n    target_symbols = (\n        len(analyses)\n        if coinalyze_target_symbols is None\n        else coinalyze_target_symbols\n    )'''
+assert old in text
+text = text.replace(old, new, 1)
+text = text.replace(
+    '        and complete_symbols == len(analyses)\n',
+    '        and target_symbols > 0\n        and complete_symbols == target_symbols\n',
+    1,
+)
+
+helper = '''\n\ndef build_day_coinalyze_source_status(\n    *,\n    now: datetime,\n    request_ok: bool,\n    request_error: str | None,\n    enriched_count: int,\n    complete_count: int,\n    target_count: int,\n    analysis_count: int,\n) -> dict[str, Any]:\n    \"\"\"Report target health separately from budget-bounded analysis coverage.\"\"\"\n    target_complete = (\n        request_ok\n        and target_count > 0\n        and complete_count == target_count\n    )\n    budget_bounded = analysis_count > target_count\n    return {\n        \"source\": \"Coinalyze\",\n        \"status\": (\n            \"ok\"\n            if target_complete\n            else \"partial\"\n            if enriched_count > 0\n            else \"degraded\"\n        ),\n        \"data_as_of\": now.isoformat() if enriched_count > 0 else None,\n        # Canonical source-health coverage is measured against the intentional\n        # rate-budget target set, not every deep-analyzed spot symbol.\n        \"coverage\": f\"{complete_count}/{target_count}\",\n        \"any_field_coverage\": f\"{enriched_count}/{target_count}\",\n        \"complete_coverage\": f\"{complete_count}/{target_count}\",\n        \"target_count\": target_count,\n        \"target_any_field_coverage\": f\"{enriched_count}/{target_count}\",\n        \"target_complete_coverage\": f\"{complete_count}/{target_count}\",\n        \"analysis_count\": analysis_count,\n        \"analysis_any_field_coverage\": f\"{enriched_count}/{analysis_count}\",\n        \"analysis_complete_coverage\": f\"{complete_count}/{analysis_count}\",\n        \"analysis_coverage_mode\": \"budget_bounded\" if budget_bounded else \"full\",\n        \"budget_bounded\": budget_bounded,\n        \"missing_fields\": (\n            []\n            if target_complete\n            else [\n                request_error\n                or \"Targeted derivatives enrichment is only partially available\"\n            ]\n        ),\n    }\n'''
+marker = '\n\nasync def upsert_cache('
+assert marker in text
+text = text.replace(marker, helper + marker, 1)
+
+old = '''        coinalyze_ok, coinalyze_error = await enrich_coinalyze(\n            analyses, coinalyze\n        )'''
+new = '''        # Freeze the intentional rate-budget target set so downstream health\n        # uses the same denominator as the enrichment call. This does not\n        # change which symbols are selected or any score/execution semantics.\n        coinalyze_targets = select_coinalyze_targets(analyses)\n        coinalyze_target_count = len(coinalyze_targets)\n        coinalyze_ok, coinalyze_error = await enrich_coinalyze(\n            analyses, coinalyze, target_analyses=coinalyze_targets\n        )'''
+assert old in text
+text = text.replace(old, new, 1)
+
+old = '''            coinalyze_complete_symbols=coinalyze_complete_count,\n        )'''
+new = '''            coinalyze_complete_symbols=coinalyze_complete_count,\n            coinalyze_target_symbols=coinalyze_target_count,\n        )'''
+assert old in text
+text = text.replace(old, new, 1)
+
+old = '''            \"coinalyze_enriched_symbols\": coinalyze_enriched_count,\n            \"coinalyze_complete_symbols\": coinalyze_complete_count,\n            \"borrowability_checked_symbols\": len(analyses) if borrow_ok else 0,'''
+new = '''            \"coinalyze_enriched_symbols\": coinalyze_enriched_count,\n            \"coinalyze_complete_symbols\": coinalyze_complete_count,\n            \"coinalyze_target_symbols\": coinalyze_target_count,\n            \"coinalyze_analysis_symbols\": len(analyses),\n            \"coinalyze_budget_bounded\": len(analyses) > coinalyze_target_count,\n            \"borrowability_checked_symbols\": len(analyses) if borrow_ok else 0,'''
+assert old in text
+text = text.replace(old, new, 1)
+
+pattern = re.compile(r'''                \{\n                    \"source\": \"Coinalyze\",\n                    \"status\": \(.*?\n                \},\n''', re.S)
+matches = list(pattern.finditer(text))
+assert len(matches) == 1, len(matches)
+replacement = '''                build_day_coinalyze_source_status(\n                    now=now,\n                    request_ok=coinalyze_ok,\n                    request_error=coinalyze_error,\n                    enriched_count=coinalyze_enriched_count,\n                    complete_count=coinalyze_complete_count,\n                    target_count=coinalyze_target_count,\n                    analysis_count=len(analyses),\n                ),\n'''
+text = text[:matches[0].start()] + replacement + text[matches[0].end():]
+path.write_text(text)
+
+test_path = Path('bybit_eu_swing_radar/backend/test_day_coinalyze_target_health.py')
+test_path.write_text('''from datetime import datetime, timezone\nfrom types import SimpleNamespace\n\nfrom day_worker import build_day_coinalyze_source_status, build_day_regime\n\n\ndef _analysis(index: int):\n    return SimpleNamespace(\n        instrument=SimpleNamespace(symbol=f\"T{index}USDC\"),\n        direction_score=0.0,\n        atr_ratio_15m=1.0,\n        structure_4h=\"range\",\n        structure_1h=\"range\",\n        structure_15m=\"range\",\n    )\n\n\ndef test_budget_bounded_complete_target_is_good():\n    now = datetime.now(timezone.utc)\n    source = build_day_coinalyze_source_status(\n        now=now,\n        request_ok=True,\n        request_error=None,\n        enriched_count=9,\n        complete_count=9,\n        target_count=9,\n        analysis_count=29,\n    )\n    assert source[\"status\"] == \"ok\"\n    assert source[\"coverage\"] == \"9/9\"\n    assert source[\"target_complete_coverage\"] == \"9/9\"\n    assert source[\"analysis_complete_coverage\"] == \"9/29\"\n    assert source[\"analysis_coverage_mode\"] == \"budget_bounded\"\n    assert source[\"budget_bounded\"] is True\n    assert source[\"missing_fields\"] == []\n\n\ndef test_incomplete_target_remains_partial():\n    now = datetime.now(timezone.utc)\n    source = build_day_coinalyze_source_status(\n        now=now,\n        request_ok=False,\n        request_error=\"liquidations missing\",\n        enriched_count=9,\n        complete_count=8,\n        target_count=9,\n        analysis_count=29,\n    )\n    assert source[\"status\"] == \"partial\"\n    assert source[\"coverage\"] == \"8/9\"\n    assert source[\"missing_fields\"] == [\"liquidations missing\"]\n\n\ndef test_regime_uses_target_denominator_not_full_analysis_universe():\n    now = datetime.now(timezone.utc)\n    regime = build_day_regime(\n        [_analysis(i) for i in range(29)],\n        now,\n        True,\n        9,\n        True,\n        coinalyze_complete_symbols=9,\n        coinalyze_target_symbols=9,\n    )\n    assert regime[\"source_quality\"][\"Coinalyze derivatives\"] == \"GOOD\"\n    assert regime[\"data_quality\"] == \"GOOD\"\n''')
