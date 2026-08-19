@@ -314,6 +314,9 @@ class CoinalyzeAPI:
     async def future_markets(self) -> list[dict[str, Any]]:
         return await self.get("/future-markets")
 
+    async def exchanges(self) -> list[dict[str, Any]]:
+        return await self.get("/exchanges")
+
     async def batch_current(self, endpoint: str, symbols: list[str], convert_to_usd: bool = False) -> Any:
         params: dict[str, Any] = {"symbols": ",".join(symbols)}
         if convert_to_usd:
@@ -1007,11 +1010,34 @@ def analyze_market(
     )
 
 
+COINALYZE_REQUIRED_FIELDS = ("current_oi", "funding", "oi_history", "liquidations")
+
+
+def coinalyze_payload_complete(payload: dict[str, Any]) -> bool:
+    if not payload or payload.get("endpoint_errors"):
+        return False
+    availability = payload.get("availability")
+    return bool(
+        isinstance(availability, dict)
+        and all(bool(availability.get(field)) for field in COINALYZE_REQUIRED_FIELDS)
+    )
+
+
 def select_coinalyze_markets(
-    markets: list[dict[str, Any]], bases: list[str]
+    markets: list[dict[str, Any]],
+    bases: list[str],
+    *,
+    exchange_names: dict[str, str] | None = None,
+    quote_order: tuple[str, ...] = ("USDC", "USDT", "USD"),
 ) -> dict[str, dict[str, Any]]:
     selected: dict[str, dict[str, Any]] = {}
     priorities = {"bybit": 0, "binance": 1, "okx": 2, "deribit": 3}
+    exchange_names = {
+        str(code).upper(): str(name)
+        for code, name in (exchange_names or {}).items()
+        if str(code) and str(name)
+    }
+    quote_priorities = {quote.upper(): index for index, quote in enumerate(quote_order)}
     for base in bases:
         candidates: list[tuple[int, int, dict[str, Any]]] = []
         for market in markets:
@@ -1020,12 +1046,19 @@ def select_coinalyze_markets(
             if not bool(market.get("is_perpetual", False)):
                 continue
             quote = str(market.get("quote_asset", "")).upper()
-            if quote not in {"USDT", "USDC", "USD"}:
+            if quote not in quote_priorities:
                 continue
-            exchange = str(market.get("exchange", "")).lower()
-            priority = next((value for key, value in priorities.items() if key in exchange), 9)
-            quote_priority = 0 if quote == "USDC" else 1 if quote == "USDT" else 2
-            candidates.append((priority, quote_priority, market))
+            raw_exchange = str(market.get("exchange", "")).strip()
+            exchange_name = exchange_names.get(raw_exchange.upper(), raw_exchange)
+            exchange_for_rank = exchange_name.lower()
+            priority = next(
+                (value for key, value in priorities.items() if key in exchange_for_rank),
+                9,
+            )
+            resolved_market = dict(market)
+            resolved_market["exchange_code"] = raw_exchange
+            resolved_market["exchange_name"] = exchange_name
+            candidates.append((priority, quote_priorities[quote], resolved_market))
         if candidates:
             candidates.sort(key=lambda item: (item[0], item[1]))
             selected[base] = candidates[0][2]
@@ -1114,9 +1147,30 @@ async def enrich_coinalyze(
             analysis.missing_data.append("Coinalyze future-markets failed")
         return False, f"future-markets: {type(exc).__name__}: {exc}"
 
+    exchange_names: dict[str, str] = {}
+    exchange_metadata_error: str | None = None
+    quote_order = ("USDC", "USDT", "USD")
+    if partial_safe:
+        # Swing derivatives are context-only. Resolve Coinalyze exchange codes
+        # before venue ranking and prefer the liquid USDT context contract over
+        # venue-equivalent USDC/USD contracts. The legacy day path remains
+        # unchanged and keeps its historical USDC-first selection semantics.
+        quote_order = ("USDT", "USDC", "USD")
+        try:
+            exchange_rows = await api.exchanges()
+            exchange_names = {
+                str(row.get("code", "")).upper(): str(row.get("name", ""))
+                for row in exchange_rows
+                if isinstance(row, dict) and row.get("code") and row.get("name")
+            }
+        except Exception as exc:
+            exchange_metadata_error = f"exchanges: {type(exc).__name__}: {exc}"
+
     market_map = select_coinalyze_markets(
         markets,
         [item.instrument.base for item in selected_analyses],
+        exchange_names=exchange_names,
+        quote_order=quote_order,
     )
     symbols = [
         str(market_map[item.instrument.base]["symbol"])
@@ -1132,7 +1186,9 @@ async def enrich_coinalyze(
 
     now_ts = int(time.time())
     from_ts = now_ts - 3 * 24 * 60 * 60
-    endpoint_errors: list[str] = []
+    endpoint_errors: list[str] = (
+        [exchange_metadata_error] if exchange_metadata_error else []
+    )
 
     if partial_safe:
         async def optional(label: str, awaitable: Any) -> Any:
@@ -1240,6 +1296,10 @@ async def enrich_coinalyze(
     }
 
     enriched_count = 0
+    complete_enriched_count = 0
+    missing_by_field: dict[str, list[str]] = {
+        field: [] for field in COINALYZE_REQUIRED_FIELDS
+    }
     for analysis in analyses:
         market = market_map.get(analysis.instrument.base)
         if not market:
@@ -1254,12 +1314,17 @@ async def enrich_coinalyze(
         has_funding = symbol in funding_map
         has_oi_history = symbol in oi_hist_map
         has_liquidations = symbol in liq_map
-        if not (
-            has_current_oi
-            or has_funding
-            or has_oi_history
-            or has_liquidations
-        ):
+        availability = {
+            "current_oi": has_current_oi,
+            "funding": has_funding,
+            "oi_history": has_oi_history,
+            "liquidations": has_liquidations,
+        }
+        if analysis.instrument.symbol in selected_symbols:
+            for field, available in availability.items():
+                if not available:
+                    missing_by_field[field].append(analysis.instrument.symbol)
+        if not any(availability.values()):
             analysis.missing_data.append(
                 "Coinalyze data unavailable for matched market"
             )
@@ -1350,7 +1415,8 @@ async def enrich_coinalyze(
         analysis.derivatives = {
             "source": "Coinalyze",
             "market_symbol": symbol,
-            "exchange": market.get("exchange"),
+            "exchange": market.get("exchange_name") or market.get("exchange"),
+            "exchange_code": market.get("exchange_code") or market.get("exchange"),
             "quote_asset": market.get("quote_asset"),
             "open_interest_usd": current_oi_value,
             "oi_change_1h_pct": oi_change_1h_pct,
@@ -1360,13 +1426,8 @@ async def enrich_coinalyze(
             "long_liquidations_24h_usd": long_liq,
             "short_liquidations_24h_usd": short_liq,
             "is_bybit_specific": "bybit"
-            in str(market.get("exchange", "")).lower(),
-            "availability": {
-                "current_oi": has_current_oi,
-                "funding": has_funding,
-                "oi_history": has_oi_history,
-                "liquidations": has_liquidations,
-            },
+            in str(market.get("exchange_name") or market.get("exchange", "")).lower(),
+            "availability": availability,
             "context_score_adjustments": {
                 "expansion": round(expansion_delta, 6),
                 "direction": round(direction_delta, 6),
@@ -1376,8 +1437,9 @@ async def enrich_coinalyze(
             "endpoint_errors": list(endpoint_errors),
         }
         enriched_count += 1
-
-        if endpoint_errors:
+        if coinalyze_payload_complete(analysis.derivatives):
+            complete_enriched_count += 1
+        else:
             analysis.missing_data.append(
                 "Coinalyze derivatives context partial"
             )
@@ -1402,10 +1464,19 @@ async def enrich_coinalyze(
         )
     if enriched_count < targeted_count:
         error_parts.append(
-            f"enrichment coverage {enriched_count}/{targeted_count}"
+            f"any-field enrichment coverage {enriched_count}/{targeted_count}"
+        )
+    for field, missing_symbols in missing_by_field.items():
+        if missing_symbols:
+            error_parts.append(
+                f"{field} missing for {','.join(sorted(set(missing_symbols)))}"
+            )
+    if complete_enriched_count < targeted_count:
+        error_parts.append(
+            f"complete payload coverage {complete_enriched_count}/{targeted_count}"
         )
 
-    complete = enriched_count == targeted_count and not error_parts
+    complete = complete_enriched_count == targeted_count and not error_parts
     return complete, "; ".join(error_parts) if error_parts else None
 
 
@@ -2064,6 +2135,12 @@ async def run() -> None:
             "items": momentum_items,
         }
         enriched_count = sum(1 for item in analyses if item.derivatives)
+        coinalyze_complete_symbols = [
+            item.instrument.symbol
+            for item in coinalyze_targets
+            if coinalyze_payload_complete(item.derivatives)
+        ]
+        coinalyze_complete_count = len(coinalyze_complete_symbols)
         coinalyze_target_count = len(coinalyze_targets)
         coinalyze_priority_targeted_symbols = [
             symbol for symbol in coinalyze_priority_symbols
@@ -2079,6 +2156,14 @@ async def run() -> None:
         coinalyze_priority_missing_symbols = [
             symbol for symbol in coinalyze_priority_symbols
             if symbol not in set(coinalyze_priority_enriched_symbols)
+        ]
+        coinalyze_priority_complete_symbols = [
+            symbol for symbol in coinalyze_priority_symbols
+            if symbol in set(coinalyze_complete_symbols)
+        ]
+        coinalyze_priority_partial_symbols = [
+            symbol for symbol in coinalyze_priority_enriched_symbols
+            if symbol not in set(coinalyze_priority_complete_symbols)
         ]
         regime = build_market_regime(analyses, now, coinalyze_ok, borrow_ok)
         regime["notes"].append(
@@ -2097,12 +2182,16 @@ async def run() -> None:
             "duplicate_symbols": universe_stats["duplicate_symbols"],
             "analyzed_symbols": len(analyses),
             "coinalyze_enriched_symbols": enriched_count,
+            "coinalyze_complete_symbols": coinalyze_complete_count,
+            "coinalyze_complete_symbol_list": coinalyze_complete_symbols,
             "coinalyze_target_symbols": coinalyze_target_count,
             "coinalyze_enrichment_limit": COINALYZE_ENRICH_LIMIT,
             "coinalyze_targeted_symbol_list": coinalyze_target_symbols,
             "coinalyze_priority_symbols": coinalyze_priority_symbols,
             "coinalyze_priority_targeted_symbols": coinalyze_priority_targeted_symbols,
             "coinalyze_priority_enriched_symbols": coinalyze_priority_enriched_symbols,
+            "coinalyze_priority_complete_symbols": coinalyze_priority_complete_symbols,
+            "coinalyze_priority_partial_symbols": coinalyze_priority_partial_symbols,
             "coinalyze_priority_missing_symbols": coinalyze_priority_missing_symbols,
             "coinalyze_priority_full_target_coverage": (
                 set(coinalyze_priority_targeted_symbols) == set(coinalyze_priority_symbols)
@@ -2171,15 +2260,20 @@ async def run() -> None:
                     "data_as_of": now.isoformat() if enriched_count > 0 else None,
                     "latency_seconds": 0 if enriched_count > 0 else None,
                     "coverage": (
-                        f"rate-budget targets enriched {enriched_count}/{coinalyze_target_count}; "
+                        f"rate-budget targets any-field enriched {enriched_count}/{coinalyze_target_count}, "
+                        f"complete {coinalyze_complete_count}/{coinalyze_target_count}; "
                         f"compact priority targeted {len(coinalyze_priority_targeted_symbols)}/"
-                        f"{len(coinalyze_priority_symbols)}, enriched "
+                        f"{len(coinalyze_priority_symbols)}, any-field enriched "
                         f"{len(coinalyze_priority_enriched_symbols)}/"
+                        f"{len(coinalyze_priority_symbols)}, complete "
+                        f"{len(coinalyze_priority_complete_symbols)}/"
                         f"{len(coinalyze_priority_symbols)}; "
                         f"{len(analyses)} analyzed total"
                     ),
                     "priority_targeted_symbols": coinalyze_priority_targeted_symbols,
                     "priority_enriched_symbols": coinalyze_priority_enriched_symbols,
+                    "priority_complete_symbols": coinalyze_priority_complete_symbols,
+                    "priority_partial_symbols": coinalyze_priority_partial_symbols,
                     "priority_missing_symbols": coinalyze_priority_missing_symbols,
                     "missing_fields": [] if coinalyze_ok else [coinalyze_error or "enrichment unavailable"],
                 },

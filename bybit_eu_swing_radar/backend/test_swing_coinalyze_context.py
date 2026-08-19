@@ -75,12 +75,15 @@ class FakeCoinalyze:
         return [
             {
                 "symbol": "BTCUSDT_PERP.A",
-                "exchange": "Binance",
+                "exchange": "A",
                 "base_asset": "BTC",
                 "quote_asset": "USDT",
                 "is_perpetual": True,
             }
         ]
+
+    async def exchanges(self):
+        return [{"name": "Binance", "code": "A"}]
 
     async def batch_current(self, endpoint, symbols, convert_to_usd=False):
         self.calls.append(endpoint)
@@ -149,6 +152,8 @@ async def test_context_only_enrichment_never_mutates_swing_core_scores(monkeypat
         analysis.quality_score,
     ) == before
     assert analysis.derivatives["strict_score_mutation_applied"] is False
+    assert analysis.derivatives["exchange"] == "Binance"
+    assert analysis.derivatives["exchange_code"] == "A"
     adjustments = analysis.derivatives["context_score_adjustments"]
     assert adjustments["expansion"] != 0.0
     assert adjustments["direction"] != 0.0
@@ -270,3 +275,81 @@ def test_market_regime_coinalyze_quality_uses_targeted_coverage(monkeypatch):
         and "compact top/watch coverage is reported separately" in note
         for note in regime["notes"]
     )
+
+
+def test_market_selector_resolves_exchange_codes_and_prefers_swing_usdt_context():
+    markets = [
+        {
+            "symbol": "LIT-PERP.C",
+            "exchange": "C",
+            "base_asset": "LIT",
+            "quote_asset": "USDC",
+            "is_perpetual": True,
+        },
+        {
+            "symbol": "LITUSDT_PERP.A",
+            "exchange": "A",
+            "base_asset": "LIT",
+            "quote_asset": "USDT",
+            "is_perpetual": True,
+        },
+    ]
+
+    selected = worker.select_coinalyze_markets(
+        markets,
+        ["LIT"],
+        exchange_names={"A": "Binance", "C": "Coinbase"},
+        quote_order=("USDT", "USDC", "USD"),
+    )
+
+    assert selected["LIT"]["symbol"] == "LITUSDT_PERP.A"
+    assert selected["LIT"]["exchange_name"] == "Binance"
+    assert selected["LIT"]["exchange_code"] == "A"
+
+
+class FundingOnlyCoinalyze(FakeCoinalyze):
+    async def batch_current(self, endpoint, symbols, convert_to_usd=False):
+        self.calls.append(endpoint)
+        if endpoint == "/open-interest":
+            return []
+        if endpoint == "/funding-rate":
+            return [{"symbol": symbols[0], "value": 0.0015}]
+        raise AssertionError(endpoint)
+
+    async def batch_history(
+        self, endpoint, symbols, from_ts, to_ts, convert_to_usd=False, interval="4hour"
+    ):
+        self.calls.append(endpoint)
+        if endpoint in {"/open-interest-history", "/liquidation-history"}:
+            return []
+        raise AssertionError(endpoint)
+
+
+@pytest.mark.asyncio
+async def test_successful_http_with_missing_rows_is_partial_not_ok(monkeypatch):
+    monkeypatch.setattr(worker, "COINALYZE_API_KEY", "test-key")
+    analysis = make_analysis()
+    before = (analysis.expansion_score, analysis.direction_score, analysis.quality_score)
+
+    ok, error = await enrich_coinalyze(
+        [analysis],
+        FundingOnlyCoinalyze(),
+        mutate_scores=False,
+        partial_safe=True,
+    )
+
+    assert ok is False
+    assert error is not None
+    assert "current_oi missing for BTCUSDC" in error
+    assert "oi_history missing for BTCUSDC" in error
+    assert "liquidations missing for BTCUSDC" in error
+    assert "complete payload coverage 0/1" in error
+    assert analysis.derivatives["funding_rate"] == 0.0015
+    assert analysis.derivatives["availability"] == {
+        "current_oi": False,
+        "funding": True,
+        "oi_history": False,
+        "liquidations": False,
+    }
+    assert "Coinalyze derivatives context partial" in analysis.missing_data
+    assert (analysis.expansion_score, analysis.direction_score, analysis.quality_score) == before

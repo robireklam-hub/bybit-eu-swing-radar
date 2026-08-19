@@ -69,8 +69,13 @@ def evaluate(top: dict[str, Any], status: dict[str, Any], expected_sha: str) -> 
     priority = worker.get("coinalyze_priority_symbols")
     targeted = worker.get("coinalyze_priority_targeted_symbols")
     enriched = worker.get("coinalyze_priority_enriched_symbols")
+    complete = worker.get("coinalyze_priority_complete_symbols")
+    partial = worker.get("coinalyze_priority_partial_symbols")
     missing = worker.get("coinalyze_priority_missing_symbols")
-    if not all(isinstance(value, list) for value in (priority, targeted, enriched, missing)):
+    if not all(
+        isinstance(value, list)
+        for value in (priority, targeted, enriched, complete, partial, missing)
+    ):
         failures.append("explicit Coinalyze priority coverage lists missing")
         return failures
 
@@ -89,6 +94,32 @@ def evaluate(top: dict[str, Any], status: dict[str, Any], expected_sha: str) -> 
         failures.append("priority enriched/missing partition does not cover priority set")
     if set(enriched) & set(missing):
         failures.append("priority symbol appears in both enriched and missing lists")
+    if set(complete) | set(partial) != set(enriched):
+        failures.append("priority complete/partial partition does not equal enriched set")
+    if set(complete) & set(partial):
+        failures.append("priority symbol appears in both complete and partial lists")
+
+    candidate_statuses: dict[str, str] = {}
+    for section in CANDIDATE_SECTIONS:
+        for row in top.get(section, []):
+            if isinstance(row, dict) and isinstance(row.get("symbol"), str):
+                candidate_statuses[row["symbol"]] = str(row.get("derivatives_status"))
+    if {symbol for symbol, value in candidate_statuses.items() if value == "GOOD"} != set(complete):
+        failures.append("GOOD candidate set does not equal complete Coinalyze priority set")
+    if {symbol for symbol, value in candidate_statuses.items() if value == "PARTIAL"} != set(partial):
+        failures.append("PARTIAL candidate set does not equal partial Coinalyze priority set")
+    if {symbol for symbol, value in candidate_statuses.items() if value == "UNAVAILABLE"} != set(missing):
+        failures.append("UNAVAILABLE candidate set does not equal missing Coinalyze priority set")
+
+    sources = status.get("sources")
+    source = next(
+        (row for row in sources if isinstance(row, dict) and row.get("source") == "Coinalyze"),
+        None,
+    ) if isinstance(sources, list) else None
+    if not isinstance(source, dict):
+        failures.append("Coinalyze source health row missing")
+    elif source.get("status") == "ok" and (partial or missing):
+        failures.append("Coinalyze source health is ok while compact candidates are incomplete")
 
     for section in CANDIDATE_SECTIONS:
         for row in top.get(section, []):
@@ -146,6 +177,8 @@ def run_smoke(base_url: str, api_key: str, expected_sha: str, *, timeout: float 
                 "priority_symbols": worker.get("coinalyze_priority_symbols"),
                 "priority_targeted_symbols": worker.get("coinalyze_priority_targeted_symbols"),
                 "priority_enriched_symbols": worker.get("coinalyze_priority_enriched_symbols"),
+                "priority_complete_symbols": worker.get("coinalyze_priority_complete_symbols"),
+                "priority_partial_symbols": worker.get("coinalyze_priority_partial_symbols"),
                 "priority_missing_symbols": worker.get("coinalyze_priority_missing_symbols"),
                 "compact_symbols": candidate_symbols(top),
                 "candidate_statuses": {

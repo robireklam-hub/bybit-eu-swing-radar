@@ -25,9 +25,12 @@ def status_payload(sha="abc"):
             "coinalyze_priority_symbols": ["AAAUSDC"],
             "coinalyze_priority_targeted_symbols": ["AAAUSDC"],
             "coinalyze_priority_enriched_symbols": ["AAAUSDC"],
+            "coinalyze_priority_complete_symbols": [],
+            "coinalyze_priority_partial_symbols": ["AAAUSDC"],
             "coinalyze_priority_missing_symbols": [],
             "coinalyze_priority_full_target_coverage": True,
-        }
+        },
+        "sources": [{"source": "Coinalyze", "status": "partial"}],
     }
 
 
@@ -58,3 +61,10 @@ def test_run_smoke_polls_until_exact_worker_executes():
     sleeps = []
     assert run_smoke("https://example.test", "secret", "abc", fetch=fetch, sleep=sleeps.append) == 0
     assert sleeps == [15]
+
+
+def test_evaluate_rejects_ok_source_health_for_partial_candidate():
+    status = status_payload()
+    status["sources"][0]["status"] = "ok"
+    failures = evaluate(top_payload(), status, "abc")
+    assert any("source health is ok" in value for value in failures)
