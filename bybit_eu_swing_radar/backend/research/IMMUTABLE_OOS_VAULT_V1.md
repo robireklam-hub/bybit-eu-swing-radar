@@ -11,6 +11,8 @@ The vault separates two append-only records:
 
 The library's read path fails closed until an exposure event exists. Status calls expose fingerprints and timestamps only, never the sealed payload.
 
+At the PostgreSQL application-role layer, both tables also install mutation-guard triggers. `UPDATE`, `DELETE`, and `TRUNCATE` are rejected for sealed vault records and exposure records. This materially strengthens append-only behavior, but still does not claim cryptographic isolation from a privileged database administrator capable of changing database objects or bypassing application-role controls.
+
 ## Seal contract
 
 A partition can be sealed only for a durably registered frozen trial. Its manifest must state and fingerprint at least:
@@ -56,5 +58,6 @@ An exact retry is idempotent. A second, different authorization for the same sea
 - The library does not choose DSR, PBO, parameter-surface, or promotion thresholds.
 - OOS data must never be used to tune thresholds, parameters, feature selection, or model selection.
 - OOS exposure does not imply promotion. Statistical robustness, shadow production, degradation monitoring, and all Bybit EU execution invariants remain separate gates.
+- The database mutation guards protect normal application-role writes; they are not a substitute for infrastructure-level access control, backups, or privileged-admin governance.
 
 Trial-specific OOS partition rules and open authorization must be introduced separately and preregistered before the relevant holdout is evaluated.
