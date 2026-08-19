@@ -1,0 +1,52 @@
+name: Temporary day USDT worker cache now
+
+on:
+  pull_request:
+    types: [synchronize]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    if: github.head_ref == 'diag/post-merge-day-usdt-context-099d3e0'
+    runs-on: macos-latest
+    timeout-minutes: 3
+    env:
+      EXACT_MAIN_SHA: 099d3e011950f3a023d040b290fbe7b19d0b2c1b
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.EXACT_MAIN_SHA }}
+      - name: Read exact day-worker cache through current API
+        run: |
+          python - <<'PY'
+          import json, os
+          from urllib.request import Request, urlopen
+          from urllib.error import HTTPError
+          base=os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key=os.environ['PRODUCTION_RADAR_API_KEY']
+          exact=os.environ['EXACT_MAIN_SHA']
+          def get(path,auth=True):
+              h={'Accept':'application/json','User-Agent':'day-usdt-worker-cache-now/1'}
+              if auth: h['X-Radar-Key']=key
+              with urlopen(Request(base+path,headers=h),timeout=40) as r: return json.load(r)
+          version=get('/version',False)
+          status=get('/v1/day-trade/status')
+          worker=status.get('worker') or {}
+          assert worker.get('source_commit_sha')==exact, {'api_version':version,'worker':worker}
+          source=next((x for x in status.get('sources',[]) if str(x.get('source','')).lower()=='coinalyze'),{})
+          samples=[]
+          for sym in ('ETHUSDC','SOLUSDC','LINKUSDC','BTCUSDC','XRPUSDC','LTCUSDC','UNIUSDC','INJUSDC'):
+              try: setup=get(f'/v1/day-trade/setup/{sym}')
+              except HTTPError as exc:
+                  samples.append({'symbol':sym,'http':exc.code}); continue
+              d=setup.get('derivatives') if isinstance(setup,dict) else None
+              if isinstance(d,dict) and d:
+                  samples.append({'symbol':sym,'market_symbol':d.get('market_symbol') or d.get('symbol'),'exchange_name':d.get('exchange_name') or d.get('exchange'),'quote_asset':d.get('quote_asset'),'availability':d.get('availability'),'endpoint_errors':d.get('endpoint_errors'),'is_bybit_specific':d.get('is_bybit_specific')})
+          out={'api_version':version,'checked_at':status.get('checked_at'),'worker':worker,'coinalyze':source,'samples':samples}
+          print('DAY_USDT_WORKER_CACHE_NOW='+json.dumps(out,sort_keys=True,default=str))
+          PY
