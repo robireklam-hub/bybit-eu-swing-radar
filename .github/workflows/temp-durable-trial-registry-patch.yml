@@ -7,13 +7,21 @@ on:
 
 permissions:
   contents: write
+  statuses: write
 
 jobs:
   patch:
-    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
+      - name: Mark patch pending
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -d "{\"state\":\"pending\",\"context\":\"research/trial-registry-patch\",\"description\":\"Applying immutable trial registry integration\"}"
+
       - uses: actions/checkout@v7
         with:
           ref: research/durable-trial-registry-v1
@@ -31,59 +39,55 @@ jobs:
           from pathlib import Path
           path = Path('bybit_eu_swing_radar/backend/app/research_swing_liquidity_api.py')
           text = path.read_text()
-
-          old = 'from research.research_governance import snapshot_governance_metadata\nfrom research.swing_liquidity_event_builder import build_trigger_events\n'
-          new = 'from research.research_governance import snapshot_governance_metadata\nfrom research.research_trial_registry import ensure_trial_registered, trial_registry_status\nfrom research.swing_liquidity_event_builder import build_trigger_events\n'
-          assert text.count(old) == 1, 'trial registry import anchor mismatch'
-          text = text.replace(old, new, 1)
-
-          old = '''        async with conn.transaction():\n            await conn.execute(SCHEMA_SQL)\n            result = await conn.execute(\n'''
-          new = '''        async with conn.transaction():\n            await conn.execute(SCHEMA_SQL)\n            await ensure_trial_registered(\n                conn,\n                STUDY,\n                source_commit_sha=os.getenv("RAILWAY_GIT_COMMIT_SHA") or None,\n            )\n            result = await conn.execute(\n'''
-          assert text.count(old) == 1, 'trial registration persist anchor mismatch'
-          text = text.replace(old, new, 1)
-
-          old = '''async def forward_status() -> dict[str, Any]:\n    conn = await asyncpg.connect(settings.database_url)\n    try:\n        await conn.execute(SCHEMA_SQL)\n        capture = await conn.fetchrow(\n'''
-          new = '''async def forward_status() -> dict[str, Any]:\n    conn = await asyncpg.connect(settings.database_url)\n    try:\n        await conn.execute(SCHEMA_SQL)\n        registry = await trial_registry_status(conn, STUDY)\n        capture = await conn.fetchrow(\n'''
-          assert text.count(old) == 1, 'trial registry status anchor mismatch'
-          text = text.replace(old, new, 1)
-
-          old = '''        "study": STUDY,\n        "capture_count": int(capture["capture_count"] or 0),\n'''
-          new = '''        "study": STUDY,\n        "trial_registry": registry,\n        "capture_count": int(capture["capture_count"] or 0),\n'''
-          assert text.count(old) == 1, 'trial registry response anchor mismatch'
-          text = text.replace(old, new, 1)
-
+          pairs = [
+              (
+                  'from research.research_governance import snapshot_governance_metadata\nfrom research.swing_liquidity_event_builder import build_trigger_events\n',
+                  'from research.research_governance import snapshot_governance_metadata\nfrom research.research_trial_registry import ensure_trial_registered, trial_registry_status\nfrom research.swing_liquidity_event_builder import build_trigger_events\n',
+                  'import',
+              ),
+              (
+                  '        async with conn.transaction():\n            await conn.execute(SCHEMA_SQL)\n            result = await conn.execute(\n',
+                  '        async with conn.transaction():\n            await conn.execute(SCHEMA_SQL)\n            await ensure_trial_registered(\n                conn,\n                STUDY,\n                source_commit_sha=os.getenv("RAILWAY_GIT_COMMIT_SHA") or None,\n            )\n            result = await conn.execute(\n',
+                  'persistence',
+              ),
+              (
+                  'async def forward_status() -> dict[str, Any]:\n    conn = await asyncpg.connect(settings.database_url)\n    try:\n        await conn.execute(SCHEMA_SQL)\n        capture = await conn.fetchrow(\n',
+                  'async def forward_status() -> dict[str, Any]:\n    conn = await asyncpg.connect(settings.database_url)\n    try:\n        await conn.execute(SCHEMA_SQL)\n        registry = await trial_registry_status(conn, STUDY)\n        capture = await conn.fetchrow(\n',
+                  'status query',
+              ),
+              (
+                  '        "study": STUDY,\n        "capture_count": int(capture["capture_count"] or 0),\n',
+                  '        "study": STUDY,\n        "trial_registry": registry,\n        "capture_count": int(capture["capture_count"] or 0),\n',
+                  'status response',
+              ),
+          ]
+          for old, new, label in pairs:
+              assert text.count(old) == 1, f'{label} anchor mismatch'
+              text = text.replace(old, new, 1)
           path.write_text(text)
           PY
 
-      - name: Install dependencies
-        working-directory: bybit_eu_swing_radar/backend
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-          python -m pip install pytest pytest-asyncio
-
-      - name: Run focused and full backend tests
+      - name: Install and verify
         working-directory: bybit_eu_swing_radar/backend
         env:
           DATABASE_URL: postgresql://localhost:5432/test
           RADAR_API_KEY: test-radar-key
           COINALYZE_API_KEY: test-coinalyze-key
         run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest pytest-asyncio
           python -m pytest -q test_research_governance.py test_research_trial_registry.py test_research_swing_liquidity_api.py
           python -m pytest -q
           python -m compileall -q app research flow_context.py flow_worker.py
 
-      - name: Commit clean source patch and self-delete
+      - name: Commit clean patch and remove temporary files
         run: |
-          rm -f .github/workflows/temp-durable-trial-registry-patch.yml
+          rm -f .github/workflows/temp-durable-trial-registry-patch.yml .trial-registry-ci-trigger
           find . -type d -name __pycache__ -prune -exec rm -rf {} +
           find . -type f -name '*.pyc' -delete
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add bybit_eu_swing_radar/backend/app/research_swing_liquidity_api.py \
-                  bybit_eu_swing_radar/backend/research/research_trial_registry.py \
-                  bybit_eu_swing_radar/backend/test_research_trial_registry.py \
-                  .github/workflows/temp-durable-trial-registry-patch.yml
+          git add -A
           git diff --cached --check
           git commit -m 'Register frozen research trials durably'
           git push origin HEAD:research/durable-trial-registry-v1
