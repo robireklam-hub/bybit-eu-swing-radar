@@ -26,6 +26,13 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: '3.12'
+          cache: pip
+          cache-dependency-path: bybit_eu_swing_radar/backend/requirements.txt
+      - name: Install runtime dependencies
+        working-directory: bybit_eu_swing_radar/backend
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
       - name: Inspect day Coinalyze code and production routes
         working-directory: bybit_eu_swing_radar/backend
         run: |
@@ -76,7 +83,6 @@ jobs:
           python - <<'PY'
           import json, os
           from urllib.request import Request, urlopen
-          from urllib.error import HTTPError
 
           base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
           key = os.environ['PRODUCTION_RADAR_API_KEY']
