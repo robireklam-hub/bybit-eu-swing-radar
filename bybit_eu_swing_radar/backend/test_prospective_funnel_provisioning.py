@@ -72,6 +72,35 @@ def test_deploy_rejects_missing_deployment_id(monkeypatch):
         provisioner._deploy("environment-1", "service-1", "abc123")
 
 
+def test_gql_retries_direct_read_timeouts(monkeypatch):
+    calls = 0
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b'{"data":{"ok":true}}'
+
+    def fake_urlopen(_request, timeout: int):
+        nonlocal calls
+        calls += 1
+        assert timeout == 30
+        if calls < provisioner.GQL_RETRY_ATTEMPTS:
+            raise TimeoutError("read operation timed out")
+        return FakeResponse()
+
+    monkeypatch.setenv("RAILWAY_API_TOKEN", "test-token")
+    monkeypatch.setattr(provisioner, "urlopen", fake_urlopen)
+    monkeypatch.setattr(provisioner.time, "sleep", lambda _seconds: None)
+
+    assert provisioner._gql("query { ok }", {}) == {"ok": True}
+    assert calls == provisioner.GQL_RETRY_ATTEMPTS
+
+
 def test_recent_deployments_uses_documented_service_query(monkeypatch):
     seen: dict[str, object] = {}
 
