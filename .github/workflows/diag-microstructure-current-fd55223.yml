@@ -1,0 +1,47 @@
+name: Diag microstructure current production fd55223
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+    steps:
+      - name: Inspect current production microstructure state
+        run: |
+          python - <<'PY'
+          import json, os
+          from urllib.request import Request, urlopen
+          base=os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key=os.environ['PRODUCTION_RADAR_API_KEY']
+          paths=['/version','/v1/research/microstructure/status','/v1/research/microstructure/readiness','/v1/research/microstructure/alignment-status','/v1/research/microstructure/effect-status']
+          for path in paths:
+              req=Request(base+path, headers={'Accept':'application/json','User-Agent':'microstructure-current-production-diag/2','X-Radar-Key':key})
+              try:
+                  with urlopen(req, timeout=20) as r:
+                      payload=json.load(r)
+              except Exception as e:
+                  print(path, 'ERROR', type(e).__name__, str(e))
+                  continue
+              if path=='/version':
+                  safe={'commit_sha':payload.get('commit_sha'),'strategy_version':payload.get('strategy_version'),'feature_version':payload.get('feature_version')}
+              elif path.endswith('/status') and 'alignment' not in path and 'effect' not in path:
+                  safe={k:payload.get(k) for k in ['research_only','live_strategy_mutated','enabled','running','singleton_acquired','connected','symbols','messages','rows_written','last_message_at','last_write_at','last_error_at','last_error','process_role','external_service_healthy']}
+              elif path.endswith('/readiness'):
+                  safe={k:payload.get(k) for k in ['gate_version','ready_for_forward_feature_analysis','promotion_allowed','thresholds','symbols','checked_at','error','error_type']}
+              elif 'alignment-status' in path:
+                  safe={k:payload.get(k) for k in ['data_quality_ready','alignment_coverage_ready','alignment_coverage','ready_for_preregistered_effect_test','sample','interval','promotion_allowed','error','error_type']}
+                  safe['spec_version']=(payload.get('spec') or {}).get('spec_version')
+              else:
+                  safe={k:payload.get(k) for k in ['status','ready_for_preregistered_effect_test','sample','cohort_gate','closed_outcomes','missing_outcomes','results','promotion_allowed','promotion_decision','error','error_type']}
+                  safe['effect_spec_version']=(payload.get('effect_spec') or {}).get('effect_spec_version')
+              print(path+'='+json.dumps(safe,sort_keys=True,default=str))
+          PY
