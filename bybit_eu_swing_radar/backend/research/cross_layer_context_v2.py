@@ -16,8 +16,14 @@ from research.research_data_quality import (
     evaluate_source_record,
     source_max_age_seconds,
 )
+from research.research_lineage_cards import (
+    CARD_VERSION as LINEAGE_CARD_VERSION,
+    build_capture_lineage,
+    cards_manifest,
+)
 
 SPEC_VERSION = "cross-layer-context-shadow-v2"
+FEATURE_ID = "cross-layer-context-v2"
 MAX_SYMBOLS = 24
 LAYER_SOURCES = (
     "market_regime",
@@ -48,6 +54,13 @@ def spec() -> dict[str, Any]:
         "max_symbols": MAX_SYMBOLS,
         "data_quality_contract_version": DATA_QUALITY_CONTRACT_VERSION,
         "data_quality_contract": contract_manifest(),
+        "lineage_card_version": LINEAGE_CARD_VERSION,
+        "lineage_cards": cards_manifest(
+            feature_id=FEATURE_ID,
+            spec_version=SPEC_VERSION,
+            input_sources=LAYER_SOURCES,
+            max_symbols=MAX_SYMBOLS,
+        ),
         "layer_max_age_seconds": dict(LAYER_MAX_AGE_SECONDS),
         "layers": list(LAYER_MAX_AGE_SECONDS),
         "new_vs_v1": ["sector_rotation", "btc_onchain", "eth_onchain"],
@@ -232,6 +245,16 @@ def build_context_snapshot(
         for name in LAYER_MAX_AGE_SECONDS
     }
     data_quality_contract = aggregate_contract_results(layer_meta)
+    lineage = build_capture_lineage(
+        records,
+        layer_meta,
+        feature_id=FEATURE_ID,
+        feature_spec_version=SPEC_VERSION,
+        input_sources=LAYER_SOURCES,
+        captured_at=now,
+        source_commit_sha=source_commit_sha,
+        max_symbols=MAX_SYMBOLS,
+    )
     payloads: dict[str, dict[str, Any]] = {}
     for name in LAYER_MAX_AGE_SECONDS:
         if layer_meta[name]["status"] in {"FUTURE_REJECTED", "INVALID_TIMESTAMP"}:
@@ -330,6 +353,7 @@ def build_context_snapshot(
         "execution_proof": False,
         "data_quality": quality,
         "data_quality_contract": data_quality_contract,
+        "lineage": lineage,
         "layer_fresh_count": fresh_count,
         "layer_count": len(layer_meta),
         "layers": layer_meta,
