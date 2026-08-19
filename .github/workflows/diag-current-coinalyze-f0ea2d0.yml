@@ -1,0 +1,31 @@
+name: Diag current Coinalyze f0ea2d0
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.head_ref == 'diag/current-coinalyze-f0ea2d0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: f0ea2d0d4ee660f90ff31797060b0e548384f704
+    steps:
+      - name: Check out current main
+        uses: actions/checkout@v7
+        with:
+          ref: f0ea2d0d4ee660f90ff31797060b0e548384f704
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Verify current production swing Coinalyze semantics
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_coinalyze_smoke.py
