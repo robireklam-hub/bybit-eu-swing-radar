@@ -1,0 +1,108 @@
+name: Diag post-merge Coinalyze ffadb42
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.head_ref == 'diag/post-merge-coinalyze-ffadb42'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: ffadb42da6e8e39f635670e2768ec121116aa563
+    steps:
+      - name: Check out exact merged main
+        uses: actions/checkout@v7
+        with:
+          ref: ffadb42da6e8e39f635670e2768ec121116aa563
+
+      - name: Verify exact-SHA production Coinalyze semantics
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_coinalyze_smoke.py
+
+      - name: Print safe production candidate evidence
+        run: |
+          python - <<'PY'
+          import json, os
+          from urllib.request import Request, urlopen
+
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key = os.environ['PRODUCTION_RADAR_API_KEY']
+          expected = os.environ['EXPECTED_SHA']
+
+          def get(path):
+              req = Request(base + path, headers={
+                  'Accept': 'application/json',
+                  'User-Agent': 'post-merge-coinalyze-diag/1',
+                  'X-Radar-Key': key,
+              })
+              with urlopen(req, timeout=20) as response:
+                  return json.load(response)
+
+          version = get('/version')
+          actual = version.get('commit_sha')
+          if actual != expected:
+              raise SystemExit(f'FAIL version mismatch actual={actual} expected={expected}')
+
+          status = get('/v1/data-status')
+          source = next(
+              (row for row in (status.get('sources') or []) if row.get('source') == 'Coinalyze'),
+              None,
+          )
+          worker = status.get('worker') or {}
+          top = get('/v1/top-candidates?limit=3&include_watchlist=true')
+
+          rows = []
+          for section in ('strict_longs','strict_shorts','watch_only_longs','watch_only_shorts'):
+              for row in top.get(section, []) or []:
+                  d = row.get('derivatives') or {}
+                  rows.append({
+                      'section': section,
+                      'symbol': row.get('symbol'),
+                      'side': row.get('side'),
+                      'derivatives_status': row.get('derivatives_status'),
+                      'derivatives_status_reason': row.get('derivatives_status_reason'),
+                      'derivatives_context_only': row.get('derivatives_context_only'),
+                      'market_symbol': d.get('market_symbol'),
+                      'exchange': d.get('exchange'),
+                      'exchange_code': d.get('exchange_code'),
+                      'quote_asset': d.get('quote_asset'),
+                      'open_interest_usd': d.get('open_interest_usd'),
+                      'oi_change_1h_pct': d.get('oi_change_1h_pct'),
+                      'oi_change_4h_pct': d.get('oi_change_4h_pct'),
+                      'oi_change_24h_pct': d.get('oi_change_24h_pct'),
+                      'funding_rate': d.get('funding_rate'),
+                      'long_liquidations_24h_usd': d.get('long_liquidations_24h_usd'),
+                      'short_liquidations_24h_usd': d.get('short_liquidations_24h_usd'),
+                      'availability': d.get('availability'),
+                      'strict_score_mutation_applied': d.get('strict_score_mutation_applied'),
+                      'endpoint_errors': d.get('endpoint_errors'),
+                  })
+
+          safe = {
+              'expected_sha': expected,
+              'actual_sha': actual,
+              'source': source,
+              'worker': {
+                  'source_commit_sha': worker.get('source_commit_sha'),
+                  'coinalyze_target_symbols': worker.get('coinalyze_target_symbols'),
+                  'coinalyze_enriched_symbols': worker.get('coinalyze_enriched_symbols'),
+                  'coinalyze_complete_symbols': worker.get('coinalyze_complete_symbols'),
+                  'coinalyze_priority_symbols': worker.get('coinalyze_priority_symbols'),
+                  'coinalyze_priority_targeted_symbols': worker.get('coinalyze_priority_targeted_symbols'),
+                  'coinalyze_priority_enriched_symbols': worker.get('coinalyze_priority_enriched_symbols'),
+                  'coinalyze_priority_complete_symbols': worker.get('coinalyze_priority_complete_symbols'),
+                  'coinalyze_priority_partial_symbols': worker.get('coinalyze_priority_partial_symbols'),
+                  'coinalyze_priority_missing_symbols': worker.get('coinalyze_priority_missing_symbols'),
+              },
+              'candidates': rows,
+          }
+          print('POST_MERGE_COINALYZE_EVIDENCE=' + json.dumps(safe, sort_keys=True))
+          PY
