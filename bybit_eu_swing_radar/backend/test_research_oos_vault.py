@@ -135,7 +135,20 @@ def test_spec_is_fail_closed_research_only():
     assert payload["promotion_allowed"] is False
     assert payload["live_strategy_mutated"] is False
     assert payload["production_eligibility_mutated"] is False
+    assert payload["database_mutation_guard"] == "UPDATE_DELETE_TRUNCATE_REJECTED"
     assert payload["database_admin_cryptographic_isolation"] is False
+
+
+def test_schema_enforces_database_append_only_guards():
+    sql = vault.OOS_VAULT_SCHEMA_SQL
+    assert "CREATE OR REPLACE FUNCTION research_reject_oos_mutation()" in sql
+    assert "trg_research_oos_vault_immutable" in sql
+    assert "trg_research_oos_vault_no_truncate" in sql
+    assert "trg_research_oos_exposure_immutable" in sql
+    assert "trg_research_oos_exposure_no_truncate" in sql
+    assert sql.count("BEFORE UPDATE OR DELETE") == 2
+    assert sql.count("BEFORE TRUNCATE") == 2
+    assert "immutable OOS records cannot be updated, deleted, or truncated" in sql
 
 
 def test_canonical_fingerprint_is_deterministic_and_strict():
