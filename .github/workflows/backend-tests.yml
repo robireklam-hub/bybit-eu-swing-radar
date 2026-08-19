@@ -6,6 +6,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: write
+
 jobs:
   backend-tests:
     runs-on: ubuntu-latest
@@ -16,6 +19,10 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+
+      - name: Apply versioned day v0.7.4 fix on isolated PR only
+        if: github.event_name == 'pull_request' && github.head_ref == 'fix/btc-impulse-breakout-coverage'
+        run: python temp_apply_day_v074_versioning.py
 
       - name: Set up Python
         uses: actions/setup-python@v7
