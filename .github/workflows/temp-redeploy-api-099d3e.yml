@@ -1,0 +1,37 @@
+name: Temporary redeploy API 099d3e
+
+on:
+  pull_request:
+    types: [synchronize]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  redeploy:
+    if: github.head_ref == 'diag/post-merge-day-usdt-context-099d3e0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    container: ghcr.io/railwayapp/cli:latest
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      RAILWAY_PROJECT_ID: 846f5088-4e8b-45fe-84d9-0728542b2c36
+      RAILWAY_ENVIRONMENT_ID: 2be04d3c-82b3-487d-930c-a4fbc7d483d8
+      API_SERVICE_ID: 6b92a19d-a178-4eab-9b8a-9fed1855319b
+      EXACT_MAIN_SHA: 099d3e011950f3a023d040b290fbe7b19d0b2c1b
+    steps:
+      - name: Redeploy latest exact-source API deployment
+        shell: sh
+        run: |
+          set -eu
+          railway link --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --service "$API_SERVICE_ID" >/tmp/link.txt
+          echo '=== pre-redeploy ==='
+          railway deployment list --service "$API_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --limit 3 --json | head -c 12000
+          echo
+          echo '=== redeploy ==='
+          railway redeploy --service "$API_SERVICE_ID" --yes --json | tee /tmp/redeploy.json
+          echo
+          echo '=== post-redeploy ==='
+          railway deployment list --service "$API_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --limit 5 --json | tee /tmp/deployments.json | head -c 20000
+          echo
