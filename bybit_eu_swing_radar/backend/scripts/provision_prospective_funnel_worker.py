@@ -60,7 +60,7 @@ def _gql(query: str, variables: dict[str, Any]) -> dict[str, Any]:
         except HTTPError as exc:
             if exc.code not in TRANSIENT_HTTP_CODES or attempt + 1 >= GQL_RETRY_ATTEMPTS:
                 raise
-        except URLError:
+        except (URLError, TimeoutError):
             if attempt + 1 >= GQL_RETRY_ATTEMPTS:
                 raise
         time.sleep(min(2 ** attempt, 8))
