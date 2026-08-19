@@ -1,0 +1,28 @@
+name: Temporary current-main Coinalyze semantic verifier
+
+on:
+  push:
+    branches:
+      - verify/coinalyze-current-274bcf1
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 274bcf1c4e9d0c65c7163752390fd50738beeb9a
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 274bcf1c4e9d0c65c7163752390fd50738beeb9a
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Verify exact production candidate semantics
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_coinalyze_smoke.py
