@@ -121,7 +121,7 @@ def main() -> int:
         print("FAIL live/promotion guard changed")
         return 1
 
-    print("SIGNAL-TIME CONTEXT FREEZE V2 VERIFIED.")
+    print("SIGNAL-TIME CONTEXT FREEZE V3 VERIFIED.")
     return 0
 
 
