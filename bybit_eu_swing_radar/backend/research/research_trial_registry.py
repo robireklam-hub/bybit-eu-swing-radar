@@ -23,6 +23,48 @@ CREATE TABLE IF NOT EXISTS research_trial_registry (
     registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (trial_id, revision)
 );
+
+DO $immutability$
+BEGIN
+    IF to_regprocedure(current_schema() || '.reject_research_trial_registry_mutation()') IS NULL THEN
+        EXECUTE $create_function$
+            CREATE FUNCTION reject_research_trial_registry_mutation()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $function$
+            BEGIN
+                RAISE EXCEPTION 'research_trial_registry is append-only';
+            END;
+            $function$
+        $create_function$;
+    END IF;
+END
+$immutability$;
+
+DO $immutability$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgrelid = 'research_trial_registry'::regclass
+          AND tgname = 'trg_research_trial_registry_no_row_mutation'
+          AND NOT tgisinternal
+    ) THEN
+        EXECUTE 'CREATE TRIGGER trg_research_trial_registry_no_row_mutation '
+                'BEFORE UPDATE OR DELETE ON research_trial_registry '
+                'FOR EACH ROW EXECUTE FUNCTION reject_research_trial_registry_mutation()';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgrelid = 'research_trial_registry'::regclass
+          AND tgname = 'trg_research_trial_registry_no_truncate'
+          AND NOT tgisinternal
+    ) THEN
+        EXECUTE 'CREATE TRIGGER trg_research_trial_registry_no_truncate '
+                'BEFORE TRUNCATE ON research_trial_registry '
+                'FOR EACH STATEMENT EXECUTE FUNCTION reject_research_trial_registry_mutation()';
+    END IF;
+END
+$immutability$;
 """
 
 
