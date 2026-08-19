@@ -64,4 +64,18 @@ jobs:
               'worker_coinalyze_target_count': worker.get('coinalyze_target_symbols'),
           }
           print('COINALYZE_SOURCE_DIAG=' + json.dumps(safe, sort_keys=True))
+
+          top = get('/v1/top-candidates?limit=3&include_watchlist=true')
+          sections = ('strict_longs', 'strict_shorts', 'watch_only_longs', 'watch_only_shorts')
+          candidates = []
+          for section in sections:
+              for row in top.get(section, []) or []:
+                  candidates.append({
+                      'section': section,
+                      'symbol': row.get('symbol'),
+                      'derivatives_status': row.get('derivatives_status'),
+                      'derivatives_status_reason': row.get('derivatives_status_reason'),
+                      'derivatives_context_only': row.get('derivatives_context_only'),
+                  })
+          print('CURRENT_CANDIDATE_DERIVATIVES=' + json.dumps(candidates, sort_keys=True))
           PY
