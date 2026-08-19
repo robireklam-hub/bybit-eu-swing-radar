@@ -40,3 +40,7 @@ jobs:
       - name: Verify label-blind swing liquidity event construction
         working-directory: bybit_eu_swing_radar/backend
         run: python scripts/production_swing_liquidity_event_smoke.py
+
+      - name: Report label-blind swing liquidity maturity readiness
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_maturity_status.py
