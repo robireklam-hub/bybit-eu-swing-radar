@@ -16,6 +16,16 @@ from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
 
+try:
+    from research.research_governance import (
+        build_point_in_time_provenance,
+        trial_fingerprint,
+        trial_manifest,
+    )
+except ModuleNotFoundError:  # direct script execution from backend/research
+    from research_governance import build_point_in_time_provenance, trial_fingerprint, trial_manifest
+
+STUDY = "swing-liquidity-validation-v1"
 NOTIONALS_USDC = (100.0, 250.0, 500.0, 1000.0)
 TURNOVER_TIERS = (
     (25_000.0, "LT_25K"),
@@ -244,10 +254,12 @@ def persist_snapshot(base_url: str, api_key: str, snapshot: dict[str, Any]) -> d
 
 def collect_snapshot(base_url: str, api_key: str, bybit_base_url: str = "https://api.bybit.eu") -> dict[str, Any]:
     captured_at = datetime.now(timezone.utc).isoformat()
+    collection_started_at = captured_at
     scan = _get_json(
         f"{base_url.rstrip('/')}/v1/scan?direction=both&limit=10&min_score=0",
         headers={"Accept": "application/json", "X-Radar-Key": api_key, "User-Agent": "swing-liquidity-shadow/1"},
     )
+    scan_received_at = datetime.now(timezone.utc).isoformat()
     candidates = dedupe_candidates(scan)
     books: dict[str, Any] = {}
     book_errors: dict[str, str] = {}
@@ -277,6 +289,7 @@ def collect_snapshot(base_url: str, api_key: str, bybit_base_url: str = "https:/
         except Exception as exc:  # fail-open research coverage; never alter live state
             book_errors[symbol] = f"{type(exc).__name__}: {exc}"
 
+    orderbooks_completed_at = datetime.now(timezone.utc).isoformat()
     for candidate in candidates:
         turnover = candidate.get("turnover_24h_usdc")
         book = books.get(candidate["symbol"]) or {}
@@ -293,12 +306,29 @@ def collect_snapshot(base_url: str, api_key: str, bybit_base_url: str = "https:/
             for notional in NOTIONALS_USDC
         ]
 
+    feature_computed_at = datetime.now(timezone.utc).isoformat()
+    feature_available_at = feature_computed_at
+    point_in_time = build_point_in_time_provenance(
+        collection_started_at=collection_started_at,
+        scan_received_at=scan_received_at,
+        orderbooks_completed_at=orderbooks_completed_at,
+        feature_computed_at=feature_computed_at,
+        feature_available_at=feature_available_at,
+        scan_source_data_as_of=scan.get("data_as_of"),
+    )
+    registered_trial = trial_manifest(STUDY)
+
     return {
-        "study": "swing-liquidity-validation-v1",
+        "study": STUDY,
         "research_only": True,
         "label_blind": True,
         "live_gate_unchanged": True,
         "captured_at": captured_at,
+        "feature_available_at": feature_available_at,
+        "point_in_time": point_in_time,
+        "trial_id": registered_trial["trial_id"],
+        "trial_manifest": registered_trial,
+        "trial_fingerprint": trial_fingerprint(STUDY),
         "scan_data_as_of": scan.get("data_as_of"),
         "scan_data_quality": scan.get("data_quality"),
         "current_gate_reference": {"min_turnover_usdc": 100000.0, "max_spread_bps": 50.0},
@@ -328,6 +358,8 @@ def main() -> int:
     persisted = persist_snapshot(base_url, api_key, snapshot)
     safe = {
         "captured_at": snapshot["captured_at"],
+        "feature_available_at": snapshot["feature_available_at"],
+        "trial_fingerprint": snapshot["trial_fingerprint"],
         "scan_data_as_of": snapshot["scan_data_as_of"],
         "candidate_count": snapshot["candidate_count"],
         "orderbook_count": len(snapshot["orderbooks"]),

@@ -25,6 +25,11 @@ def _ts(value: datetime | str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _available_at(row: dict[str, Any]) -> datetime:
+    """Use feature availability when present; legacy rows fall back to capture time."""
+    return _ts(row.get("available_at") or row.get("feature_available_at") or row["captured_at"])
+
+
 def select_pretrigger_snapshot(
     snapshots: Iterable[dict[str, Any]],
     *,
@@ -32,7 +37,7 @@ def select_pretrigger_snapshot(
     side: str,
     trigger_close_at: datetime | str,
 ) -> dict[str, Any] | None:
-    """Pick the latest matching snapshot strictly before the trigger within 90m."""
+    """Pick the latest matching snapshot available strictly before trigger within 90m."""
     trigger_close = _ts(trigger_close_at)
     matches: list[tuple[datetime, dict[str, Any]]] = []
     for row in snapshots:
@@ -40,10 +45,10 @@ def select_pretrigger_snapshot(
             continue
         if str(row.get("side") or "").lower() != side.lower():
             continue
-        captured = _ts(row["captured_at"])
-        if pretrigger_snapshot_age_seconds(captured, trigger_close) is None:
+        available = _available_at(row)
+        if pretrigger_snapshot_age_seconds(available, trigger_close) is None:
             continue
-        matches.append((captured, row))
+        matches.append((available, row))
     if not matches:
         return None
     return max(matches, key=lambda item: item[0])[1]
@@ -58,12 +63,9 @@ def build_trigger_events(
 ) -> list[dict[str, Any]]:
     """Return unique eligible first-trigger-bar events in chronological order.
 
-    The preregistration defines event identity by symbol, side, and first
-    qualifying closed-4H trigger bar. Repeated hourly snapshots are covariates:
-    for each trigger bar exactly one latest strictly pre-trigger <=90m snapshot
-    is authoritative. A later bar may form another independent event only when
-    it has its own eligible prospective snapshot; the same old snapshot cannot
-    leak forward across 4H bars because of the fixed 90-minute boundary.
+    Repeated hourly snapshots are covariates. For PIT-v1 rows, pre-trigger means
+    feature availability rather than collection start. Historical rows retain
+    capture-time fallback and are surfaced as unverified provenance.
     """
     snapshot_rows = list(snapshots)
     ordered = sorted(candles, key=lambda row: _ts(row["close_at"]))
@@ -87,12 +89,19 @@ def build_trigger_events(
             continue
         if not close_satisfies_frozen_trigger(candidate, candle.get("close")):
             continue
+        available_at = _available_at(snapshot)
         metadata = safe_event_metadata(
             candidate,
-            captured_at=snapshot["captured_at"],
+            captured_at=available_at,
             trigger_bar_start_at=start_at,
             trigger_close_at=close_at,
         )
+        metadata["pretrigger_available_at"] = metadata["pretrigger_captured_at"]
+        metadata["pretrigger_captured_at"] = _ts(snapshot["captured_at"]).isoformat()
+        metadata["point_in_time_verified"] = bool(snapshot.get("point_in_time_verified", False))
+        metadata["provenance_version"] = snapshot.get("provenance_version") or "legacy-captured-at-v0"
+        metadata["trial_id"] = snapshot.get("trial_id")
+        metadata["trial_fingerprint"] = snapshot.get("trial_fingerprint")
         event_id = f"{metadata['symbol']}:{metadata['side']}:{metadata['trigger_close_at']}"
         if event_id in seen_ids:
             continue
