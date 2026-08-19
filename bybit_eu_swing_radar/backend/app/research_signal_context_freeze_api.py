@@ -45,6 +45,48 @@ CREATE INDEX IF NOT EXISTS idx_research_signal_context_freezes_opened
 ON research_signal_context_freezes(opened_at DESC);
 CREATE INDEX IF NOT EXISTS idx_research_signal_context_freezes_symbol
 ON research_signal_context_freezes(symbol, opened_at DESC);
+
+DO $immutability$
+BEGIN
+    IF to_regprocedure(current_schema() || '.reject_research_signal_context_freezes_mutation()') IS NULL THEN
+        EXECUTE $create_function$
+            CREATE FUNCTION reject_research_signal_context_freezes_mutation()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $function$
+            BEGIN
+                RAISE EXCEPTION 'research_signal_context_freezes is append-only';
+            END;
+            $function$
+        $create_function$;
+    END IF;
+END
+$immutability$;
+
+DO $immutability$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgrelid = 'research_signal_context_freezes'::regclass
+          AND tgname = 'trg_research_signal_context_freezes_no_row_mutation'
+          AND NOT tgisinternal
+    ) THEN
+        EXECUTE 'CREATE TRIGGER trg_research_signal_context_freezes_no_row_mutation '
+                'BEFORE UPDATE OR DELETE ON research_signal_context_freezes '
+                'FOR EACH ROW EXECUTE FUNCTION reject_research_signal_context_freezes_mutation()';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgrelid = 'research_signal_context_freezes'::regclass
+          AND tgname = 'trg_research_signal_context_freezes_no_truncate'
+          AND NOT tgisinternal
+    ) THEN
+        EXECUTE 'CREATE TRIGGER trg_research_signal_context_freezes_no_truncate '
+                'BEFORE TRUNCATE ON research_signal_context_freezes '
+                'FOR EACH STATEMENT EXECUTE FUNCTION reject_research_signal_context_freezes_mutation()';
+    END IF;
+END
+$immutability$;
 """
 
 # Deliberately excludes journal status, outcome, closed_at, exit_reason, gross_r,
