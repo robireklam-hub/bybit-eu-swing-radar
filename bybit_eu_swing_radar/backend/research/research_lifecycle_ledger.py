@@ -144,6 +144,7 @@ def spec() -> dict[str, Any]:
         "database_role_mutation_guards": ["UPDATE", "DELETE", "TRUNCATE"],
         "entities": [ENTITY_TRIAL, ENTITY_FEATURE],
         "monotonic_lifecycle": True,
+        "direct_predecessor_required": True,
         "exact_retry_idempotent": True,
         "conflicting_event_id_fails_closed": True,
         "single_terminal_decision_per_entity": True,
@@ -232,7 +233,10 @@ def validate_event_payload(
         raise ValueError("event_payload requires non-empty summary")
     forbidden = _find_forbidden_keys(result)
     if forbidden:
-        raise ValueError("raw outcome/OOS payload keys are forbidden in lifecycle ledger: " + ",".join(forbidden))
+        raise ValueError(
+            "raw outcome/OOS payload keys are forbidden in lifecycle ledger: "
+            + ",".join(forbidden)
+        )
     if event_type != DECISION_EVENT:
         _evidence_refs(result)
     required = EVENT_REQUIRED_FLAGS.get(event_type)
@@ -349,7 +353,10 @@ def _validate_stored_event(
         "entity_fingerprint": (str(record.get("entity_fingerprint") or ""), entity_fingerprint),
         "event_id": (str(record.get("event_id") or ""), event_id),
         "event_type": (str(record.get("event_type") or ""), event_type),
-        "event_payload_fingerprint": (str(record.get("event_payload_fingerprint") or ""), payload_fp),
+        "event_payload_fingerprint": (
+            str(record.get("event_payload_fingerprint") or ""),
+            payload_fp,
+        ),
         "event_fingerprint": (str(record.get("event_fingerprint") or ""), expected_event_fp),
     }
     for field, (actual, expected) in expected_pairs.items():
@@ -366,7 +373,9 @@ def _validate_stored_event(
     if canonical_fingerprint(stored_payload) != payload_fp:
         mismatches.append("stored_event_payload_fingerprint")
     if mismatches:
-        raise RuntimeError("immutable lifecycle event conflict: " + ",".join(sorted(set(mismatches))))
+        raise RuntimeError(
+            "immutable lifecycle event conflict: " + ",".join(sorted(set(mismatches)))
+        )
     return {
         "ledger_version": LEDGER_VERSION,
         "trial_id": trial_id,
@@ -420,18 +429,55 @@ def _stage_rank(entity_type: str, event_type: str) -> int:
     return EVENT_ORDER[entity_type][event_type]
 
 
-def _validate_monotonic(existing: Sequence[Mapping[str, Any]], entity_type: str, event_type: str) -> None:
+def _validate_monotonic(
+    existing: Sequence[Mapping[str, Any]], entity_type: str, event_type: str
+) -> None:
     if any(str(row.get("event_type")) == DECISION_EVENT for row in existing):
         raise RuntimeError("lifecycle entity already has a terminal decision")
     if not existing:
         return
-    current = max(_stage_rank(entity_type, str(row.get("event_type"))) for row in existing)
+    current = max(
+        _stage_rank(entity_type, str(row.get("event_type"))) for row in existing
+    )
     proposed = _stage_rank(entity_type, event_type)
     if proposed < current:
-        raise RuntimeError("lifecycle event would move entity backward in the research lifecycle")
+        raise RuntimeError(
+            "lifecycle event would move entity backward in the research lifecycle"
+        )
 
 
-def _promotion_missing(existing: Sequence[Mapping[str, Any]], entity_type: str) -> list[str]:
+def _required_predecessor(entity_type: str, event_type: str) -> str | None:
+    if event_type == DECISION_EVENT:
+        return None
+    ordered = sorted(
+        (
+            (rank, candidate)
+            for candidate, rank in EVENT_ORDER[entity_type].items()
+            if candidate != DECISION_EVENT
+        ),
+        key=lambda item: item[0],
+    )
+    names = [candidate for _, candidate in ordered]
+    index = names.index(event_type)
+    return None if index == 0 else names[index - 1]
+
+
+def _validate_required_predecessor(
+    existing: Sequence[Mapping[str, Any]], entity_type: str, event_type: str
+) -> None:
+    predecessor = _required_predecessor(entity_type, event_type)
+    if predecessor is None:
+        return
+    present = {str(row.get("event_type")) for row in existing}
+    if predecessor not in present:
+        raise RuntimeError(
+            f"lifecycle event missing required predecessor: {predecessor}"
+        )
+
+
+def _promotion_missing(
+    existing: Sequence[Mapping[str, Any]], entity_type: str
+) -> list[str]:
     present = {str(row.get("event_type")) for row in existing}
     return [event for event in PROMOTION_REQUIRED[entity_type] if event not in present]
 
@@ -476,9 +522,13 @@ async def _record_event(
         event_type=event_type,
         event_payload_fingerprint=payload_fp,
     )
-    registry = await ensure_trial_registered(conn, study, source_commit_sha=source_commit_sha)
+    registry = await ensure_trial_registered(
+        conn, study, source_commit_sha=source_commit_sha
+    )
     if registry.get("manifest_fingerprint") != trial_fp:
-        raise RuntimeError("durable trial registry fingerprint mismatch before lifecycle event")
+        raise RuntimeError(
+            "durable trial registry fingerprint mismatch before lifecycle event"
+        )
     await conn.execute(LIFECYCLE_LEDGER_SCHEMA_SQL)
 
     existing_same = await conn.fetchrow(
@@ -522,15 +572,25 @@ async def _record_event(
         entity_id=entity_id,
     )
     if existing:
-        fingerprints = {str(row.get("entity_fingerprint") or "") for row in existing}
-        spec_versions = {str(row.get("entity_spec_version") or "") for row in existing}
-        if fingerprints != {str(entity_fingerprint).lower()} or spec_versions != {entity_spec_version}:
+        fingerprints = {
+            str(row.get("entity_fingerprint") or "") for row in existing
+        }
+        spec_versions = {
+            str(row.get("entity_spec_version") or "") for row in existing
+        }
+        if fingerprints != {str(entity_fingerprint).lower()} or spec_versions != {
+            entity_spec_version
+        }:
             raise RuntimeError("lifecycle entity identity changed after first event")
     _validate_monotonic(existing, entity_type, event_type)
+    _validate_required_predecessor(existing, entity_type, event_type)
     if event_type == DECISION_EVENT and normalized_payload.get("decision") == "PROMOTE":
         missing = _promotion_missing(existing, entity_type)
         if missing:
-            raise RuntimeError("PROMOTE decision missing lifecycle prerequisites: " + ",".join(missing))
+            raise RuntimeError(
+                "PROMOTE decision missing lifecycle prerequisites: "
+                + ",".join(missing)
+            )
 
     result = await conn.execute(
         """
@@ -554,7 +614,12 @@ async def _record_event(
         event_type,
         event_fp,
         payload_fp,
-        json.dumps(normalized_payload, sort_keys=True, separators=(",", ":"), allow_nan=False),
+        json.dumps(
+            normalized_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ),
         source_commit_sha,
     )
     row = await conn.fetchrow(
@@ -573,7 +638,9 @@ async def _record_event(
         event_id,
     )
     if row is None:
-        raise RuntimeError("lifecycle event insertion conflicted with immutable ledger")
+        raise RuntimeError(
+            "lifecycle event insertion conflicted with immutable ledger"
+        )
     validated = _validate_stored_event(
         row,
         trial_id=trial_id,
@@ -663,7 +730,9 @@ async def lifecycle_status(
     event_types = [str(row.get("event_type")) for row in rows]
     current_event_type = None
     if rows:
-        current_event_type = max(event_types, key=lambda value: _stage_rank(entity_type, value))
+        current_event_type = max(
+            event_types, key=lambda value: _stage_rank(entity_type, value)
+        )
     decision = None
     for row in rows:
         if row.get("event_type") == DECISION_EVENT:
