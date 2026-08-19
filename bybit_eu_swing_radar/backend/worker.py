@@ -1149,11 +1149,12 @@ async def enrich_coinalyze(
 
     exchange_names: dict[str, str] = {}
     exchange_metadata_error: str | None = None
-    quote_order = ("USDC", "USDT", "USD")
+    # Derivatives are context-only for execution semantics. Prefer the more
+    # complete/liquid Bybit USDT perpetual context for both day and swing,
+    # while all executable spot instruments remain strictly USDC-only.
+    quote_order = ("USDT", "USDC", "USD")
     # Coinalyze future-markets exposes an exchange code, not a venue name.
-    # Resolve that code for both engines before venue ranking. Day keeps its
-    # historical USDC-first quote preference and score-enrichment semantics;
-    # swing keeps USDT-first context selection and partial-safe endpoints.
+    # Resolve that code before venue ranking for both engines.
     try:
         exchange_rows = await api.exchanges()
         exchange_names = {
@@ -1169,9 +1170,6 @@ async def enrich_coinalyze(
                     "Coinalyze exchange metadata unavailable; derivatives enrichment skipped"
                 )
             return False, exchange_metadata_error
-
-    if partial_safe:
-        quote_order = ("USDT", "USDC", "USD")
 
     market_map = select_coinalyze_markets(
         markets,

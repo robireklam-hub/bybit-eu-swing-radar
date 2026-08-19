@@ -25,7 +25,7 @@ def _analysis(symbol: str = "BTCUSDC") -> SimpleNamespace:
     )
 
 
-def test_day_market_selection_resolves_exchange_codes_and_keeps_usdc_first() -> None:
+def test_day_context_market_prefers_bybit_usdt_over_usdc() -> None:
     markets = [
         {
             "symbol": "BTCUSDC_PERP.A",
@@ -53,31 +53,60 @@ def test_day_market_selection_resolves_exchange_codes_and_keeps_usdc_first() -> 
         markets,
         ["BTC"],
         exchange_names={"A": "Binance", "B": "Bybit"},
-        quote_order=("USDC", "USDT", "USD"),
+        quote_order=("USDT", "USDC", "USD"),
     )
     assert selected["BTC"]["exchange_name"] == "Bybit"
     assert selected["BTC"]["exchange_code"] == "B"
-    assert selected["BTC"]["quote_asset"] == "USDC"
+    assert selected["BTC"]["quote_asset"] == "USDT"
+    assert selected["BTC"]["symbol"] == "BTCUSDT_PERP.B"
 
 
 @pytest.mark.asyncio
-async def test_day_enrichment_resolves_exchange_metadata_before_selection(monkeypatch) -> None:
+async def test_day_enrichment_uses_bybit_usdt_context_symbol(monkeypatch) -> None:
     monkeypatch.setattr(worker, "COINALYZE_API_KEY", "test-key")
 
     class FakeAPI:
-        exchange_calls = 0
+        def __init__(self) -> None:
+            self.exchange_calls = 0
+            self.symbol_batches: list[tuple[str, tuple[str, ...]]] = []
 
         async def future_markets(self):
-            return []
+            return [
+                {
+                    "symbol": "BTCUSDC_PERP.6",
+                    "base_asset": "BTC",
+                    "quote_asset": "USDC",
+                    "exchange": "6",
+                    "is_perpetual": True,
+                },
+                {
+                    "symbol": "BTCUSDT_PERP.6",
+                    "base_asset": "BTC",
+                    "quote_asset": "USDT",
+                    "exchange": "6",
+                    "is_perpetual": True,
+                },
+            ]
 
         async def exchanges(self):
             self.exchange_calls += 1
-            return [{"code": "B", "name": "Bybit"}]
+            return [{"code": "6", "name": "Bybit"}]
 
-        def __getattr__(self, _name):
-            async def empty(*_args, **_kwargs):
-                return []
-            return empty
+        async def batch_current(self, endpoint, symbols, convert_to_usd=False):
+            self.symbol_batches.append((endpoint, tuple(symbols)))
+            return []
+
+        async def batch_history(
+            self,
+            endpoint,
+            symbols,
+            _from_ts,
+            _to_ts,
+            convert_to_usd=False,
+            interval=None,
+        ):
+            self.symbol_batches.append((endpoint, tuple(symbols)))
+            return []
 
     api = FakeAPI()
     ok, _error = await enrich_coinalyze(
@@ -88,6 +117,8 @@ async def test_day_enrichment_resolves_exchange_metadata_before_selection(monkey
     )
     assert api.exchange_calls == 1
     assert ok is False
+    assert len(api.symbol_batches) == 4
+    assert all(symbols == ("BTCUSDT_PERP.6",) for _, symbols in api.symbol_batches)
 
 
 def test_day_regime_requires_complete_derivatives_for_good_source_quality() -> None:
