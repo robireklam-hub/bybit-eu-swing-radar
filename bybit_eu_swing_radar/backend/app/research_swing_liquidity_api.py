@@ -11,6 +11,7 @@ from fastapi import Depends, FastAPI, HTTPException
 
 from app.config import settings
 from app.providers.bybit import BybitClient
+from research.research_governance import snapshot_governance_metadata
 from research.swing_liquidity_event_builder import build_trigger_events
 
 STUDY = "swing-liquidity-validation-v1"
@@ -40,6 +41,10 @@ CREATE TABLE IF NOT EXISTS swing_liquidity_forward_captures (
     orderbook_error_count INTEGER NOT NULL,
     inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE swing_liquidity_forward_captures ADD COLUMN IF NOT EXISTS feature_available_at TIMESTAMPTZ;
+ALTER TABLE swing_liquidity_forward_captures ADD COLUMN IF NOT EXISTS provenance_version TEXT;
+ALTER TABLE swing_liquidity_forward_captures ADD COLUMN IF NOT EXISTS trial_id TEXT;
+ALTER TABLE swing_liquidity_forward_captures ADD COLUMN IF NOT EXISTS trial_fingerprint TEXT;
 
 CREATE TABLE IF NOT EXISTS swing_liquidity_forward_observations (
     captured_at TIMESTAMPTZ NOT NULL REFERENCES swing_liquidity_forward_captures(captured_at) ON DELETE CASCADE,
@@ -163,6 +168,13 @@ def _contains_forbidden_label(value: Any) -> str | None:
     return None
 
 
+def _governance_or_http_error(snapshot: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return snapshot_governance_metadata(snapshot)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid research governance metadata: {exc}") from exc
+
+
 def validate_forward_snapshot(snapshot: dict[str, Any]) -> tuple[datetime, datetime | None, list[dict[str, Any]]]:
     if snapshot.get("study") != STUDY:
         raise HTTPException(status_code=400, detail="unexpected research study")
@@ -175,6 +187,7 @@ def validate_forward_snapshot(snapshot: dict[str, Any]) -> tuple[datetime, datet
         raise HTTPException(status_code=400, detail=f"forward labels are forbidden: {forbidden}")
 
     captured_at = _parse_timestamp(snapshot.get("captured_at"), "captured_at")
+    _governance_or_http_error(snapshot)
     scan_raw = snapshot.get("scan_data_as_of")
     scan_data_as_of = _parse_timestamp(scan_raw, "scan_data_as_of") if scan_raw else None
     candidates = snapshot.get("candidates")
@@ -206,6 +219,7 @@ def validate_forward_snapshot(snapshot: dict[str, Any]) -> tuple[datetime, datet
 
 async def persist_forward_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     captured_at, scan_data_as_of, candidates = validate_forward_snapshot(snapshot)
+    governance = _governance_or_http_error(snapshot)
     orderbooks = snapshot.get("orderbooks") or {}
     errors = snapshot.get("orderbook_errors") or {}
     if not isinstance(orderbooks, dict) or not isinstance(errors, dict):
@@ -219,8 +233,9 @@ async def persist_forward_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 """
                 INSERT INTO swing_liquidity_forward_captures (
                     captured_at, study, source_commit_sha, scan_data_as_of,
-                    candidate_count, orderbook_count, orderbook_error_count
-                ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+                    candidate_count, orderbook_count, orderbook_error_count,
+                    feature_available_at, provenance_version, trial_id, trial_fingerprint
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
                 ON CONFLICT (captured_at) DO NOTHING
                 """,
                 captured_at,
@@ -230,6 +245,10 @@ async def persist_forward_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 len(candidates),
                 len(orderbooks),
                 len(errors),
+                governance["feature_available_at"] if governance["point_in_time_verified"] else None,
+                governance["provenance_version"],
+                governance["trial_id"],
+                governance["trial_fingerprint"],
             )
             inserted_capture = result.endswith("1")
             if inserted_capture:
@@ -273,6 +292,13 @@ async def persist_forward_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         "promotion_allowed": False,
         "study": STUDY,
         "captured_at": captured_at.isoformat(),
+        "feature_available_at": (
+            governance["feature_available_at"].isoformat() if governance["point_in_time_verified"] else None
+        ),
+        "point_in_time_verified": governance["point_in_time_verified"],
+        "provenance_version": governance["provenance_version"],
+        "trial_id": governance["trial_id"],
+        "trial_fingerprint": governance["trial_fingerprint"],
         "inserted": inserted_capture,
         "candidate_count": len(candidates),
         "orderbook_count": len(orderbooks),
@@ -281,15 +307,18 @@ async def persist_forward_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 
 async def load_forward_snapshots() -> list[dict[str, Any]]:
-    """Load only the durable, label-blind covariate rows needed by event construction."""
+    """Load only durable label-blind covariates plus point-in-time lineage."""
     conn = await asyncpg.connect(settings.database_url)
     try:
         await conn.execute(SCHEMA_SQL)
         rows = await conn.fetch(
             """
-            SELECT captured_at, symbol, side, candidate
-            FROM swing_liquidity_forward_observations
-            ORDER BY captured_at ASC, symbol ASC, side ASC
+            SELECT o.captured_at, o.symbol, o.side, o.candidate,
+                   COALESCE(c.feature_available_at, o.captured_at) AS available_at,
+                   c.feature_available_at, c.provenance_version, c.trial_id, c.trial_fingerprint
+            FROM swing_liquidity_forward_observations AS o
+            JOIN swing_liquidity_forward_captures AS c ON c.captured_at = o.captured_at
+            ORDER BY o.captured_at ASC, o.symbol ASC, o.side ASC
             """
         )
     finally:
@@ -304,6 +333,12 @@ async def load_forward_snapshots() -> list[dict[str, Any]]:
         snapshots.append(
             {
                 "captured_at": row["captured_at"].isoformat(),
+                "available_at": row["available_at"].isoformat(),
+                "feature_available_at": row["feature_available_at"].isoformat() if row["feature_available_at"] else None,
+                "point_in_time_verified": row["provenance_version"] == "pit-v1" and row["feature_available_at"] is not None,
+                "provenance_version": row["provenance_version"] or "legacy-captured-at-v0",
+                "trial_id": row["trial_id"],
+                "trial_fingerprint": row["trial_fingerprint"],
                 "symbol": str(row["symbol"]).upper(),
                 "side": str(row["side"]).lower(),
                 "candidate": candidate,
@@ -368,8 +403,10 @@ async def forward_event_status(client: BybitClient) -> dict[str, Any]:
         "kline_errors": errors,
         "event_count": len(events),
         "matured_event_count": len(matured),
+        "point_in_time_verified_event_count": sum(1 for event in events if event.get("point_in_time_verified") is True),
+        "legacy_or_unverified_event_count": sum(1 for event in events if event.get("point_in_time_verified") is not True),
         "events": events,
-        "note": "Repeated snapshots are covariates; unique symbol/side/first qualifying 4H trigger bars are independent label-blind events. No future outcome/R/MFE/MAE is read here.",
+        "note": "Repeated snapshots are covariates; unique symbol/side/first qualifying 4H trigger bars are independent label-blind events. PIT-v1 events use feature availability time; legacy rows are retained but explicitly unverified.",
     }
 
 
@@ -383,7 +420,8 @@ async def forward_status() -> dict[str, Any]:
                    MIN(captured_at) AS first_capture_at,
                    MAX(captured_at) AS last_capture_at,
                    COALESCE(SUM(candidate_count), 0)::int AS candidate_observations,
-                   COALESCE(SUM(orderbook_error_count), 0)::int AS orderbook_errors
+                   COALESCE(SUM(orderbook_error_count), 0)::int AS orderbook_errors,
+                   COUNT(*) FILTER (WHERE provenance_version = 'pit-v1' AND feature_available_at IS NOT NULL)::int AS point_in_time_verified_captures
             FROM swing_liquidity_forward_captures
             """
         )
@@ -405,21 +443,25 @@ async def forward_status() -> dict[str, Any]:
         )
     finally:
         await conn.close()
+    verified_captures = int(capture["point_in_time_verified_captures"] or 0)
+    capture_count = int(capture["capture_count"] or 0)
     return {
         "research_only": True,
         "live_strategy_mutated": False,
         "promotion_allowed": False,
         "study": STUDY,
-        "capture_count": int(capture["capture_count"] or 0),
+        "capture_count": capture_count,
         "first_capture_at": capture["first_capture_at"].isoformat() if capture["first_capture_at"] else None,
         "last_capture_at": capture["last_capture_at"].isoformat() if capture["last_capture_at"] else None,
         "candidate_observations": int(capture["candidate_observations"] or 0),
         "orderbook_errors": int(capture["orderbook_errors"] or 0),
+        "point_in_time_verified_captures": verified_captures,
+        "legacy_or_unverified_captures": capture_count - verified_captures,
         "turnover_tiers": {row["turnover_tier"]: row["n"] for row in tier_rows},
         "spread_tiers": {row["spread_tier"]: row["n"] for row in spread_rows},
         "development_target_matured_events": 60,
         "validation_target_matured_events": 40,
-        "note": "Observation counts are prospective covariates, not matured independent trigger events.",
+        "note": "Observation counts are prospective covariates, not matured independent trigger events. PIT-v1 coverage is reported separately from retained legacy captures.",
     }
 
 
