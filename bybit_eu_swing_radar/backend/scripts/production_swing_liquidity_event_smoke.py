@@ -143,15 +143,21 @@ def validate_event_payload(payload: dict[str, Any]) -> list[str]:
             ids.add(event_id)
         try:
             captured = _parse_ts(event.get("pretrigger_captured_at"), f"{prefix}.pretrigger_captured_at")
+            available_raw = event.get("pretrigger_available_at") or event.get("pretrigger_captured_at")
+            available = _parse_ts(available_raw, f"{prefix}.pretrigger_available_at")
             trigger = _parse_ts(event.get("trigger_close_at"), f"{prefix}.trigger_close_at")
             matures = _parse_ts(event.get("matures_at"), f"{prefix}.matures_at")
             age = float(event.get("pretrigger_snapshot_age_seconds"))
         except (ValueError, TypeError) as exc:
             failures.append(f"{prefix}_invalid_timestamps:{type(exc).__name__}")
             continue
+        if event.get("point_in_time_verified") is True and not event.get("pretrigger_available_at"):
+            failures.append(f"{prefix}_verified_pit_missing_available_at")
+        if available < captured:
+            failures.append(f"{prefix}_availability_precedes_capture")
         if not (0 < age <= 90 * 60):
             failures.append(f"{prefix}_snapshot_age_out_of_range")
-        if abs((trigger - captured).total_seconds() - age) > 1.0:
+        if abs((trigger - available).total_seconds() - age) > 1.0:
             failures.append(f"{prefix}_snapshot_age_mismatch")
         if (matures - trigger).total_seconds() != 10 * 24 * 3600:
             failures.append(f"{prefix}_wrong_maturity_horizon")
