@@ -1,0 +1,35 @@
+name: Temporary current-main swing/liquidity verification 53ea582
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Read-only diagnostic; never merge.
+jobs:
+  verify:
+    if: github.head_ref == 'diag/current-main-swing-liquidity-53ea582'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      EXPECTED_SHA: 53ea5825cff46849052c4bca7e203a8aba0532da
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+    steps:
+      - name: Check out exact main
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.EXPECTED_SHA }}
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Verify swing Coinalyze candidate semantics
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_coinalyze_smoke.py
+      - name: Verify swing liquidity label-blind event semantics
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_event_smoke.py
