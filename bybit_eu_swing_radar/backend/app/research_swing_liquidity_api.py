@@ -11,7 +11,7 @@ from fastapi import Depends, FastAPI, HTTPException
 
 from app.config import settings
 from app.providers.bybit import BybitClient
-from research.swing_liquidity_event_builder import build_first_trigger_event
+from research.swing_liquidity_event_builder import build_trigger_events
 
 STUDY = "swing-liquidity-validation-v1"
 FORBIDDEN_LABEL_KEYS = {
@@ -71,10 +71,6 @@ CREATE INDEX IF NOT EXISTS idx_swing_liq_forward_tiers
 
 def validate_usdc_symbol(symbol: str) -> str:
     normalized = symbol.strip().upper()
-    # A valid quote shape is <non-empty alphanumeric base> + USDC.  Do not
-    # assume a minimum base length beyond one character: Bybit EU currently
-    # exposes short base tickers such as LAUSDC, which must remain eligible for
-    # the research-only forward snapshot store.
     if (
         not normalized.endswith("USDC")
         or len(normalized) < 5
@@ -322,7 +318,7 @@ def build_events_from_snapshots_and_klines(
     *,
     now: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    """Construct independent label-blind first-trigger events from durable snapshots plus closed 4H bars."""
+    """Construct preregistered label-blind events keyed by symbol/side/trigger bar."""
     cutoff = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for snapshot in snapshots:
@@ -337,9 +333,7 @@ def build_events_from_snapshots_and_klines(
         if not isinstance(payload, dict):
             continue
         candles = compact_closed_4h_candles(payload, now=cutoff)
-        event = build_first_trigger_event(rows, candles, symbol=symbol, side=side)
-        if event is not None:
-            events.append(event)
+        events.extend(build_trigger_events(rows, candles, symbol=symbol, side=side))
     events.sort(key=lambda item: (item["trigger_close_at"], item["symbol"], item["side"]))
     return events
 
@@ -366,6 +360,7 @@ async def forward_event_status(client: BybitClient) -> dict[str, Any]:
         "promotion_allowed": False,
         "study": STUDY,
         "builder_version": "swing-liquidity-event-builder-v1",
+        "event_identity": "symbol_side_first_qualifying_4h_trigger_bar",
         "checked_at": checked_at.isoformat(),
         "durable_snapshot_rows": len(snapshots),
         "symbol_count": len(symbols),
@@ -374,7 +369,7 @@ async def forward_event_status(client: BybitClient) -> dict[str, Any]:
         "event_count": len(events),
         "matured_event_count": len(matured),
         "events": events,
-        "note": "Events are label-blind trigger metadata only; no future outcome/R/MFE/MAE is read here.",
+        "note": "Repeated snapshots are covariates; unique symbol/side/first qualifying 4H trigger bars are independent label-blind events. No future outcome/R/MFE/MAE is read here.",
     }
 
 
