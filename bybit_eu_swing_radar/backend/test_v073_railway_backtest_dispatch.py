@@ -33,8 +33,8 @@ async def test_railway_dispatch_starts_one_batch_and_blocks_overlap(monkeypatch)
 
     response = await main.day_trade_backtest_run_batch()
     assert response["accepted"] is True
-    assert response["strategy_version"] == "0.7.3"
-    assert response["job_name"] == "v073-90d-netrr-structural-barrier"
+    assert response["strategy_version"] == "0.7.4"
+    assert response["job_name"] == "v074-90d-netrr-structural-barrier"
     assert response["execution"] == "railway_background_batch"
 
     await asyncio.wait_for(started.wait(), timeout=1)

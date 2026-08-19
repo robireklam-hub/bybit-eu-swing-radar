@@ -239,3 +239,15 @@ Ez a fejezet kizárólag a day-trade motorra vonatkozik; a fenti swing 1D/4H tri
 - A korábbi egyszerű 12x5m breakout önmagában nem adhat `TRADE` döntést. WATCH/ARMED státusz előre jelezhet közelgő setupot, de `TRIGGERED/TRADE` csak a teljes sweep-confirmation szekvenciával lehetséges.
 - Journal és historical replay `strategy_version=0.7.3`, ezért a v0.7.2 mintákkal nem keverhető.
 - OI/funding/Flow context-only marad, nem módosítja a strict gate-eket.
+
+## 14. Day-trade v0.7.4 kiegészítés
+A v0.7.3 történeti szemantikája változatlanul sweep-only és reprodukálható marad. A v0.7.4 új, külön kohorsz; a score-, RR-, target-path- és execution gate-eket nem lazítja.
+
+- Stratégia verzió: `0.7.4`. A derivatives Flow feature verziója változatlanul `0.7.2.2`.
+- Authoritative live trigger két lezárt-5m útvonal egyike: (1) az előző 12 lezárt 5m gyertya range-boundaryjének közvetlen close-breakout/breakdownja (`CLOSED_5M_RANGE_BREAKOUT`); vagy (2) a v0.7.3-ból megtartott liquidity sweep -> reclaim -> 5m structure shift -> nem ellenirányú lezárt 15m struktúra -> volume confirmation (`LIQUIDITY_SWEEP_RECLAIM`).
+- Ha mindkét út egyszerre érvényes, a sweep útvonal prioritást kap, mert annak entry/invalidation geometriája specifikusabb.
+- A direct impulse breakout önmagában nem kerülheti meg a STRICT gate-eket: setup >= 70, expansion >= 55, side-direction >= 35, quality >= 65, költség utáni RR >= 1.8, valid target path, likviditás/spread, valamint execution gate kötelező.
+- Long végrehajtás továbbra is kizárólag Bybit EU USDC spot. Short kizárólag igazolt Bybit EU USDC spot-margin borrowability mellett.
+- OI/funding/Flow továbbra is context-only és nem hard gate.
+- Journal és historical replay `strategy_version=0.7.4`; a v0.7.3 sorok és backtest jobok változatlanul elkülönítve maradnak.
+- A v0.7.3 prospective sweep-funnel kutatási kohorsz változatlanul `v073-prospective-funnel-v1`; nem kerül visszamenőleg átértelmezésre v0.7.4-ként.
