@@ -115,6 +115,7 @@ def test_spec_has_db_guards_and_no_live_authority():
     spec = ledger.spec()
     assert spec["append_only"] is True
     assert spec["database_role_mutation_guards"] == ["UPDATE", "DELETE", "TRUNCATE"]
+    assert spec["direct_predecessor_required"] is True
     assert spec["promotion_decision_executes_live_change"] is False
     assert spec["execution_authorized"] is False
     assert "BEFORE UPDATE OR DELETE" in ledger.LIFECYCLE_LEDGER_SCHEMA_SQL
@@ -172,6 +173,20 @@ async def test_exact_retry_idempotent_and_conflict_fails():
 
 
 @pytest.mark.asyncio
+async def test_lifecycle_cannot_skip_required_predecessor():
+    conn = FakeConn()
+    await ledger.record_trial_event(
+        conn, STUDY, event_id="a", event_type="TRIAL_REGISTERED",
+        event_payload=payload("TRIAL_REGISTERED", evidence_refs=[trial_fingerprint(STUDY)]),
+    )
+    with pytest.raises(RuntimeError, match="required predecessor: PIT_AUDIT_RECORDED"):
+        await ledger.record_trial_event(
+            conn, STUDY, event_id="b", event_type="DATA_QUALITY_GATE_RECORDED",
+            event_payload=payload("DATA_QUALITY_GATE_RECORDED"),
+        )
+
+
+@pytest.mark.asyncio
 async def test_lifecycle_cannot_move_backward():
     conn = FakeConn()
     await ledger.record_trial_event(
@@ -179,12 +194,16 @@ async def test_lifecycle_cannot_move_backward():
         event_payload=payload("TRIAL_REGISTERED", evidence_refs=[trial_fingerprint(STUDY)]),
     )
     await ledger.record_trial_event(
-        conn, STUDY, event_id="b", event_type="DATA_QUALITY_GATE_RECORDED",
+        conn, STUDY, event_id="b", event_type="PIT_AUDIT_RECORDED",
+        event_payload=payload("PIT_AUDIT_RECORDED"),
+    )
+    await ledger.record_trial_event(
+        conn, STUDY, event_id="c", event_type="DATA_QUALITY_GATE_RECORDED",
         event_payload=payload("DATA_QUALITY_GATE_RECORDED"),
     )
     with pytest.raises(RuntimeError, match="backward"):
         await ledger.record_trial_event(
-            conn, STUDY, event_id="c", event_type="PIT_AUDIT_RECORDED",
+            conn, STUDY, event_id="d", event_type="PIT_AUDIT_RECORDED",
             event_payload=payload("PIT_AUDIT_RECORDED"),
         )
 
