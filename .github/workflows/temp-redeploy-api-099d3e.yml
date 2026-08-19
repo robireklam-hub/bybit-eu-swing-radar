@@ -21,17 +21,17 @@ jobs:
       API_SERVICE_ID: 6b92a19d-a178-4eab-9b8a-9fed1855319b
       EXACT_MAIN_SHA: 099d3e011950f3a023d040b290fbe7b19d0b2c1b
     steps:
-      - name: Redeploy latest exact-source API deployment
+      - name: Deploy latest configured GitHub source
         shell: sh
         run: |
           set -eu
           railway link --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --service "$API_SERVICE_ID" >/tmp/link.txt
-          echo '=== pre-redeploy ==='
+          echo '=== pre-deploy ==='
           railway deployment list --service "$API_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --limit 3 --json | head -c 12000
           echo
-          echo '=== redeploy ==='
-          railway redeploy --service "$API_SERVICE_ID" --yes --json | tee /tmp/redeploy.json
+          echo '=== deploy latest GitHub source ==='
+          railway redeploy --from-source --service "$API_SERVICE_ID" --yes --json | tee /tmp/redeploy.json
           echo
-          echo '=== post-redeploy ==='
+          echo '=== post-trigger ==='
           railway deployment list --service "$API_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --limit 5 --json | tee /tmp/deployments.json | head -c 20000
           echo
