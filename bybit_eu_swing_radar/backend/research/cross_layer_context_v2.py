@@ -9,17 +9,29 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
+from research.research_data_quality import (
+    CONTRACT_VERSION as DATA_QUALITY_CONTRACT_VERSION,
+    aggregate_contract_results,
+    contract_manifest,
+    evaluate_source_record,
+    source_max_age_seconds,
+)
+
 SPEC_VERSION = "cross-layer-context-shadow-v2"
 MAX_SYMBOLS = 24
+LAYER_SOURCES = (
+    "market_regime",
+    "derivatives_positioning",
+    "event_tokenomics",
+    "btc_macro_cycle_etf",
+    "relative_strength",
+    "sector_rotation",
+    "btc_onchain",
+    "eth_onchain",
+)
 LAYER_MAX_AGE_SECONDS = {
-    "market_regime": 3 * 3600,
-    "derivatives_positioning": 3 * 3600,
-    "event_tokenomics": 8 * 3600,
-    "btc_macro_cycle_etf": 8 * 3600,
-    "relative_strength": 36 * 3600,
-    "sector_rotation": 36 * 3600,
-    "btc_onchain": 8 * 3600,
-    "eth_onchain": 8 * 3600,
+    name: source_max_age_seconds(name)
+    for name in LAYER_SOURCES
 }
 
 
@@ -34,6 +46,8 @@ def spec() -> dict[str, Any]:
         "composite_score_emitted": False,
         "execution_proof": False,
         "max_symbols": MAX_SYMBOLS,
+        "data_quality_contract_version": DATA_QUALITY_CONTRACT_VERSION,
+        "data_quality_contract": contract_manifest(),
         "layer_max_age_seconds": dict(LAYER_MAX_AGE_SECONDS),
         "layers": list(LAYER_MAX_AGE_SECONDS),
         "new_vs_v1": ["sector_rotation", "btc_onchain", "eth_onchain"],
@@ -200,37 +214,10 @@ def _layer_meta(
     record: Mapping[str, Any] | None,
     captured_at: datetime,
 ) -> dict[str, Any]:
-    if not record:
-        return {
-            "status": "MISSING",
-            "captured_at": None,
-            "age_seconds": None,
-            "source_commit_sha": None,
-            "max_age_seconds": LAYER_MAX_AGE_SECONDS[name],
-        }
-    source_time = _dt(record.get("captured_at"))
-    if source_time is None:
-        return {
-            "status": "INVALID_TIMESTAMP",
-            "captured_at": record.get("captured_at"),
-            "age_seconds": None,
-            "source_commit_sha": record.get("source_commit_sha"),
-            "max_age_seconds": LAYER_MAX_AGE_SECONDS[name],
-        }
-    age = (captured_at - source_time).total_seconds()
-    if age < -1e-6:
-        status = "FUTURE_REJECTED"
-    elif age > LAYER_MAX_AGE_SECONDS[name]:
-        status = "STALE"
-    else:
-        status = "FRESH"
-    return {
-        "status": status,
-        "captured_at": source_time.isoformat(),
-        "age_seconds": round(age, 3),
-        "source_commit_sha": record.get("source_commit_sha"),
-        "max_age_seconds": LAYER_MAX_AGE_SECONDS[name],
-    }
+    # Preserve the existing temporal status keys while adding a common
+    # completeness/lineage/severity contract. Evaluation never mutates or
+    # filters source payloads and never grants production eligibility.
+    return evaluate_source_record(name, record, observed_at=captured_at)
 
 
 def build_context_snapshot(
@@ -244,6 +231,7 @@ def build_context_snapshot(
         name: _layer_meta(name, records.get(name), now)
         for name in LAYER_MAX_AGE_SECONDS
     }
+    data_quality_contract = aggregate_contract_results(layer_meta)
     payloads: dict[str, dict[str, Any]] = {}
     for name in LAYER_MAX_AGE_SECONDS:
         if layer_meta[name]["status"] in {"FUTURE_REJECTED", "INVALID_TIMESTAMP"}:
@@ -341,6 +329,7 @@ def build_context_snapshot(
         "composite_score_emitted": False,
         "execution_proof": False,
         "data_quality": quality,
+        "data_quality_contract": data_quality_contract,
         "layer_fresh_count": fresh_count,
         "layer_count": len(layer_meta),
         "layers": layer_meta,
