@@ -1,0 +1,67 @@
+name: Diag Coinalyze source errors fd55223
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.head_ref == 'diag/coinalyze-source-errors-fd55223'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: fd55223fca5281785e8d42c49e8e5bc9d110f1c7
+    steps:
+      - name: Read exact-main Coinalyze source diagnostics
+        run: |
+          python - <<'PY'
+          import json, os
+          from urllib.request import Request, urlopen
+
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key = os.environ['PRODUCTION_RADAR_API_KEY']
+          expected = os.environ['EXPECTED_SHA']
+
+          def get(path):
+              req = Request(base + path, headers={
+                  'Accept': 'application/json',
+                  'User-Agent': 'bybit-eu-coinalyze-source-diag/1',
+                  'X-Radar-Key': key,
+              })
+              with urlopen(req, timeout=15) as response:
+                  return json.load(response)
+
+          version = get('/version')
+          actual = version.get('commit_sha')
+          print('VERSION=' + json.dumps({'expected': expected, 'actual': actual}, sort_keys=True))
+          if actual != expected:
+              raise SystemExit('FAIL expected current main is not deployed')
+
+          status = get('/v1/data-status')
+          sources = status.get('sources') or []
+          coinalyze = next((row for row in sources if row.get('source') == 'Coinalyze'), None)
+          worker = status.get('worker') or {}
+          if not coinalyze:
+              raise SystemExit('FAIL Coinalyze source row missing')
+
+          safe = {
+              'status': coinalyze.get('status'),
+              'data_as_of': coinalyze.get('data_as_of'),
+              'coverage': coinalyze.get('coverage'),
+              'missing_fields': coinalyze.get('missing_fields'),
+              'priority_targeted_symbols': coinalyze.get('priority_targeted_symbols'),
+              'priority_enriched_symbols': coinalyze.get('priority_enriched_symbols'),
+              'priority_missing_symbols': coinalyze.get('priority_missing_symbols'),
+              'worker_source_commit_sha': worker.get('source_commit_sha'),
+              'worker_coinalyze_target_symbols': worker.get('coinalyze_targeted_symbol_list'),
+              'worker_coinalyze_enriched_symbols': worker.get('coinalyze_enriched_symbols'),
+              'worker_coinalyze_target_count': worker.get('coinalyze_target_symbols'),
+          }
+          print('COINALYZE_SOURCE_DIAG=' + json.dumps(safe, sort_keys=True))
+          PY
