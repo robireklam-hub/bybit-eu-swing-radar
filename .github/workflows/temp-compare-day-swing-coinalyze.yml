@@ -1,0 +1,51 @@
+name: Temporary compare day and swing Coinalyze coverage
+
+on:
+  pull_request:
+    types: [synchronize]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    if: github.head_ref == 'diag/post-merge-day-coinalyze-27737fb'
+    runs-on: macos-latest
+    timeout-minutes: 3
+    env:
+      EXACT_MAIN_SHA: 27737fbe3caacdd2efbe72ca0acdfc0ebc6cc88f
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.EXACT_MAIN_SHA }}
+      - name: Compare cached day and swing Coinalyze status
+        run: |
+          python - <<'PY'
+          import json, os
+          from urllib.request import Request, urlopen
+          base=os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key=os.environ['PRODUCTION_RADAR_API_KEY']
+          def get(path):
+              h={'Accept':'application/json','User-Agent':'coinalyze-coverage-compare/1','X-Radar-Key':key}
+              with urlopen(Request(base+path,headers=h),timeout=40) as r: return json.load(r)
+          day=get('/v1/day-trade/status')
+          data=get('/v1/data-status')
+          regime=get('/v1/market-regime')
+          day_c=next((x for x in day.get('sources',[]) if str(x.get('source','')).lower()=='coinalyze'),{})
+          swing_c=next((x for x in data.get('sources',[]) if str(x.get('source','')).lower()=='coinalyze'),{})
+          out={
+            'day_checked_at':day.get('checked_at'),
+            'day_worker':day.get('worker'),
+            'day_coinalyze':day_c,
+            'swing_checked_at':data.get('checked_at'),
+            'swing_worker':data.get('worker'),
+            'swing_coinalyze':swing_c,
+            'regime_data_as_of':regime.get('data_as_of'),
+            'regime_source_quality':regime.get('source_quality'),
+            'regime_notes':regime.get('notes'),
+          }
+          print('COINALYZE_DAY_SWING_COMPARE='+json.dumps(out,sort_keys=True,default=str))
+          PY
