@@ -1,0 +1,52 @@
+name: Temporary day Coinalyze status now
+
+on:
+  pull_request:
+    types: [synchronize]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    if: github.head_ref == 'diag/post-merge-day-coinalyze-27737fb'
+    runs-on: macos-latest
+    timeout-minutes: 3
+    env:
+      EXACT_MAIN_SHA: 27737fbe3caacdd2efbe72ca0acdfc0ebc6cc88f
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.EXACT_MAIN_SHA }}
+      - name: Read current production status once
+        run: |
+          python - <<'PY'
+          import json, os
+          from urllib.request import Request, urlopen
+          base=os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key=os.environ['PRODUCTION_RADAR_API_KEY']
+          def get(path, auth=True):
+              h={'Accept':'application/json','User-Agent':'day-status-now/1'}
+              if auth: h['X-Radar-Key']=key
+              with urlopen(Request(base+path,headers=h),timeout=40) as r:
+                  return json.load(r)
+          version=get('/version',False)
+          status=get('/v1/day-trade/status')
+          coverage=status.get('coverage') or {}
+          source=next((x for x in status.get('sources',[]) if str(x.get('source','')).lower()=='coinalyze'),{})
+          summary={
+            'version':version,
+            'checked_at':status.get('checked_at'),
+            'data_as_of':status.get('data_as_of'),
+            'worker':status.get('worker'),
+            'deep_analyzed_pairs':coverage.get('deep_analyzed_pairs'),
+            'coinalyze_enriched_symbols':coverage.get('coinalyze_enriched_symbols'),
+            'coinalyze_complete_symbols':coverage.get('coinalyze_complete_symbols'),
+            'coinalyze_source':source,
+            'coverage_keys':sorted(coverage),
+          }
+          print('DAY_STATUS_NOW='+json.dumps(summary,sort_keys=True,default=str))
+          PY
