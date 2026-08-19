@@ -44,6 +44,7 @@ from worker import (
     atr,
     clamp,
     ema,
+    coinalyze_payload_complete,
     enrich_coinalyze,
     mean,
     return_pct,
@@ -1123,7 +1124,13 @@ def build_day_regime(
     coinalyze_request_ok: bool,
     coinalyze_enriched_symbols: int,
     borrowability_ok: bool,
+    coinalyze_complete_symbols: int | None = None,
 ) -> dict[str, Any]:
+    complete_symbols = (
+        coinalyze_enriched_symbols
+        if coinalyze_complete_symbols is None
+        else coinalyze_complete_symbols
+    )
     btc = next(
         (item for item in analyses if item.instrument.symbol == "BTCUSDC"), None
     )
@@ -1145,7 +1152,11 @@ def build_day_regime(
         elif btc.atr_ratio_15m <= 0.75:
             volatility = "compressed"
 
-    if len(analyses) > 0 and coinalyze_enriched_symbols == len(analyses):
+    if (
+        len(analyses) > 0
+        and coinalyze_request_ok
+        and complete_symbols == len(analyses)
+    ):
         coinalyze_quality = "GOOD"
     elif coinalyze_enriched_symbols > 0:
         coinalyze_quality = "PARTIAL"
@@ -1447,12 +1458,16 @@ async def run() -> None:
         coinalyze_enriched_count = sum(
             1 for item in analyses if item.derivatives
         )
+        coinalyze_complete_count = sum(
+            1 for item in analyses if coinalyze_payload_complete(item.derivatives)
+        )
         regime = build_day_regime(
             analyses,
             now,
             coinalyze_ok,
             coinalyze_enriched_count,
             borrow_ok,
+            coinalyze_complete_symbols=coinalyze_complete_count,
         )
         data_quality = regime["data_quality"]
         coverage = {
@@ -1470,6 +1485,7 @@ async def run() -> None:
             "deep_calculation_failed_pairs": len(calculation_failures),
             "deep_calculation_failures": calculation_failures,
             "coinalyze_enriched_symbols": coinalyze_enriched_count,
+            "coinalyze_complete_symbols": coinalyze_complete_count,
             "borrowability_checked_symbols": len(analyses) if borrow_ok else 0,
         }
 
@@ -1541,7 +1557,11 @@ async def run() -> None:
                     "source": "Coinalyze",
                     "status": (
                         "ok"
-                        if coinalyze_enriched_count == len(analyses) and len(analyses) > 0
+                        if (
+                            coinalyze_ok
+                            and coinalyze_complete_count == len(analyses)
+                            and len(analyses) > 0
+                        )
                         else "partial"
                         if coinalyze_enriched_count > 0
                         else "degraded"
@@ -1549,10 +1569,16 @@ async def run() -> None:
                     "data_as_of": (
                         now.isoformat() if coinalyze_enriched_count > 0 else None
                     ),
-                    "coverage": f"{coinalyze_enriched_count}/{len(analyses)}",
+                    "coverage": f"{coinalyze_complete_count}/{len(analyses)}",
+                    "any_field_coverage": f"{coinalyze_enriched_count}/{len(analyses)}",
+                    "complete_coverage": f"{coinalyze_complete_count}/{len(analyses)}",
                     "missing_fields": (
                         []
-                        if coinalyze_enriched_count == len(analyses)
+                        if (
+                            coinalyze_ok
+                            and coinalyze_complete_count == len(analyses)
+                            and len(analyses) > 0
+                        )
                         else [
                             coinalyze_error
                             or "Derivatives enrichment is only partially available"

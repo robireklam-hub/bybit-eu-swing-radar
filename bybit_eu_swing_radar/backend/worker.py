@@ -1150,21 +1150,28 @@ async def enrich_coinalyze(
     exchange_names: dict[str, str] = {}
     exchange_metadata_error: str | None = None
     quote_order = ("USDC", "USDT", "USD")
+    # Coinalyze future-markets exposes an exchange code, not a venue name.
+    # Resolve that code for both engines before venue ranking. Day keeps its
+    # historical USDC-first quote preference and score-enrichment semantics;
+    # swing keeps USDT-first context selection and partial-safe endpoints.
+    try:
+        exchange_rows = await api.exchanges()
+        exchange_names = {
+            str(row.get("code", "")).upper(): str(row.get("name", ""))
+            for row in exchange_rows
+            if isinstance(row, dict) and row.get("code") and row.get("name")
+        }
+    except Exception as exc:
+        exchange_metadata_error = f"exchanges: {type(exc).__name__}: {exc}"
+        if not partial_safe:
+            for item in selected_analyses:
+                item.missing_data.append(
+                    "Coinalyze exchange metadata unavailable; derivatives enrichment skipped"
+                )
+            return False, exchange_metadata_error
+
     if partial_safe:
-        # Swing derivatives are context-only. Resolve Coinalyze exchange codes
-        # before venue ranking and prefer the liquid USDT context contract over
-        # venue-equivalent USDC/USD contracts. The legacy day path remains
-        # unchanged and keeps its historical USDC-first selection semantics.
         quote_order = ("USDT", "USDC", "USD")
-        try:
-            exchange_rows = await api.exchanges()
-            exchange_names = {
-                str(row.get("code", "")).upper(): str(row.get("name", ""))
-                for row in exchange_rows
-                if isinstance(row, dict) and row.get("code") and row.get("name")
-            }
-        except Exception as exc:
-            exchange_metadata_error = f"exchanges: {type(exc).__name__}: {exc}"
 
     market_map = select_coinalyze_markets(
         markets,
