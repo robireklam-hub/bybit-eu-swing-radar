@@ -85,7 +85,7 @@ jobs:
               raise SystemExit(f'exact production API SHA not observed; last={last!r}')
           PY
 
-      - name: Capture and persist first post-merge PIT-v1 snapshot
+      - name: Capture and persist post-merge PIT-v1 snapshot
         working-directory: bybit_eu_swing_radar/backend
         run: python research/swing_liquidity_shadow.py
 
@@ -96,8 +96,10 @@ jobs:
           import json
           from pathlib import Path
           payload = json.loads(Path('swing-liquidity-shadow.json').read_text())
-          assert payload['point_in_time']['point_in_time_verified'] is True
-          assert payload['point_in_time']['provenance_version'] == 'pit-v1'
+          provenance = payload['point_in_time']
+          assert provenance['version'] == 'pit-v1'
+          assert provenance['feature_available_at'] == payload['feature_available_at']
+          assert payload['trial_id'] == 'swing-liquidity-validation-v1'
           assert payload['trial_fingerprint']
           print('EXPECTED_SWING_LIQUIDITY_CAPTURE_AT=' + payload['captured_at'])
           print('EXPECTED_TRIAL_FINGERPRINT=' + payload['trial_fingerprint'])
