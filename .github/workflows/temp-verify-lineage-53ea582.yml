@@ -1,0 +1,174 @@
+name: Temporary verify lineage 53ea582
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+concurrency:
+  group: temp-verify-lineage-53ea582
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.head_ref == 'diag/post-merge-lineage-53ea582'
+    runs-on: macos-26
+    timeout-minutes: 10
+    env:
+      EXACT_MAIN_SHA: 53ea5825cff46849052c4bca7e203a8aba0532da
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 53ea5825cff46849052c4bca7e203a8aba0532da
+      - name: Verify exact production dataset/feature lineage
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, time
+          from datetime import datetime
+          from urllib.request import Request, urlopen
+
+          exact = os.environ['EXACT_MAIN_SHA']
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key = os.environ['PRODUCTION_RADAR_API_KEY']
+          expected_sources = {
+              'market_regime', 'derivatives_positioning', 'event_tokenomics',
+              'btc_macro_cycle_etf', 'relative_strength', 'sector_rotation',
+              'btc_onchain', 'eth_onchain',
+          }
+
+          def request(path, method='GET', auth=True, timeout=45):
+              headers = {'Accept':'application/json','User-Agent':'lineage-53ea582/1'}
+              if auth:
+                  headers['X-Radar-Key'] = key
+              req = Request(base + path, headers=headers, method=method)
+              with urlopen(req, timeout=timeout) as response:
+                  return json.load(response)
+
+          def ts(value):
+              return datetime.fromisoformat(str(value).replace('Z','+00:00')).timestamp()
+
+          version = None
+          for attempt in range(72):
+              try:
+                  version = request('/version', auth=False, timeout=20)
+                  if version.get('commit_sha') == exact:
+                      break
+              except Exception:
+                  pass
+              if attempt % 12 == 0:
+                  print('WAIT_API_EXACT_SHA=' + json.dumps(version, sort_keys=True, default=str), flush=True)
+              time.sleep(5)
+          assert version and version.get('commit_sha') == exact, version
+
+          spec = request('/v1/research/cross-layer-context-v2/spec')
+          assert spec.get('lineage_card_version') == 'research-lineage-card-v1', spec
+          cards = spec.get('lineage_cards') or {}
+          assert cards.get('card_version') == 'research-lineage-card-v1', cards
+          assert cards.get('research_only') is True, cards
+          assert cards.get('production_eligible') is False, cards
+          datasets = cards.get('datasets') or {}
+          assert set(datasets) == expected_sources, datasets.keys()
+          feature = cards.get('feature') or {}
+          assert feature.get('feature_id') == 'cross-layer-context-v2', feature
+          assert feature.get('spec_version') == 'cross-layer-context-shadow-v2', feature
+          assert feature.get('production_eligible') is False, feature
+          assert feature.get('execution_proof') is False, feature
+          assert feature.get('card_fingerprint'), feature
+          assert cards.get('manifest_fingerprint'), cards
+          for source, card in datasets.items():
+              assert card.get('card_type') == 'DATASET', (source, card)
+              assert card.get('card_fingerprint'), (source, card)
+              assert card.get('production_eligible') is False, (source, card)
+              assert card.get('execution_proof') is False, (source, card)
+              assert (card.get('time_semantics') or {}).get('provider_availability_required_for_future_production_use') is True, (source, card)
+
+          capture = request('/v1/research/cross-layer-context-v2/capture', method='POST', timeout=90)
+          assert capture.get('source_commit_sha') == exact, capture.get('source_commit_sha')
+          assert capture.get('research_only') is True, capture
+          assert capture.get('live_strategy_mutated') is False, capture
+          assert capture.get('promotion_allowed') is False, capture
+          assert capture.get('execution_proof') is False, capture
+
+          lineage = capture.get('lineage') or {}
+          assert lineage.get('lineage_version') == 'research-capture-lineage-v1', lineage
+          assert lineage.get('feature_id') == 'cross-layer-context-v2', lineage
+          assert lineage.get('feature_spec_version') == 'cross-layer-context-shadow-v2', lineage
+          assert lineage.get('feature_card_fingerprint') == feature.get('card_fingerprint'), lineage
+          assert lineage.get('input_count') == 8, lineage
+          assert lineage.get('immutable_input_fingerprint_count') == 8, lineage
+          assert lineage.get('references_complete') is True, lineage
+          assert lineage.get('all_inputs_research_usable') is True, lineage
+          assert lineage.get('provider_availability_inferred_from_capture_time') is False, lineage
+          assert lineage.get('provider_availability_verified_for_all_inputs') is False, lineage
+          assert lineage.get('point_in_time_verified_for_all_inputs') is False, lineage
+          assert lineage.get('production_usable') is False, lineage
+          assert lineage.get('live_strategy_mutated') is False, lineage
+          assert lineage.get('production_eligibility_mutated') is False, lineage
+          assert lineage.get('lineage_fingerprint'), lineage
+          output = lineage.get('output') or {}
+          assert output.get('source_commit_sha') == exact, output
+          assert output.get('production_eligible') is False, output
+          assert output.get('execution_proof') is False, output
+          assert ts(output.get('captured_at')) == ts(capture.get('captured_at')), (output, capture.get('captured_at'))
+
+          inputs = lineage.get('inputs') or []
+          assert len(inputs) == 8, inputs
+          by_source = {row.get('source'): row for row in inputs}
+          assert set(by_source) == expected_sources, by_source.keys()
+          for source in sorted(expected_sources):
+              row = by_source[source]
+              card = datasets[source]
+              assert row.get('dataset_card_fingerprint') == card.get('card_fingerprint'), (source, row, card)
+              assert row.get('dataset_id') == card.get('dataset_id'), (source, row, card)
+              assert row.get('spec_version') == card.get('spec_version'), (source, row, card)
+              assert row.get('captured_at'), (source, row)
+              assert row.get('source_commit_sha'), (source, row)
+              assert row.get('snapshot_payload_fingerprint'), (source, row)
+              assert row.get('immutable_history_present') is True, (source, row)
+              assert row.get('immutable') is True, (source, row)
+              assert row.get('research_usable') is True, (source, row)
+              assert row.get('provider_availability_verified') is False, (source, row)
+              assert row.get('point_in_time_verified') is False, (source, row)
+              assert row.get('availability_semantics') == 'CAPTURE_TIME_ONLY_NOT_PROVIDER_AVAILABILITY', (source, row)
+
+          status = request('/v1/research/cross-layer-context-v2/status')
+          latest = status.get('latest') or {}
+          latest_lineage = latest.get('lineage') or {}
+          assert ts(latest.get('captured_at')) == ts(capture.get('captured_at')), (latest.get('captured_at'), capture.get('captured_at'))
+          assert latest_lineage.get('lineage_fingerprint') == lineage.get('lineage_fingerprint'), (latest_lineage, lineage)
+          assert latest_lineage.get('immutable_input_fingerprint_count') == 8, latest_lineage
+          assert latest_lineage.get('references_complete') is True, latest_lineage
+
+          summary = {
+              'exact_sha': exact,
+              'captured_at': capture.get('captured_at'),
+              'manifest_fingerprint': cards.get('manifest_fingerprint'),
+              'feature_card_fingerprint': feature.get('card_fingerprint'),
+              'lineage_fingerprint': lineage.get('lineage_fingerprint'),
+              'input_count': lineage.get('input_count'),
+              'immutable_input_fingerprint_count': lineage.get('immutable_input_fingerprint_count'),
+              'references_complete': lineage.get('references_complete'),
+              'all_inputs_research_usable': lineage.get('all_inputs_research_usable'),
+              'point_in_time_verified_for_all_inputs': lineage.get('point_in_time_verified_for_all_inputs'),
+              'provider_availability_verified_for_all_inputs': lineage.get('provider_availability_verified_for_all_inputs'),
+              'production_usable': lineage.get('production_usable'),
+              'inputs': {
+                  source: {
+                      'dataset_card_fingerprint': by_source[source].get('dataset_card_fingerprint'),
+                      'snapshot_payload_fingerprint': by_source[source].get('snapshot_payload_fingerprint'),
+                      'source_commit_sha': by_source[source].get('source_commit_sha'),
+                      'captured_at': by_source[source].get('captured_at'),
+                      'data_quality_status': by_source[source].get('data_quality_status'),
+                  }
+                  for source in sorted(expected_sources)
+              },
+          }
+          print('LINEAGE_PRODUCTION_SUMMARY=' + json.dumps(summary, sort_keys=True, default=str))
+          print('DATASET/FEATURE LINEAGE CARDS EXACT-SHA PRODUCTION VERIFIED.')
+          PY
