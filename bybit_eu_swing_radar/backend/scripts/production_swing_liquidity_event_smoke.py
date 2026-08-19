@@ -70,6 +70,8 @@ def validate_event_payload(payload: dict[str, Any]) -> list[str]:
         failures.append("unexpected_study")
     if payload.get("builder_version") != "swing-liquidity-event-builder-v1":
         failures.append("unexpected_builder_version")
+    if payload.get("event_identity") != "symbol_side_first_qualifying_4h_trigger_bar":
+        failures.append("unexpected_event_identity")
 
     try:
         durable_rows = int(payload.get("durable_snapshot_rows") or 0)
@@ -106,7 +108,7 @@ def validate_event_payload(payload: dict[str, Any]) -> list[str]:
         failures.append(str(exc))
 
     ids: set[str] = set()
-    symbol_sides: set[tuple[str, str]] = set()
+    trigger_keys: set[tuple[str, str, str]] = set()
     for index, event in enumerate(events):
         prefix = f"event[{index}]"
         if not isinstance(event, dict):
@@ -122,14 +124,15 @@ def validate_event_payload(payload: dict[str, Any]) -> list[str]:
 
         symbol = str(event.get("symbol") or "").upper()
         side = str(event.get("side") or "").lower()
+        trigger_raw = str(event.get("trigger_close_at") or "")
         if not symbol or side not in {"long", "short"}:
             failures.append(f"{prefix}_invalid_symbol_side")
-        else:
-            symbol_side = (symbol, side)
-            if symbol_side in symbol_sides:
-                failures.append(f"{prefix}_duplicate_symbol_side_first_trigger")
+        elif trigger_raw:
+            trigger_key = (symbol, side, trigger_raw)
+            if trigger_key in trigger_keys:
+                failures.append(f"{prefix}_duplicate_symbol_side_trigger_bar")
             else:
-                symbol_sides.add(symbol_side)
+                trigger_keys.add(trigger_key)
 
         event_id = event.get("event_id")
         if not isinstance(event_id, str) or not event_id:
@@ -195,6 +198,7 @@ def run_smoke(
     safe = {
         "study": payload.get("study"),
         "builder_version": payload.get("builder_version"),
+        "event_identity": payload.get("event_identity"),
         "checked_at": payload.get("checked_at"),
         "durable_snapshot_rows": payload.get("durable_snapshot_rows"),
         "symbol_count": payload.get("symbol_count"),
