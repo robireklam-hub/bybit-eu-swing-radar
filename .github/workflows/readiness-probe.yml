@@ -1,0 +1,33 @@
+name: Readiness probe
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 099d3e011950f3a023d040b290fbe7b19d0b2c1b
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 099d3e011950f3a023d040b290fbe7b19d0b2c1b
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Recorder and readiness
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_smoke.py
+      - name: Alignment sample status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_alignment_status.py
+      - name: Effect status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_effect_status.py
