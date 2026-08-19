@@ -1,0 +1,172 @@
+name: Temporary verify day target health a30c4c
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.head_ref == 'diag/post-merge-day-target-health-a30c4c'
+    runs-on: macos-26
+    timeout-minutes: 12
+    env:
+      EXACT_MAIN_SHA: a30c4c806b520b11d619c2610ffc206456ee0f1a
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: a30c4c806b520b11d619c2610ffc206456ee0f1a
+      - name: Verify exact production target-health semantics
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, time
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+          from urllib.error import HTTPError
+
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key = os.environ['PRODUCTION_RADAR_API_KEY']
+          exact = os.environ['EXACT_MAIN_SHA']
+
+          def get(path, auth=True, timeout=40):
+              headers = {'Accept':'application/json','User-Agent':'day-target-health-a30c4c/1'}
+              if auth:
+                  headers['X-Radar-Key'] = key
+              with urlopen(Request(base + path, headers=headers), timeout=timeout) as response:
+                  return json.load(response)
+
+          version = None
+          for attempt in range(72):
+              try:
+                  version = get('/version', False, 20)
+                  if version.get('commit_sha') == exact:
+                      break
+              except Exception:
+                  pass
+              if attempt % 12 == 0:
+                  print('WAIT_API_EXACT_SHA=' + json.dumps(version, sort_keys=True, default=str), flush=True)
+              time.sleep(5)
+          assert version and version.get('commit_sha') == exact, version
+
+          status = None
+          for attempt in range(96):
+              try:
+                  row = get('/v1/day-trade/status')
+                  worker = row.get('worker') or {}
+                  if worker.get('source_commit_sha') == exact:
+                      status = row
+                      break
+              except Exception:
+                  pass
+              if attempt % 12 == 0:
+                  print('WAIT_WORKER_EXACT_SHA', flush=True)
+              time.sleep(5)
+          assert status is not None, 'fresh exact-SHA day worker cache did not appear'
+
+          worker = status.get('worker') or {}
+          source = next((x for x in status.get('sources', []) if str(x.get('source','')).lower() == 'coinalyze'), None)
+          assert source is not None, status.get('sources')
+
+          target = int(worker.get('coinalyze_target_symbols') or 0)
+          enriched = int(worker.get('coinalyze_enriched_symbols') or 0)
+          complete = int(worker.get('coinalyze_complete_symbols') or 0)
+          analysis = int(worker.get('coinalyze_analysis_symbols') or worker.get('deep_analyzed_pairs') or 0)
+          bounded = bool(worker.get('coinalyze_budget_bounded'))
+
+          assert 0 < target <= 9, worker
+          assert enriched == target, (enriched, target, worker)
+          assert complete == target, (complete, target, worker)
+          assert analysis >= target, (analysis, target)
+          if analysis >= 9:
+              assert target == 9, (analysis, target)
+
+          assert str(source.get('status') or '').lower() == 'ok', source
+          assert source.get('coverage') == f'{complete}/{target}', source
+          assert source.get('any_field_coverage') == f'{enriched}/{target}', source
+          assert source.get('complete_coverage') == f'{complete}/{target}', source
+          assert source.get('target_count') == target, source
+          assert source.get('target_any_field_coverage') == f'{enriched}/{target}', source
+          assert source.get('target_complete_coverage') == f'{complete}/{target}', source
+          assert source.get('analysis_count') == analysis, source
+          assert source.get('analysis_any_field_coverage') == f'{enriched}/{analysis}', source
+          assert source.get('analysis_complete_coverage') == f'{complete}/{analysis}', source
+          assert source.get('budget_bounded') is (analysis > target), source
+          assert source.get('analysis_coverage_mode') == ('budget_bounded' if analysis > target else 'full'), source
+          assert source.get('missing_fields') == [], source
+          assert bounded is (analysis > target), worker
+
+          scan = get('/v1/day-trade/scan?' + urlencode({
+              'direction':'both','limit':20,'min_score':0,'include_watchlist':'true'
+          }))
+
+          def flatten(payload):
+              if isinstance(payload, list):
+                  return [x for x in payload if isinstance(x, dict)]
+              out = []
+              if isinstance(payload, dict):
+                  for name, value in payload.items():
+                      if isinstance(value, list) and any(token in name.lower() for token in ('candidate','long','short','watch','result','setup')):
+                          out.extend(x for x in value if isinstance(x, dict))
+              return out
+
+          candidates = flatten(scan)
+          execution_symbols = [str(x.get('symbol') or '').upper() for x in candidates if x.get('symbol')]
+          assert execution_symbols, 'no day scan execution symbols observed'
+          assert all(symbol.endswith('USDC') for symbol in execution_symbols), execution_symbols
+
+          routed = []
+          for symbol in ('ETHUSDC','SOLUSDC','LINKUSDC','BTCUSDC','XRPUSDC','LTCUSDC','UNIUSDC','INJUSDC','AAVEUSDC','CRVUSDC','HYPEUSDC'):
+              try:
+                  setup = get(f'/v1/day-trade/setup/{symbol}')
+              except HTTPError:
+                  continue
+              derivatives = setup.get('derivatives') if isinstance(setup, dict) else None
+              if not isinstance(derivatives, dict) or not derivatives:
+                  continue
+              market_symbol = derivatives.get('market_symbol') or derivatives.get('symbol')
+              if not market_symbol:
+                  continue
+              availability = derivatives.get('availability') or {}
+              row = {
+                  'symbol': symbol,
+                  'market_symbol': market_symbol,
+                  'exchange_code': derivatives.get('exchange_code'),
+                  'exchange_name': derivatives.get('exchange_name') or derivatives.get('exchange'),
+                  'quote_asset': derivatives.get('quote_asset'),
+                  'availability': availability,
+                  'endpoint_errors': derivatives.get('endpoint_errors') or [],
+                  'is_bybit_specific': derivatives.get('is_bybit_specific'),
+              }
+              assert 'bybit' in str(row['exchange_name'] or '').lower(), row
+              assert row['quote_asset'] == 'USDT', row
+              assert row['is_bybit_specific'] is True, row
+              assert not row['endpoint_errors'], row
+              assert all(availability.get(k) is True for k in ('current_oi','funding','oi_history','liquidations')), row
+              routed.append(row)
+
+          assert routed, 'no routed Coinalyze setup sample observed'
+
+          summary = {
+              'exact_sha': exact,
+              'checked_at': status.get('checked_at'),
+              'worker': {
+                  'deep_analyzed_pairs': worker.get('deep_analyzed_pairs'),
+                  'coinalyze_target_symbols': target,
+                  'coinalyze_enriched_symbols': enriched,
+                  'coinalyze_complete_symbols': complete,
+                  'coinalyze_analysis_symbols': analysis,
+                  'coinalyze_budget_bounded': bounded,
+              },
+              'coinalyze_source': source,
+              'candidate_count_observed': len(candidates),
+              'routed_samples': routed,
+          }
+          print('DAY_TARGET_HEALTH_PRODUCTION_SUMMARY=' + json.dumps(summary, sort_keys=True, default=str))
+          print('DAY COINALYZE TARGET HEALTH EXACT-SHA PRODUCTION VERIFIED.')
+          PY
