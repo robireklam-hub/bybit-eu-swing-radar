@@ -39,23 +39,19 @@ jobs:
           python -m pip install pytest pytest-asyncio
           python -m pytest -q
           python -m compileall -q app research flow_context.py flow_worker.py
-      - name: Commit intended v3 patch only
+      - name: Commit v3 source and tests only
         run: |
           rm -f scripts/temp_build_signal_freeze_v3.py
-          rm -f .github/workflows/temp-build-signal-freeze-v3.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add \
-            .github/workflows/signal-context-freeze-v2.yml \
-            .github/workflows/signal-context-freeze-v3.yml \
             bybit_eu_swing_radar/backend/app/main.py \
             bybit_eu_swing_radar/backend/app/research_signal_context_freeze_v3_api.py \
             bybit_eu_swing_radar/backend/research/signal_context_freeze_v3.py \
             bybit_eu_swing_radar/backend/scripts/production_signal_context_freeze_v3_smoke.py \
             bybit_eu_swing_radar/backend/test_signal_context_freeze_v3.py \
             bybit_eu_swing_radar/backend/test_signal_context_freeze_v3_routes.py \
-            scripts/temp_build_signal_freeze_v3.py \
-            .github/workflows/temp-build-signal-freeze-v3.yml
+            scripts/temp_build_signal_freeze_v3.py
           git diff --cached --check
           git commit -m 'Add immutable-history Signal Context Freeze v3'
           git push origin HEAD:research/signal-context-freeze-v3-immutable
