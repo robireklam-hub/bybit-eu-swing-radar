@@ -6,10 +6,11 @@ on:
       - verify/coinalyze-current-274bcf1
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   verify:
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -19,10 +20,23 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: 274bcf1c4e9d0c65c7163752390fd50738beeb9a
+          ref: verify/coinalyze-current-274bcf1
+          fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-      - name: Verify exact production candidate semantics
+      - name: Verify exact production candidate semantics and preserve output
         working-directory: bybit_eu_swing_radar/backend
-        run: python scripts/production_swing_coinalyze_smoke.py
+        run: |
+          set +e
+          python scripts/production_swing_coinalyze_smoke.py 2>&1 | tee ../../../coinalyze-current-274bcf1.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          cd ../../..
+          printf '\nEXIT_CODE=%s\n' "$rc" >> coinalyze-current-274bcf1.log
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add coinalyze-current-274bcf1.log
+          git commit -m 'Record exact-main Coinalyze semantic verification' || true
+          git push origin HEAD:verify/coinalyze-current-274bcf1
+          exit "$rc"
