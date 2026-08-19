@@ -1,0 +1,129 @@
+name: Temporary post-merge immutable history verification
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.head_ref == 'diag/post-merge-immutable-history-274bcf1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      EXACT_MAIN_SHA: 274bcf1c4e9d0c65c7163752390fd50738beeb9a
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+    steps:
+      - name: Check out exact merged main
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.EXACT_MAIN_SHA }}
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: bybit_eu_swing_radar/backend/requirements.txt
+      - name: Install and verify exact merged main
+        working-directory: bybit_eu_swing_radar/backend
+        env:
+          DATABASE_URL: postgresql://localhost:5432/test
+          RADAR_API_KEY: test-radar-key
+          COINALYZE_API_KEY: test-coinalyze-key
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXACT_MAIN_SHA"
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pytest pytest-asyncio
+          python -m pytest -q
+          python -m compileall -q app research flow_context.py flow_worker.py
+      - name: Wait for exact production API and verify same-bucket history
+        working-directory: bybit_eu_swing_radar/backend
+        run: |
+          python - <<'PY'
+          import json, os, time
+          from urllib.request import Request, urlopen
+
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key = os.environ['PRODUCTION_RADAR_API_KEY']
+          expected = os.environ['EXACT_MAIN_SHA']
+
+          def call(path, method='GET'):
+              req = Request(
+                  base + path,
+                  method=method,
+                  headers={
+                      'Accept': 'application/json',
+                      'Content-Type': 'application/json',
+                      'X-Radar-Key': key,
+                      'User-Agent': 'immutable-history-post-merge/1',
+                  },
+                  data=b'{}' if method == 'POST' else None,
+              )
+              with urlopen(req, timeout=30) as response:
+                  return json.load(response)
+
+          last = None
+          for _ in range(72):
+              try:
+                  last = call('/version').get('commit_sha')
+                  if last == expected:
+                      break
+              except Exception as exc:
+                  last = type(exc).__name__
+              time.sleep(5)
+          else:
+              raise SystemExit(f'exact production SHA not observed; last={last!r}')
+
+          before = call('/v1/research/cross-layer-context-v2/status')
+          first = call('/v1/research/cross-layer-context-v2/capture', 'POST')
+          time.sleep(1)
+          second = call('/v1/research/cross-layer-context-v2/capture', 'POST')
+          after = call('/v1/research/cross-layer-context-v2/status')
+
+          h1 = first.get('immutable_history') or {}
+          h2 = second.get('immutable_history') or {}
+          assert h1.get('immutable') is True
+          assert h2.get('immutable') is True
+          assert h1.get('point_in_time_verified') is False
+          assert h2.get('point_in_time_verified') is False
+          assert h1.get('research_family') == 'cross-layer-context-v2'
+          assert h2.get('research_family') == 'cross-layer-context-v2'
+          assert h1.get('capture_bucket') == h2.get('capture_bucket')
+          assert first.get('captured_hour') == second.get('captured_hour')
+          assert h1.get('inserted') is True and h2.get('inserted') is True
+          assert int(h2.get('history_count') or 0) == int(h1.get('history_count') or 0) + 1
+          assert int(h2.get('bucket_history_count') or 0) == int(h1.get('bucket_history_count') or 0) + 1
+          assert h1.get('payload_fingerprint') != h2.get('payload_fingerprint')
+
+          latest = after.get('latest') or {}
+          assert latest.get('captured_at') == second.get('captured_at')
+          latest_history = latest.get('immutable_history') or {}
+          assert latest_history.get('payload_fingerprint') == h2.get('payload_fingerprint')
+          before_count = int(before.get('snapshot_count') or 0)
+          after_count = int(after.get('snapshot_count') or 0)
+          assert before_count <= after_count <= before_count + 1
+
+          summary = {
+              'exact_sha': expected,
+              'before_snapshot_count': before_count,
+              'after_snapshot_count': after_count,
+              'captured_hour': second.get('captured_hour'),
+              'first_history_count': h1.get('history_count'),
+              'second_history_count': h2.get('history_count'),
+              'first_bucket_history_count': h1.get('bucket_history_count'),
+              'second_bucket_history_count': h2.get('bucket_history_count'),
+              'first_fingerprint': h1.get('payload_fingerprint'),
+              'second_fingerprint': h2.get('payload_fingerprint'),
+              'latest_captured_at': latest.get('captured_at'),
+              'research_only': after.get('research_only'),
+              'live_strategy_mutated': after.get('live_strategy_mutated'),
+              'promotion_allowed': after.get('promotion_allowed'),
+          }
+          print('IMMUTABLE_HISTORY_PRODUCTION_SUMMARY=' + json.dumps(summary, sort_keys=True))
+          print('IMMUTABLE RESEARCH SNAPSHOT HISTORY VERIFIED.')
+          PY
