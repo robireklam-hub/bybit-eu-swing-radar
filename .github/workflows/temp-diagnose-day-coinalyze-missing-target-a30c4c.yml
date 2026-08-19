@@ -27,6 +27,7 @@ jobs:
           cd bybit_eu_swing_radar/backend
           python - <<'PY'
           import json, os
+          from datetime import datetime
           from urllib.parse import urlencode
           from urllib.request import Request, urlopen
 
@@ -35,11 +36,16 @@ jobs:
           key = os.environ['PRODUCTION_RADAR_API_KEY']
 
           def get(path, auth=True, timeout=35):
-              headers = {'Accept':'application/json','User-Agent':'day-coinalyze-cache-diag/2'}
+              headers = {'Accept':'application/json','User-Agent':'day-coinalyze-cache-diag/3'}
               if auth:
                   headers['X-Radar-Key'] = key
               with urlopen(Request(base + path, headers=headers), timeout=timeout) as response:
                   return json.load(response)
+
+          def ts(value):
+              if value is None:
+                  return None
+              return datetime.fromisoformat(str(value).replace('Z', '+00:00')).timestamp()
 
           version = get('/version', False)
           assert version.get('commit_sha') == exact, version
@@ -51,7 +57,7 @@ jobs:
           scan = get('/v1/day-trade/scan?' + urlencode({
               'direction':'both', 'limit':20, 'min_score':0, 'include_watchlist':'true'
           }))
-          assert scan.get('data_as_of') == checked_at, (scan.get('data_as_of'), checked_at)
+          assert ts(scan.get('data_as_of')) == ts(checked_at), (scan.get('data_as_of'), checked_at)
 
           candidates = []
           for name, value in scan.items():
@@ -61,28 +67,20 @@ jobs:
 
           from worker import DISCOVERY_SYMBOLS, COINALYZE_ENRICH_LIMIT
 
-          # For each symbol, the direction-aligned candidate's setup_score equals
-          # setup_score(expansion, abs(direction), quality). Add the selector's
-          # fixed discovery bonus exactly as select_coinalyze_targets does.
           by_symbol = {}
           for item in candidates:
               symbol = str(item.get('symbol')).upper()
-              if item.get('data_as_of') != checked_at:
+              if ts(item.get('data_as_of')) != ts(checked_at):
                   continue
               row = by_symbol.setdefault(symbol, {
                   'symbol': symbol,
                   'base_score': -1.0,
                   'selector_score': -1.0,
-                  'candidate': None,
               })
               base_score = float(item.get('setup_score') or 0.0)
               selector_score = base_score + (5.0 if symbol in DISCOVERY_SYMBOLS else 0.0)
               if selector_score > row['selector_score']:
-                  row.update({
-                      'base_score': base_score,
-                      'selector_score': selector_score,
-                      'candidate': item,
-                  })
+                  row.update({'base_score': base_score, 'selector_score': selector_score})
 
           ranked = sorted(by_symbol.values(), key=lambda row: row['selector_score'], reverse=True)
           target_count = int(worker.get('coinalyze_target_symbols') or 0)
@@ -97,7 +95,7 @@ jobs:
           for target in targets:
               symbol = target['symbol']
               setup = get('/v1/day-trade/setup/' + symbol)
-              assert setup.get('data_as_of') == checked_at, (symbol, setup.get('data_as_of'), checked_at)
+              assert ts(setup.get('data_as_of')) == ts(checked_at), (symbol, setup.get('data_as_of'), checked_at)
               derivatives = setup.get('derivatives') or {}
               missing = setup.get('missing_data') or []
               availability = derivatives.get('availability') or {}
