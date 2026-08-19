@@ -1,0 +1,112 @@
+name: Temporary post-merge Signal Context Freeze v3 verification
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.head_ref == 'diag/post-merge-signal-freeze-v3-31e4c2b'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      EXACT_MAIN_SHA: 31e4c2be5383d20904b5ef5110e9f424315cbfdf
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 31e4c2be5383d20904b5ef5110e9f424315cbfdf
+    steps:
+      - name: Check out exact merged main
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.EXACT_MAIN_SHA }}
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Verify exact checkout and production smoke
+        working-directory: bybit_eu_swing_radar/backend
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXACT_MAIN_SHA"
+          python scripts/production_signal_context_freeze_v3_smoke.py
+      - name: Verify production v3 temporal contract
+        working-directory: bybit_eu_swing_radar/backend
+        run: |
+          python - <<'PY'
+          import json, os
+          from datetime import datetime
+          from urllib.request import Request, urlopen
+
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key = os.environ['PRODUCTION_RADAR_API_KEY']
+          expected = os.environ['EXACT_MAIN_SHA']
+
+          def get(path):
+              req = Request(base + path, headers={
+                  'Accept': 'application/json',
+                  'X-Radar-Key': key,
+                  'User-Agent': 'signal-freeze-v3-post-merge/1',
+              })
+              with urlopen(req, timeout=30) as response:
+                  return json.load(response)
+
+          version = get('/version')
+          spec = get('/v1/research/signal-context-freeze-v3/spec')
+          status = get('/v1/research/signal-context-freeze-v3/status')
+
+          assert version.get('commit_sha') == expected
+          assert spec.get('version') == 'signal-context-freeze-v3'
+          assert spec.get('immutable_history_required') is True
+          assert spec.get('cross_layer_storage_source') == 'immutable_raw_history_v1'
+          assert spec.get('cross_layer_history_family') == 'cross-layer-context-v2'
+          temporal = spec.get('temporal_contract') or {}
+          assert temporal.get('source_capture_time_safe') is True
+          assert temporal.get('provider_availability_verified') is False
+          assert spec.get('historical_backfill_allowed') is False
+          assert spec.get('v1_preserved') is True and spec.get('v2_preserved') is True
+          assert spec.get('research_only') is True
+          assert spec.get('outcome_fields_read') is False
+          assert spec.get('live_strategy_mutated') is False
+          assert spec.get('promotion_allowed') is False
+
+          assert status.get('source_commit_sha') == expected
+          assert status.get('prospective_start_source') == 'immutable_raw_history_v1'
+          assert status.get('cross_layer_lookup_source') == 'research_snapshot_history'
+          assert status.get('historical_backfill_allowed') is False
+          assert status.get('outcome_fields_read') is False
+          assert status.get('live_strategy_mutated') is False
+          assert status.get('promotion_allowed') is False
+
+          start_raw = status.get('prospective_start_at')
+          assert start_raw
+          start = datetime.fromisoformat(str(start_raw).replace('Z', '+00:00'))
+          first_raw = (status.get('counts') or {}).get('first_opened_at')
+          if first_raw:
+              first = datetime.fromisoformat(str(first_raw).replace('Z', '+00:00'))
+              assert first >= start
+
+          frozen = int(status.get('frozen_signal_count') or 0)
+          prospective = int(status.get('prospective_journal_signal_count') or 0)
+          assert frozen <= prospective
+
+          summary = {
+              'exact_sha': expected,
+              'prospective_start_at': start_raw,
+              'pre_v3_journal_signals_excluded': status.get('pre_v3_journal_signals_excluded'),
+              'prospective_journal_signal_count': prospective,
+              'frozen_signal_count': frozen,
+              'freeze_coverage_pct': status.get('freeze_coverage_pct'),
+              'first_opened_at': first_raw,
+              'cross_layer_covered': (status.get('counts') or {}).get('cross_layer_covered'),
+              'microstructure_aligned': (status.get('counts') or {}).get('microstructure_aligned'),
+              'provider_availability_verified': temporal.get('provider_availability_verified'),
+              'research_only': status.get('research_only'),
+              'live_strategy_mutated': status.get('live_strategy_mutated'),
+              'promotion_allowed': status.get('promotion_allowed'),
+          }
+          print('SIGNAL_FREEZE_V3_PRODUCTION_SUMMARY=' + json.dumps(summary, sort_keys=True))
+          print('SIGNAL CONTEXT FREEZE V3 EXACT-SHA PRODUCTION VERIFIED.')
+          PY
