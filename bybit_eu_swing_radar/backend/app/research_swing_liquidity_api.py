@@ -12,6 +12,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from app.config import settings
 from app.providers.bybit import BybitClient
 from research.research_governance import snapshot_governance_metadata
+from research.research_trial_registry import ensure_trial_registered, trial_registry_status
 from research.swing_liquidity_event_builder import build_trigger_events
 
 STUDY = "swing-liquidity-validation-v1"
@@ -229,6 +230,11 @@ async def persist_forward_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     try:
         async with conn.transaction():
             await conn.execute(SCHEMA_SQL)
+            await ensure_trial_registered(
+                conn,
+                STUDY,
+                source_commit_sha=os.getenv("RAILWAY_GIT_COMMIT_SHA") or None,
+            )
             result = await conn.execute(
                 """
                 INSERT INTO swing_liquidity_forward_captures (
@@ -414,6 +420,7 @@ async def forward_status() -> dict[str, Any]:
     conn = await asyncpg.connect(settings.database_url)
     try:
         await conn.execute(SCHEMA_SQL)
+        registry = await trial_registry_status(conn, STUDY)
         capture = await conn.fetchrow(
             """
             SELECT COUNT(*)::int AS capture_count,
@@ -450,6 +457,7 @@ async def forward_status() -> dict[str, Any]:
         "live_strategy_mutated": False,
         "promotion_allowed": False,
         "study": STUDY,
+        "trial_registry": registry,
         "capture_count": capture_count,
         "first_capture_at": capture["first_capture_at"].isoformat() if capture["first_capture_at"] else None,
         "last_capture_at": capture["last_capture_at"].isoformat() if capture["last_capture_at"] else None,
