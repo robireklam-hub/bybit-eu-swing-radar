@@ -55,4 +55,26 @@ for relative, (family, table, bucket_expr, source_expr) in targets.items():
         text = text[:line_start] + insertion + text[line_start:]
     path.write_text(text)
 
-(root / 'test_research_snapshot_history_integration.py').write_text('''from pathlib import Path\n\nROOT = Path(__file__).resolve().parent\nTARGETS = {\n    "app/research_derivatives_positioning_api.py": "derivatives-positioning",\n    "app/research_btc_onchain_api.py": "btc-onchain",\n    "app/research_eth_onchain_api.py": "eth-onchain",\n    "app/research_btc_macro_cycle_etf_api.py": "btc-macro-cycle-etf",\n    "app/research_event_tokenomics_api.py": "event-tokenomics",\n    "app/research_market_regime_api.py": "market-regime",\n    "app/research_liquidation_context_api.py": "liquidation-context",\n    "app/research_relative_strength_api.py": "relative-strength",\n    "app/research_sector_rotation_api.py": "sector-rotation",\n    "app/research_geopolitical_risk_api.py": "geopolitical-risk",\n    "app/research_geopolitical_event_v2_api.py": "geopolitical-event-v2",\n    "app/research_cross_layer_context_api.py": "cross-layer-context",\n    "app/research_cross_layer_context_v2_api.py": "cross-layer-context-v2",\n}\n\ndef test_mutable_research_collectors_preserve_append_only_raw_history():\n    for relative, family in TARGETS.items():\n        text = (ROOT / relative).read_text()\n        assert "from research.research_snapshot_history import append_snapshot_history" in text\n        assert f\'research_family="{family}"\' in text\n        assert 'snapshot["immutable_history"] = history' in text\n        assert text.index("append_snapshot_history(") < text.index("ON CONFLICT")\n\ndef test_history_integration_keeps_existing_materializations():\n    for relative in TARGETS:\n        text = (ROOT / relative).read_text()\n        assert "ON CONFLICT" in text\n        assert "DO UPDATE" in text\n''')
+integration_targets = {
+    relative: (family, table)
+    for relative, (family, table, _, _) in targets.items()
+}
+(root / 'test_research_snapshot_history_integration.py').write_text(
+    'from pathlib import Path\n\nROOT = Path(__file__).resolve().parent\nTARGETS = ' + repr(integration_targets) + '''\n\n
+def test_mutable_research_collectors_preserve_append_only_raw_history():
+    for relative, (family, table) in TARGETS.items():
+        text = (ROOT / relative).read_text()
+        assert "from research.research_snapshot_history import append_snapshot_history" in text
+        assert f'research_family="{family}"' in text
+        assert 'snapshot["immutable_history"] = history' in text
+        assert text.index("append_snapshot_history(") < text.index(f"INSERT INTO {table} (")
+
+
+def test_history_integration_keeps_existing_materializations():
+    for relative, (_, table) in TARGETS.items():
+        text = (ROOT / relative).read_text()
+        table_pos = text.index(f"INSERT INTO {table} (")
+        assert "ON CONFLICT" in text[table_pos:]
+        assert "DO UPDATE" in text[table_pos:]
+'''
+)
