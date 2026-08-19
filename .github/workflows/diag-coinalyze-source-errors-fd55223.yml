@@ -70,12 +70,25 @@ jobs:
           candidates = []
           for section in sections:
               for row in top.get(section, []) or []:
+                  d = row.get('derivatives') or {}
                   candidates.append({
                       'section': section,
                       'symbol': row.get('symbol'),
                       'derivatives_status': row.get('derivatives_status'),
                       'derivatives_status_reason': row.get('derivatives_status_reason'),
                       'derivatives_context_only': row.get('derivatives_context_only'),
+                      'market_symbol': d.get('market_symbol'),
+                      'exchange': d.get('exchange'),
+                      'quote_asset': d.get('quote_asset'),
+                      'availability': d.get('availability'),
+                      'endpoint_errors': d.get('endpoint_errors'),
+                      'open_interest_usd': d.get('open_interest_usd'),
+                      'oi_change_1h_pct': d.get('oi_change_1h_pct'),
+                      'oi_change_4h_pct': d.get('oi_change_4h_pct'),
+                      'oi_change_24h_pct': d.get('oi_change_24h_pct'),
+                      'funding_rate': d.get('funding_rate'),
+                      'long_liquidations_24h_usd': d.get('long_liquidations_24h_usd'),
+                      'short_liquidations_24h_usd': d.get('short_liquidations_24h_usd'),
                   })
           print('CURRENT_CANDIDATE_DERIVATIVES=' + json.dumps(candidates, sort_keys=True))
           PY
