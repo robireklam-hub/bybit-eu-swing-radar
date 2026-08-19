@@ -1,4 +1,4 @@
-name: Diag current Coinalyze f0ea2d0
+name: Diag current production research f0ea2d0
 
 on:
   pull_request:
@@ -29,3 +29,26 @@ jobs:
       - name: Verify current production swing Coinalyze semantics
         working-directory: bybit_eu_swing_radar/backend
         run: python scripts/production_swing_coinalyze_smoke.py
+      - name: Read current durable swing liquidity forward status
+        working-directory: bybit_eu_swing_radar/backend
+        run: |
+          python - <<'PY'
+          import json, os
+          from urllib.request import Request, urlopen
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key = os.environ['PRODUCTION_RADAR_API_KEY']
+          req = Request(base + '/v1/research/swing-liquidity/forward-status', headers={
+              'Accept': 'application/json',
+              'User-Agent': 'bybit-eu-swing-liquidity-diag/1',
+              'X-Radar-Key': key,
+          })
+          with urlopen(req, timeout=15) as r:
+              p = json.load(r)
+          safe_keys = [
+              'research_only','live_strategy_mutated','promotion_allowed','study',
+              'capture_count','first_capture_at','last_capture_at','candidate_observations',
+              'orderbook_errors','turnover_tiers','spread_tiers',
+              'development_target_matured_events','validation_target_matured_events'
+          ]
+          print('SWING_LIQUIDITY_FORWARD_DIAG=' + json.dumps({k:p.get(k) for k in safe_keys}, sort_keys=True))
+          PY
