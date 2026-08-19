@@ -1,0 +1,74 @@
+name: Temporary patch dataset feature lineage cards v1
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches: [main]
+
+concurrency:
+  group: temp-patch-lineage-cards-v1
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.head_ref == 'research/dataset-feature-lineage-cards-v1' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: research/dataset-feature-lineage-cards-v1
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: python -m pip install -q -r bybit_eu_swing_radar/backend/requirements.txt pytest pytest-asyncio
+      - name: Patch Cross-Layer v2 lineage integration and test
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('bybit_eu_swing_radar/backend/research/cross_layer_context_v2.py')
+          text = path.read_text()
+
+          old = '''from research.research_data_quality import (\n    CONTRACT_VERSION as DATA_QUALITY_CONTRACT_VERSION,\n    aggregate_contract_results,\n    contract_manifest,\n    evaluate_source_record,\n    source_max_age_seconds,\n)\n\nSPEC_VERSION = "cross-layer-context-shadow-v2"\nMAX_SYMBOLS = 24'''
+          new = '''from research.research_data_quality import (\n    CONTRACT_VERSION as DATA_QUALITY_CONTRACT_VERSION,\n    aggregate_contract_results,\n    contract_manifest,\n    evaluate_source_record,\n    source_max_age_seconds,\n)\nfrom research.research_lineage_cards import (\n    CARD_VERSION as LINEAGE_CARD_VERSION,\n    build_capture_lineage,\n    cards_manifest,\n)\n\nSPEC_VERSION = "cross-layer-context-shadow-v2"\nFEATURE_ID = "cross-layer-context-v2"\nMAX_SYMBOLS = 24'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''        "max_symbols": MAX_SYMBOLS,\n        "data_quality_contract_version": DATA_QUALITY_CONTRACT_VERSION,\n        "data_quality_contract": contract_manifest(),'''
+          new = '''        "max_symbols": MAX_SYMBOLS,\n        "data_quality_contract_version": DATA_QUALITY_CONTRACT_VERSION,\n        "data_quality_contract": contract_manifest(),\n        "lineage_card_version": LINEAGE_CARD_VERSION,\n        "lineage_cards": cards_manifest(\n            feature_id=FEATURE_ID,\n            spec_version=SPEC_VERSION,\n            input_sources=LAYER_SOURCES,\n            max_symbols=MAX_SYMBOLS,\n        ),'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''    data_quality_contract = aggregate_contract_results(layer_meta)\n    payloads: dict[str, dict[str, Any]] = {}'''
+          new = '''    data_quality_contract = aggregate_contract_results(layer_meta)\n    lineage = build_capture_lineage(\n        records,\n        layer_meta,\n        feature_id=FEATURE_ID,\n        feature_spec_version=SPEC_VERSION,\n        input_sources=LAYER_SOURCES,\n        captured_at=now,\n        source_commit_sha=source_commit_sha,\n        max_symbols=MAX_SYMBOLS,\n    )\n    payloads: dict[str, dict[str, Any]] = {}'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''        "data_quality": quality,\n        "data_quality_contract": data_quality_contract,\n        "layer_fresh_count": fresh_count,'''
+          new = '''        "data_quality": quality,\n        "data_quality_contract": data_quality_contract,\n        "lineage": lineage,\n        "layer_fresh_count": fresh_count,'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          path.write_text(text)
+          PY
+
+          cd bybit_eu_swing_radar/backend
+          python -m pytest -q test_research_lineage_cards.py test_cross_layer_lineage_cards.py test_research_data_quality.py test_cross_layer_data_quality_contract.py
+          python -m pytest -q
+          python -m compileall -q .
+          git diff --check
+      - name: Commit production integration
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add bybit_eu_swing_radar/backend/research/cross_layer_context_v2.py
+          git diff --cached --check
+          git commit -m 'Research: integrate dataset feature lineage cards v1'
+          git push origin HEAD:research/dataset-feature-lineage-cards-v1
