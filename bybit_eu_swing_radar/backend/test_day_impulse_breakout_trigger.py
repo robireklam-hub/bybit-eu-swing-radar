@@ -42,6 +42,23 @@ def test_direct_closed_5m_breakout_is_not_overwritten_by_missing_sweep(monkeypat
     assert c["trigger"]["model"] == "CLOSED_5M_12_BAR_RANGE_BREAKOUT"
 
 
+def test_direct_closed_5m_short_breakout_is_also_executable_when_strict(monkeypatch):
+    monkeypatch.setattr(day_worker, "latest_bar_sweep_setup", lambda *args, **kwargs: None)
+    analysis = _analysis(direction=-80.0)
+    prior = [_bar(i) for i in range(12)]
+    prior[-1] = _bar(11, close=99.2, high=100.0, low=99.0)
+    analysis.bars_5m = prior + [_bar(12, close=98.0, high=99.4, low=97.8)]
+    analysis.structure_15m = "bearish"
+    analysis.structure_1h = "bearish"
+    analysis.structure_4h = "bearish"
+
+    c = build_day_candidate(analysis, "short", datetime(2026, 8, 19, tzinfo=timezone.utc))
+    assert c is not None
+    assert (c["category"], c["state"], c["decision"]) == ("STRICT", "TRIGGERED", "TRADE")
+    assert c["setup_type"] == "IMPULSE_BREAKOUT"
+    assert c["trigger"]["route"] == "CLOSED_5M_RANGE_BREAKOUT"
+
+
 def test_direct_breakout_does_not_bypass_strict_score_gates(monkeypatch):
     monkeypatch.setattr(day_worker, "latest_bar_sweep_setup", lambda *args, **kwargs: None)
     c = build_day_candidate(_analysis(expansion=30.0, direction=20.0, quality=70.0), "long", datetime(2026, 8, 19, tzinfo=timezone.utc))
