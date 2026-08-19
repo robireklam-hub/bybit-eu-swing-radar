@@ -1,0 +1,40 @@
+name: Signal Context Freeze v3 Immutable History
+
+on:
+  schedule:
+    - cron: "29 * * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "bybit_eu_swing_radar/backend/research/signal_context_freeze_v3.py"
+      - "bybit_eu_swing_radar/backend/app/research_signal_context_freeze_v3_api.py"
+      - "bybit_eu_swing_radar/backend/scripts/production_signal_context_freeze_v3_smoke.py"
+      - "bybit_eu_swing_radar/backend/app/main.py"
+      - ".github/workflows/signal-context-freeze-v3.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: signal-context-freeze-v3
+  cancel-in-progress: true
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Capture and verify prospective Signal-Time Context Freeze v3
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_signal_context_freeze_v3_smoke.py
