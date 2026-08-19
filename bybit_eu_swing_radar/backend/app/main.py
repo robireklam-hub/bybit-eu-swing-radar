@@ -460,6 +460,12 @@ from app.research_signal_context_freeze_v2_api import attach_signal_context_free
 
 attach_signal_context_freeze_v2_research(app, require_api_key)
 
+# Research-only prospective Signal-Time Context Freeze v3. V1/V2 remain
+# immutable; V3 selects Cross-Layer v2 only from append-only raw history.
+from app.research_signal_context_freeze_v3_api import attach_signal_context_freeze_v3_research
+
+attach_signal_context_freeze_v3_research(app, require_api_key)
+
 # Research-only geopolitical news-attention shadow. It measures fixed, sourced
 # media-attention context and has no live strategy/execution mutation path.
 from app.research_geopolitical_risk_api import attach_geopolitical_risk_research
