@@ -1,0 +1,123 @@
+name: Temp day Coinalyze output diag
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  production-diag:
+    if: github.event.pull_request.head.ref == 'diag/day-coinalyze-output-b9fc2a8'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      EXPECTED_MAIN_SHA: b9fc2a855c96c6dba6d8c18cf958c5d3ec9a1f1f
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+
+    steps:
+      - name: Audit published day candidate derivatives coverage
+        run: |
+          python - <<'PY'
+          import json, os
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+
+          base=os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key=os.environ['PRODUCTION_RADAR_API_KEY']
+          expected=os.environ['EXPECTED_MAIN_SHA']
+          def get(path, params=None, auth=True):
+              url=base+path
+              if params:
+                  url += '?' + urlencode(params)
+              headers={'Accept':'application/json','User-Agent':'day-coinalyze-output-diag/1'}
+              if auth: headers['X-Radar-Key']=key
+              with urlopen(Request(url,headers=headers),timeout=30) as response:
+                  return json.loads(response.read().decode())
+
+          version=get('/version',auth=False)
+          actual=str(version.get('commit_sha') or '')
+          print('EXACT_API_SHA='+actual)
+          if actual != expected:
+              raise SystemExit('production API SHA mismatch')
+
+          status=get('/v1/day-trade/status')
+          top=get('/v1/day-trade/top-candidates',{'limit':5,'include_watchlist':'true'})
+          scan=get('/v1/day-trade/scan',{'direction':'both','limit':20,'min_score':0,'include_watchlist':'true'})
+
+          required=('current_oi','funding','oi_history','liquidations')
+          lists=('strict_longs','strict_shorts','watch_only_longs','watch_only_shorts')
+          def classify(candidate):
+              derivatives=candidate.get('derivatives') if isinstance(candidate,dict) else None
+              derivatives=derivatives if isinstance(derivatives,dict) else {}
+              availability=derivatives.get('availability') if isinstance(derivatives.get('availability'),dict) else {}
+              complete=(
+                  derivatives.get('source')=='Coinalyze'
+                  and not derivatives.get('endpoint_errors')
+                  and all(availability.get(field) is True for field in required)
+              )
+              return {
+                  'symbol':candidate.get('symbol'),
+                  'side':candidate.get('side'),
+                  'category':candidate.get('category'),
+                  'setup_score':candidate.get('setup_score'),
+                  'decision':candidate.get('decision'),
+                  'has_derivatives':bool(derivatives),
+                  'complete':complete,
+                  'availability':{field:availability.get(field) for field in required},
+                  'market_symbol':derivatives.get('market_symbol'),
+                  'exchange':derivatives.get('exchange'),
+                  'quote_asset':derivatives.get('quote_asset'),
+                  'open_interest_usd':derivatives.get('open_interest_usd'),
+                  'oi_change_1h_pct':derivatives.get('oi_change_1h_pct'),
+                  'oi_change_4h_pct':derivatives.get('oi_change_4h_pct'),
+                  'oi_change_24h_pct':derivatives.get('oi_change_24h_pct'),
+                  'funding_rate':derivatives.get('funding_rate'),
+                  'long_liquidations_24h_usd':derivatives.get('long_liquidations_24h_usd'),
+                  'short_liquidations_24h_usd':derivatives.get('short_liquidations_24h_usd'),
+                  'strict_score_mutation_applied':derivatives.get('strict_score_mutation_applied'),
+                  'endpoint_errors':derivatives.get('endpoint_errors'),
+              }
+
+          def summarize(payload):
+              rows=[]
+              per_list={}
+              for name in lists:
+                  items=payload.get(name) or []
+                  classified=[classify(item) for item in items]
+                  rows.extend(classified)
+                  per_list[name]={
+                      'count':len(classified),
+                      'complete':sum(row['complete'] for row in classified),
+                      'symbols':[row['symbol'] for row in classified],
+                      'missing_complete':[row['symbol'] for row in classified if not row['complete']],
+                  }
+              unique={row['symbol']:row for row in rows if row.get('symbol')}
+              return {
+                  'per_list':per_list,
+                  'row_count':len(rows),
+                  'unique_count':len(unique),
+                  'unique_symbols':list(unique),
+                  'complete_unique_count':sum(row['complete'] for row in unique.values()),
+                  'missing_complete_unique':[symbol for symbol,row in unique.items() if not row['complete']],
+                  'rows':rows,
+              }
+
+          worker=status.get('worker') or {}
+          evidence={
+              'status_checked_at':status.get('checked_at'),
+              'status_source_commit_sha':worker.get('source_commit_sha'),
+              'coinalyze_analysis_symbols':worker.get('coinalyze_analysis_symbols'),
+              'coinalyze_target_symbols':worker.get('coinalyze_target_symbols'),
+              'coinalyze_enriched_symbols':worker.get('coinalyze_enriched_symbols'),
+              'coinalyze_complete_symbols':worker.get('coinalyze_complete_symbols'),
+              'coinalyze_budget_bounded':worker.get('coinalyze_budget_bounded'),
+              'top':summarize(top),
+              'scan':summarize(scan),
+          }
+          print('DAY_COINALYZE_OUTPUT_EVIDENCE='+json.dumps(evidence,sort_keys=True,default=str))
+          print('DAY COINALYZE OUTPUT AUDIT COMPLETE.')
+          PY
