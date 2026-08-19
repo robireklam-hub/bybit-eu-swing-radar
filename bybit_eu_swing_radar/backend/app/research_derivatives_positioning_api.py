@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
 import asyncpg
+from research.research_snapshot_history import append_snapshot_history
 from fastapi import Depends, FastAPI, HTTPException
 
 from research.derivatives_positioning_shadow import (
@@ -211,6 +212,16 @@ async def persist_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     connection = await asyncpg.connect(_database_url())
     try:
         await connection.execute(SCHEMA_SQL)
+        history = await append_snapshot_history(
+            connection,
+            research_family="derivatives-positioning",
+            spec_version=SPEC_VERSION,
+            captured_at=captured_at,
+            capture_bucket=captured_hour,
+            source_commit_sha=snapshot.get("source_commit_sha"),
+            snapshot=snapshot,
+        )
+        snapshot["immutable_history"] = history
         await connection.execute(
             """
             INSERT INTO research_derivatives_positioning_snapshots (

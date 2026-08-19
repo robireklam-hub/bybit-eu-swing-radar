@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 import asyncpg
+from research.research_snapshot_history import append_snapshot_history
 from fastapi import Depends, FastAPI, HTTPException
 
 from research.cross_layer_context_v2 import SPEC_VERSION, build_context_snapshot, spec
@@ -95,6 +96,16 @@ async def capture_current_snapshot() -> dict[str, Any]:
         records = await load_source_records(connection, captured_at)
         snapshot = build_context_snapshot(records, captured_at=captured_at, source_commit_sha=source_sha)
         captured_hour = captured_at.replace(minute=0, second=0, microsecond=0)
+        history = await append_snapshot_history(
+            connection,
+            research_family="cross-layer-context-v2",
+            spec_version=SPEC_VERSION,
+            captured_at=captured_at,
+            capture_bucket=captured_hour,
+            source_commit_sha=source_sha,
+            snapshot=snapshot,
+        )
+        snapshot["immutable_history"] = history
         await connection.execute(
             """
             INSERT INTO research_cross_layer_context_snapshots (
