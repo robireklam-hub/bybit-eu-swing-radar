@@ -60,8 +60,8 @@ jobs:
                   'status query',
               ),
               (
-                  '        "study": STUDY,\n        "capture_count": int(capture["capture_count"] or 0),\n',
-                  '        "study": STUDY,\n        "trial_registry": registry,\n        "capture_count": int(capture["capture_count"] or 0),\n',
+                  '        "study": STUDY,\n        "capture_count": capture_count,\n',
+                  '        "study": STUDY,\n        "trial_registry": registry,\n        "capture_count": capture_count,\n',
                   'status response',
               ),
           ]
