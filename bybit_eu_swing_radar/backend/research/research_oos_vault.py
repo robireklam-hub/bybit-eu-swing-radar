@@ -50,6 +50,56 @@ CREATE TABLE IF NOT EXISTS research_oos_exposure_events (
     FOREIGN KEY (trial_id, revision, partition_id)
         REFERENCES research_oos_vault(trial_id, revision, partition_id)
 );
+
+CREATE OR REPLACE FUNCTION research_reject_oos_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RAISE EXCEPTION 'immutable OOS records cannot be updated, deleted, or truncated';
+END;
+$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname='trg_research_oos_vault_immutable'
+          AND tgrelid='research_oos_vault'::regclass
+    ) THEN
+        CREATE TRIGGER trg_research_oos_vault_immutable
+        BEFORE UPDATE OR DELETE ON research_oos_vault
+        FOR EACH ROW EXECUTE FUNCTION research_reject_oos_mutation();
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname='trg_research_oos_vault_no_truncate'
+          AND tgrelid='research_oos_vault'::regclass
+    ) THEN
+        CREATE TRIGGER trg_research_oos_vault_no_truncate
+        BEFORE TRUNCATE ON research_oos_vault
+        FOR EACH STATEMENT EXECUTE FUNCTION research_reject_oos_mutation();
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname='trg_research_oos_exposure_immutable'
+          AND tgrelid='research_oos_exposure_events'::regclass
+    ) THEN
+        CREATE TRIGGER trg_research_oos_exposure_immutable
+        BEFORE UPDATE OR DELETE ON research_oos_exposure_events
+        FOR EACH ROW EXECUTE FUNCTION research_reject_oos_mutation();
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname='trg_research_oos_exposure_no_truncate'
+          AND tgrelid='research_oos_exposure_events'::regclass
+    ) THEN
+        CREATE TRIGGER trg_research_oos_exposure_no_truncate
+        BEFORE TRUNCATE ON research_oos_exposure_events
+        FOR EACH STATEMENT EXECUTE FUNCTION research_reject_oos_mutation();
+    END IF;
+END;
+$$;
 """
 
 
@@ -68,6 +118,7 @@ def spec() -> dict[str, Any]:
         "promotion_allowed": False,
         "execution_proof": False,
         "requires_durable_trial_registration": True,
+        "database_mutation_guard": "UPDATE_DELETE_TRUNCATE_REJECTED",
         "database_admin_cryptographic_isolation": False,
         "forbidden": [
             "reading_oos_payload_before_explicit_exposure",
