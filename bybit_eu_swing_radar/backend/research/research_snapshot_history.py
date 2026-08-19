@@ -32,6 +32,48 @@ CREATE INDEX IF NOT EXISTS idx_research_snapshot_history_family_time
 ON research_snapshot_history(research_family, spec_version, captured_at DESC);
 CREATE INDEX IF NOT EXISTS idx_research_snapshot_history_bucket
 ON research_snapshot_history(research_family, spec_version, capture_bucket, captured_at DESC);
+
+DO $immutability$
+BEGIN
+    IF to_regprocedure(current_schema() || '.reject_research_snapshot_history_mutation()') IS NULL THEN
+        EXECUTE $create_function$
+            CREATE FUNCTION reject_research_snapshot_history_mutation()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $function$
+            BEGIN
+                RAISE EXCEPTION 'research_snapshot_history is append-only';
+            END;
+            $function$
+        $create_function$;
+    END IF;
+END
+$immutability$;
+
+DO $immutability$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgrelid = 'research_snapshot_history'::regclass
+          AND tgname = 'trg_research_snapshot_history_no_row_mutation'
+          AND NOT tgisinternal
+    ) THEN
+        EXECUTE 'CREATE TRIGGER trg_research_snapshot_history_no_row_mutation '
+                'BEFORE UPDATE OR DELETE ON research_snapshot_history '
+                'FOR EACH ROW EXECUTE FUNCTION reject_research_snapshot_history_mutation()';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgrelid = 'research_snapshot_history'::regclass
+          AND tgname = 'trg_research_snapshot_history_no_truncate'
+          AND NOT tgisinternal
+    ) THEN
+        EXECUTE 'CREATE TRIGGER trg_research_snapshot_history_no_truncate '
+                'BEFORE TRUNCATE ON research_snapshot_history '
+                'FOR EACH STATEMENT EXECUTE FUNCTION reject_research_snapshot_history_mutation()';
+    END IF;
+END
+$immutability$;
 """
 
 
