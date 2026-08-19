@@ -1,0 +1,461 @@
+name: Temporary research PIT governance patch
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.head_ref == 'research/point-in-time-trial-governance-v1'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+      - name: Apply research-only point-in-time governance patch
+        shell: bash
+        run: |
+          cd bybit_eu_swing_radar/backend
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_one(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"expected one anchor in {path}, found {count}: {old[:80]!r}")
+              p.write_text(text.replace(old, new, 1))
+
+          governance = '''"""Research-governance primitives for preregistered, point-in-time studies.
+
+          This module is deliberately research-only. It provides deterministic trial
+          fingerprints and local collector-time provenance; it never scores candidates,
+          changes eligibility, permits promotion, or touches execution state.
+          """
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          from copy import deepcopy
+          from datetime import datetime, timezone
+          from typing import Any
+
+          PIT_VERSION = "pit-v1"
+          LEGACY_PROVENANCE_VERSION = "legacy-captured-at-v0"
+
+          _TRIALS: dict[str, dict[str, Any]] = {
+              "swing-liquidity-validation-v1": {
+                  "trial_id": "swing-liquidity-validation-v1",
+                  "research_family": "swing-liquidity",
+                  "revision": 1,
+                  "preregistered": True,
+                  "frozen": True,
+                  "development_target_matured_events": 60,
+                  "validation_target_matured_events": 40,
+                  "pre_trigger_max_snapshot_age_minutes": 90,
+                  "primary_notional_usdc": 500.0,
+                  "event_identity": "symbol_side_first_qualifying_4h_trigger_bar",
+                  "preregistration": "backend/research/SWING_LIQUIDITY_VALIDATION_V1.md",
+              }
+          }
+
+
+          def _timestamp(value: Any, field: str) -> datetime:
+              if isinstance(value, datetime):
+                  parsed = value
+              elif isinstance(value, str) and value.strip():
+                  parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+              else:
+                  raise ValueError(f"{field} is required")
+              if parsed.tzinfo is None:
+                  raise ValueError(f"{field} must be timezone-aware")
+              return parsed.astimezone(timezone.utc)
+
+
+          def manifest_fingerprint(manifest: dict[str, Any]) -> str:
+              canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+              return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+          def trial_manifest(study: str) -> dict[str, Any]:
+              try:
+                  return deepcopy(_TRIALS[study])
+              except KeyError as exc:
+                  raise ValueError(f"unregistered research study: {study}") from exc
+
+
+          def trial_fingerprint(study: str) -> str:
+              return manifest_fingerprint(trial_manifest(study))
+
+
+          def validate_trial_registration(
+              study: str,
+              manifest: dict[str, Any],
+              fingerprint: str,
+          ) -> None:
+              expected = trial_manifest(study)
+              expected_fingerprint = manifest_fingerprint(expected)
+              if manifest != expected:
+                  raise ValueError("trial manifest does not match the frozen registry")
+              if fingerprint != expected_fingerprint:
+                  raise ValueError("trial fingerprint does not match the frozen registry")
+              if manifest.get("trial_id") != study:
+                  raise ValueError("trial_id does not match study")
+
+
+          def validate_point_in_time(
+              provenance: dict[str, Any],
+              *,
+              decision_time: datetime | str | None = None,
+          ) -> datetime:
+              if not isinstance(provenance, dict) or provenance.get("version") != PIT_VERSION:
+                  raise ValueError("point-in-time provenance version must be pit-v1")
+              fields = (
+                  "collection_started_at",
+                  "scan_received_at",
+                  "orderbooks_completed_at",
+                  "feature_computed_at",
+                  "feature_available_at",
+              )
+              stages = [_timestamp(provenance.get(field), field) for field in fields]
+              for previous, current in zip(stages, stages[1:]):
+                  if current < previous:
+                      raise ValueError("local point-in-time stages are out of order")
+              available_at = stages[-1]
+              if decision_time is not None and available_at > _timestamp(decision_time, "decision_time"):
+                  raise ValueError("feature was not available at decision_time")
+              return available_at
+
+
+          def build_point_in_time_provenance(
+              *,
+              collection_started_at: datetime | str,
+              scan_received_at: datetime | str,
+              orderbooks_completed_at: datetime | str,
+              feature_computed_at: datetime | str,
+              feature_available_at: datetime | str,
+              scan_source_data_as_of: Any = None,
+          ) -> dict[str, Any]:
+              provenance = {
+                  "version": PIT_VERSION,
+                  "collection_started_at": _timestamp(collection_started_at, "collection_started_at").isoformat(),
+                  "scan_received_at": _timestamp(scan_received_at, "scan_received_at").isoformat(),
+                  "orderbooks_completed_at": _timestamp(orderbooks_completed_at, "orderbooks_completed_at").isoformat(),
+                  "feature_computed_at": _timestamp(feature_computed_at, "feature_computed_at").isoformat(),
+                  "feature_available_at": _timestamp(feature_available_at, "feature_available_at").isoformat(),
+                  "scan_source_data_as_of": scan_source_data_as_of,
+              }
+              validate_point_in_time(provenance)
+              return provenance
+
+
+          def snapshot_governance_metadata(snapshot: dict[str, Any]) -> dict[str, Any]:
+              """Return effective availability while preserving legacy captures as unverified."""
+              captured_at = _timestamp(snapshot.get("captured_at"), "captured_at")
+              provenance = snapshot.get("point_in_time")
+              if provenance is None:
+                  return {
+                      "provenance_version": LEGACY_PROVENANCE_VERSION,
+                      "point_in_time_verified": False,
+                      "feature_available_at": captured_at,
+                      "trial_id": None,
+                      "trial_fingerprint": None,
+                  }
+
+              available_at = validate_point_in_time(provenance)
+              top_level_available = snapshot.get("feature_available_at")
+              if top_level_available is None or _timestamp(top_level_available, "feature_available_at") != available_at:
+                  raise ValueError("top-level feature_available_at must match point_in_time provenance")
+              manifest = snapshot.get("trial_manifest")
+              fingerprint = snapshot.get("trial_fingerprint")
+              trial_id = snapshot.get("trial_id")
+              if not isinstance(manifest, dict) or not isinstance(fingerprint, str) or not isinstance(trial_id, str):
+                  raise ValueError("pit-v1 snapshots require a registered trial manifest and fingerprint")
+              validate_trial_registration(str(snapshot.get("study") or ""), manifest, fingerprint)
+              if trial_id != manifest.get("trial_id"):
+                  raise ValueError("snapshot trial_id does not match trial manifest")
+              return {
+                  "provenance_version": PIT_VERSION,
+                  "point_in_time_verified": True,
+                  "feature_available_at": available_at,
+                  "trial_id": trial_id,
+                  "trial_fingerprint": fingerprint,
+              }
+          '''
+          Path("research/research_governance.py").write_text(governance)
+
+          test = '''from datetime import datetime, timezone
+          from pathlib import Path
+
+          import pytest
+
+          from research.research_governance import (
+              build_point_in_time_provenance,
+              manifest_fingerprint,
+              snapshot_governance_metadata,
+              trial_fingerprint,
+              trial_manifest,
+              validate_point_in_time,
+              validate_trial_registration,
+          )
+          from research.swing_liquidity_event_builder import build_trigger_events, select_pretrigger_snapshot
+          import research.swing_liquidity_shadow as shadow
+
+
+          STUDY = "swing-liquidity-validation-v1"
+
+
+          def _candidate():
+              return {
+                  "symbol": "BTCUSDC",
+                  "side": "long",
+                  "shortable": False,
+                  "expansion_score": 60.0,
+                  "direction_score": 40.0,
+                  "trigger": {"timeframe": "4H", "requires_close": True, "price": 100.0},
+                  "entry_zone": {"low": 101.0, "high": 103.0},
+                  "stop": 95.0,
+                  "targets": [110.0, 120.0],
+              }
+
+
+          def _pit(start="2026-08-19T11:58:00+00:00", available="2026-08-19T11:59:00+00:00"):
+              return build_point_in_time_provenance(
+                  collection_started_at=start,
+                  scan_received_at="2026-08-19T11:58:10+00:00",
+                  orderbooks_completed_at="2026-08-19T11:58:30+00:00",
+                  feature_computed_at=available,
+                  feature_available_at=available,
+                  scan_source_data_as_of="2099-01-01T00:00:00+00:00",
+              )
+
+
+          def test_trial_fingerprint_is_deterministic_and_tamper_evident():
+              manifest = trial_manifest(STUDY)
+              assert manifest_fingerprint(manifest) == trial_fingerprint(STUDY)
+              tampered = dict(manifest)
+              tampered["development_target_matured_events"] = 61
+              with pytest.raises(ValueError, match="frozen registry"):
+                  validate_trial_registration(STUDY, tampered, manifest_fingerprint(tampered))
+
+
+          def test_point_in_time_uses_local_stage_order_not_upstream_clock():
+              provenance = _pit()
+              available = validate_point_in_time(provenance, decision_time="2026-08-19T12:00:00+00:00")
+              assert available == datetime(2026, 8, 19, 11, 59, tzinfo=timezone.utc)
+              broken = dict(provenance)
+              broken["orderbooks_completed_at"] = "2026-08-19T11:58:05+00:00"
+              with pytest.raises(ValueError, match="out of order"):
+                  validate_point_in_time(broken)
+              with pytest.raises(ValueError, match="not available"):
+                  validate_point_in_time(provenance, decision_time="2026-08-19T11:58:59+00:00")
+
+
+          def test_snapshot_governance_keeps_legacy_but_marks_it_unverified():
+              legacy = snapshot_governance_metadata({"captured_at": "2026-08-19T11:59:00+00:00"})
+              assert legacy["point_in_time_verified"] is False
+              assert legacy["provenance_version"] == "legacy-captured-at-v0"
+              manifest = trial_manifest(STUDY)
+              pit = _pit()
+              modern = snapshot_governance_metadata({
+                  "study": STUDY,
+                  "captured_at": pit["collection_started_at"],
+                  "feature_available_at": pit["feature_available_at"],
+                  "point_in_time": pit,
+                  "trial_id": manifest["trial_id"],
+                  "trial_manifest": manifest,
+                  "trial_fingerprint": trial_fingerprint(STUDY),
+              })
+              assert modern["point_in_time_verified"] is True
+              assert modern["feature_available_at"].isoformat() == pit["feature_available_at"]
+
+
+          def test_pretrigger_selection_rejects_capture_that_was_not_yet_available():
+              too_late = {
+                  "captured_at": "2026-08-19T11:59:00+00:00",
+                  "available_at": "2026-08-19T12:00:05+00:00",
+                  "symbol": "BTCUSDC",
+                  "side": "long",
+                  "candidate": _candidate(),
+              }
+              assert select_pretrigger_snapshot(
+                  [too_late], symbol="BTCUSDC", side="long", trigger_close_at="2026-08-19T12:00:00+00:00"
+              ) is None
+              legacy = dict(too_late)
+              legacy.pop("available_at")
+              legacy["captured_at"] = "2026-08-19T11:59:00+00:00"
+              assert select_pretrigger_snapshot(
+                  [legacy], symbol="BTCUSDC", side="long", trigger_close_at="2026-08-19T12:00:00+00:00"
+              ) is legacy
+
+
+          def test_event_metadata_preserves_capture_but_ages_from_availability():
+              snapshot = {
+                  "captured_at": "2026-08-19T11:58:00+00:00",
+                  "available_at": "2026-08-19T11:59:00+00:00",
+                  "feature_available_at": "2026-08-19T11:59:00+00:00",
+                  "point_in_time_verified": True,
+                  "trial_id": STUDY,
+                  "trial_fingerprint": trial_fingerprint(STUDY),
+                  "symbol": "BTCUSDC",
+                  "side": "long",
+                  "candidate": _candidate(),
+              }
+              events = build_trigger_events(
+                  [snapshot],
+                  [{
+                      "start_at": "2026-08-19T08:00:00+00:00",
+                      "close_at": "2026-08-19T12:00:00+00:00",
+                      "close": 105.0,
+                  }],
+                  symbol="BTCUSDC",
+                  side="long",
+              )
+              assert len(events) == 1
+              event = events[0]
+              assert event["pretrigger_captured_at"] == "2026-08-19T11:58:00+00:00"
+              assert event["pretrigger_available_at"] == "2026-08-19T11:59:00+00:00"
+              assert event["pretrigger_snapshot_age_seconds"] == 60.0
+              assert event["point_in_time_verified"] is True
+              assert event["trial_id"] == STUDY
+
+
+          def test_collector_emits_pit_v1_and_registered_trial(monkeypatch):
+              monkeypatch.setattr(
+                  shadow,
+                  "_get_json",
+                  lambda *args, **kwargs: {
+                      "data_as_of": "2026-08-19T10:00:00+00:00",
+                      "data_quality": "GOOD",
+                      "longs": [],
+                      "shorts": [],
+                      "extended_watchlist": [],
+                      "liquidity_blocked": [],
+                  },
+              )
+              snapshot = shadow.collect_snapshot("https://example.invalid", "secret")
+              assert snapshot["point_in_time"]["version"] == "pit-v1"
+              assert snapshot["feature_available_at"] == snapshot["point_in_time"]["feature_available_at"]
+              assert snapshot["trial_id"] == STUDY
+              assert snapshot["trial_fingerprint"] == trial_fingerprint(STUDY)
+              assert snapshot["candidate_count"] == 0
+
+
+          def test_persistence_schema_has_backward_compatible_pit_columns():
+              source = Path("app/research_swing_liquidity_api.py").read_text()
+              for column in ("feature_available_at", "provenance_version", "trial_id", "trial_fingerprint"):
+                  assert f"ADD COLUMN IF NOT EXISTS {column}" in source
+              assert "COALESCE(c.feature_available_at, o.captured_at) AS available_at" in source
+          '''
+          Path("test_research_governance.py").write_text(test)
+
+          replace_one(
+              "research/swing_liquidity_shadow.py",
+              'from urllib.request import Request, urlopen\n\nNOTIONALS_USDC',
+              '''from urllib.request import Request, urlopen\n\ntry:\n    from research.research_governance import (\n        build_point_in_time_provenance,\n        trial_fingerprint,\n        trial_manifest,\n    )\nexcept ModuleNotFoundError:  # direct script execution from backend/research\n    from research_governance import build_point_in_time_provenance, trial_fingerprint, trial_manifest\n\nSTUDY = "swing-liquidity-validation-v1"\n\nNOTIONALS_USDC''',
+          )
+          replace_one(
+              "research/swing_liquidity_shadow.py",
+              '''    captured_at = datetime.now(timezone.utc).isoformat()\n    scan = _get_json(\n        f"{base_url.rstrip('/')}/v1/scan?direction=both&limit=10&min_score=0",\n        headers={"Accept": "application/json", "X-Radar-Key": api_key, "User-Agent": "swing-liquidity-shadow/1"},\n    )\n    candidates = dedupe_candidates(scan)''',
+              '''    captured_at = datetime.now(timezone.utc).isoformat()\n    collection_started_at = captured_at\n    scan = _get_json(\n        f"{base_url.rstrip('/')}/v1/scan?direction=both&limit=10&min_score=0",\n        headers={"Accept": "application/json", "X-Radar-Key": api_key, "User-Agent": "swing-liquidity-shadow/1"},\n    )\n    scan_received_at = datetime.now(timezone.utc).isoformat()\n    candidates = dedupe_candidates(scan)''',
+          )
+          replace_one(
+              "research/swing_liquidity_shadow.py",
+              '''        except Exception as exc:  # fail-open research coverage; never alter live state\n            book_errors[symbol] = f"{type(exc).__name__}: {exc}"\n\n    for candidate in candidates:''',
+              '''        except Exception as exc:  # fail-open research coverage; never alter live state\n            book_errors[symbol] = f"{type(exc).__name__}: {exc}"\n\n    orderbooks_completed_at = datetime.now(timezone.utc).isoformat()\n    for candidate in candidates:''',
+          )
+          replace_one(
+              "research/swing_liquidity_shadow.py",
+              '''            for notional in NOTIONALS_USDC\n        ]\n\n    return {\n        "study": "swing-liquidity-validation-v1",''',
+              '''            for notional in NOTIONALS_USDC\n        ]\n\n    feature_computed_at = datetime.now(timezone.utc).isoformat()\n    feature_available_at = feature_computed_at\n    point_in_time = build_point_in_time_provenance(\n        collection_started_at=collection_started_at,\n        scan_received_at=scan_received_at,\n        orderbooks_completed_at=orderbooks_completed_at,\n        feature_computed_at=feature_computed_at,\n        feature_available_at=feature_available_at,\n        scan_source_data_as_of=scan.get("data_as_of"),\n    )\n    registered_trial = trial_manifest(STUDY)\n\n    return {\n        "study": STUDY,''',
+          )
+          replace_one(
+              "research/swing_liquidity_shadow.py",
+              '''        "captured_at": captured_at,\n        "scan_data_as_of": scan.get("data_as_of"),''',
+              '''        "captured_at": captured_at,\n        "feature_available_at": feature_available_at,\n        "point_in_time": point_in_time,\n        "trial_id": registered_trial["trial_id"],\n        "trial_manifest": registered_trial,\n        "trial_fingerprint": trial_fingerprint(STUDY),\n        "scan_data_as_of": scan.get("data_as_of"),''',
+          )
+
+          replace_one(
+              "research/swing_liquidity_event_builder.py",
+              '''        captured = _ts(row["captured_at"])\n        if pretrigger_snapshot_age_seconds(captured, trigger_close) is None:\n            continue\n        matches.append((captured, row))''',
+              '''        available = _ts(row.get("available_at") or row.get("feature_available_at") or row["captured_at"])\n        if pretrigger_snapshot_age_seconds(available, trigger_close) is None:\n            continue\n        matches.append((available, row))''',
+          )
+          replace_one(
+              "research/swing_liquidity_event_builder.py",
+              '''        metadata = safe_event_metadata(\n            candidate,\n            captured_at=snapshot["captured_at"],\n            trigger_bar_start_at=start_at,\n            trigger_close_at=close_at,\n        )''',
+              '''        available_at = snapshot.get("available_at") or snapshot.get("feature_available_at") or snapshot["captured_at"]\n        metadata = safe_event_metadata(\n            candidate,\n            captured_at=available_at,\n            trigger_bar_start_at=start_at,\n            trigger_close_at=close_at,\n        )\n        metadata["pretrigger_available_at"] = metadata["pretrigger_captured_at"]\n        metadata["pretrigger_captured_at"] = _ts(snapshot["captured_at"]).isoformat()\n        metadata["point_in_time_verified"] = bool(snapshot.get("point_in_time_verified", False))\n        metadata["provenance_version"] = snapshot.get("provenance_version") or "legacy-captured-at-v0"\n        metadata["trial_id"] = snapshot.get("trial_id")\n        metadata["trial_fingerprint"] = snapshot.get("trial_fingerprint")''',
+          )
+
+          replace_one(
+              "app/research_swing_liquidity_api.py",
+              'from research.swing_liquidity_event_builder import build_trigger_events\n',
+              'from research.swing_liquidity_event_builder import build_trigger_events\nfrom research.research_governance import snapshot_governance_metadata\n',
+          )
+          replace_one(
+              "app/research_swing_liquidity_api.py",
+              '''    inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n);\n\nCREATE TABLE IF NOT EXISTS swing_liquidity_forward_observations''',
+              '''    inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n);\nALTER TABLE swing_liquidity_forward_captures ADD COLUMN IF NOT EXISTS feature_available_at TIMESTAMPTZ;\nALTER TABLE swing_liquidity_forward_captures ADD COLUMN IF NOT EXISTS provenance_version TEXT;\nALTER TABLE swing_liquidity_forward_captures ADD COLUMN IF NOT EXISTS trial_id TEXT;\nALTER TABLE swing_liquidity_forward_captures ADD COLUMN IF NOT EXISTS trial_fingerprint TEXT;\n\nCREATE TABLE IF NOT EXISTS swing_liquidity_forward_observations''',
+          )
+          replace_one(
+              "app/research_swing_liquidity_api.py",
+              '''async def persist_forward_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:\n    captured_at, scan_data_as_of, candidates = validate_forward_snapshot(snapshot)\n    orderbooks = snapshot.get("orderbooks") or {}''',
+              '''async def persist_forward_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:\n    captured_at, scan_data_as_of, candidates = validate_forward_snapshot(snapshot)\n    try:\n        governance = snapshot_governance_metadata(snapshot)\n    except ValueError as exc:\n        raise HTTPException(status_code=400, detail=f"invalid research governance metadata: {exc}") from exc\n    orderbooks = snapshot.get("orderbooks") or {}''',
+          )
+          replace_one(
+              "app/research_swing_liquidity_api.py",
+              '''                INSERT INTO swing_liquidity_forward_captures (\n                    captured_at, study, source_commit_sha, scan_data_as_of,\n                    candidate_count, orderbook_count, orderbook_error_count\n                ) VALUES ($1,$2,$3,$4,$5,$6,$7)''',
+              '''                INSERT INTO swing_liquidity_forward_captures (\n                    captured_at, study, source_commit_sha, scan_data_as_of,\n                    candidate_count, orderbook_count, orderbook_error_count,\n                    feature_available_at, provenance_version, trial_id, trial_fingerprint\n                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)''',
+          )
+          replace_one(
+              "app/research_swing_liquidity_api.py",
+              '''                len(candidates),\n                len(orderbooks),\n                len(errors),\n            )''',
+              '''                len(candidates),\n                len(orderbooks),\n                len(errors),\n                governance["feature_available_at"] if governance["point_in_time_verified"] else None,\n                governance["provenance_version"],\n                governance["trial_id"],\n                governance["trial_fingerprint"],\n            )''',
+          )
+          replace_one(
+              "app/research_swing_liquidity_api.py",
+              '''            SELECT captured_at, symbol, side, candidate\n            FROM swing_liquidity_forward_observations\n            ORDER BY captured_at ASC, symbol ASC, side ASC''',
+              '''            SELECT o.captured_at, o.symbol, o.side, o.candidate,\n                   COALESCE(c.feature_available_at, o.captured_at) AS available_at,\n                   c.feature_available_at, c.provenance_version, c.trial_id, c.trial_fingerprint\n            FROM swing_liquidity_forward_observations AS o\n            JOIN swing_liquidity_forward_captures AS c ON c.captured_at = o.captured_at\n            ORDER BY o.captured_at ASC, o.symbol ASC, o.side ASC''',
+          )
+          replace_one(
+              "app/research_swing_liquidity_api.py",
+              '''                "captured_at": row["captured_at"].isoformat(),\n                "symbol": str(row["symbol"]).upper(),''',
+              '''                "captured_at": row["captured_at"].isoformat(),\n                "available_at": row["available_at"].isoformat(),\n                "feature_available_at": row["feature_available_at"].isoformat() if row["feature_available_at"] else None,\n                "point_in_time_verified": row["provenance_version"] == "pit-v1" and row["feature_available_at"] is not None,\n                "provenance_version": row["provenance_version"] or "legacy-captured-at-v0",\n                "trial_id": row["trial_id"],\n                "trial_fingerprint": row["trial_fingerprint"],\n                "symbol": str(row["symbol"]).upper(),''',
+          )
+          replace_one(
+              "app/research_swing_liquidity_api.py",
+              '''                   COALESCE(SUM(orderbook_error_count), 0)::int AS orderbook_errors\n            FROM swing_liquidity_forward_captures''',
+              '''                   COALESCE(SUM(orderbook_error_count), 0)::int AS orderbook_errors,\n                   COUNT(*) FILTER (WHERE provenance_version = 'pit-v1' AND feature_available_at IS NOT NULL)::int AS point_in_time_verified_captures\n            FROM swing_liquidity_forward_captures''',
+          )
+          replace_one(
+              "app/research_swing_liquidity_api.py",
+              '''        "orderbook_errors": int(capture["orderbook_errors"] or 0),\n        "turnover_tiers":''',
+              '''        "orderbook_errors": int(capture["orderbook_errors"] or 0),\n        "point_in_time_verified_captures": int(capture["point_in_time_verified_captures"] or 0),\n        "legacy_or_unverified_captures": int(capture["capture_count"] or 0) - int(capture["point_in_time_verified_captures"] or 0),\n        "turnover_tiers":''',
+          )
+          replace_one(
+              "app/research_swing_liquidity_api.py",
+              '''        "matured_event_count": len(matured),\n        "events": events,''',
+              '''        "matured_event_count": len(matured),\n        "point_in_time_verified_event_count": sum(1 for event in events if event.get("point_in_time_verified") is True),\n        "legacy_or_unverified_event_count": sum(1 for event in events if event.get("point_in_time_verified") is not True),\n        "events": events,''',
+          )
+          PY
+          python -m pytest -q test_research_governance.py
+          python -m pytest -q
+          python -m compileall -q app research
+          find . -type d -name __pycache__ -prune -exec rm -rf {} +
+          find . -name '*.pyc' -delete
+          cd ../..
+          rm .github/workflows/temp-research-pit-governance-patch.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add bybit_eu_swing_radar/backend/research/research_governance.py \
+                  bybit_eu_swing_radar/backend/research/swing_liquidity_shadow.py \
+                  bybit_eu_swing_radar/backend/research/swing_liquidity_event_builder.py \
+                  bybit_eu_swing_radar/backend/app/research_swing_liquidity_api.py \
+                  bybit_eu_swing_radar/backend/test_research_governance.py
+          git rm --cached .github/workflows/temp-research-pit-governance-patch.yml
+          git commit -m "Add point-in-time research governance v1"
+          git push origin HEAD:${{ github.head_ref }}
