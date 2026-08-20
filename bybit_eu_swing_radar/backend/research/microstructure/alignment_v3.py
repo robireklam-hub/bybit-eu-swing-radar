@@ -12,10 +12,22 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 
-import asyncpg
-
 from research.microstructure import alignment as v1
 from research.microstructure import alignment_v2 as v2
+
+
+class _AsyncpgProxy:
+    """Load the DB driver only when the DB-backed loader actually needs it."""
+
+    def __getattr__(self, name: str) -> Any:
+        import asyncpg as module
+
+        return getattr(module, name)
+
+
+# Keep the tested monkeypatch surface while avoiding an eager DB dependency for
+# label-blind controlled-pullback/calibration contract imports.
+asyncpg = _AsyncpgProxy()
 
 SPEC_VERSION = "microstructure-forward-alignment-v3"
 PARENT_SPEC_VERSION = v2.SPEC_VERSION

@@ -11,7 +11,19 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any, Iterable, Mapping
 
-import asyncpg
+
+class _AsyncpgProxy:
+    """Load the DB driver only when the DB-backed loader actually needs it."""
+
+    def __getattr__(self, name: str) -> Any:
+        import asyncpg as module
+
+        return getattr(module, name)
+
+
+# Preserve the historical monkeypatch/public module surface without making
+# label-blind feature-contract imports depend on the production DB driver.
+asyncpg = _AsyncpgProxy()
 
 SPEC_VERSION = "microstructure-forward-alignment-v1"
 PREREGISTERED_STRATEGY_VERSION = "0.7.3"
