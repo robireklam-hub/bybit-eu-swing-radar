@@ -45,6 +45,18 @@ def _parse_utc(value: Any) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw in (None, ""):
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"invalid boolean environment variable {name}")
+
+
 def healthy(payload: dict[str, Any]) -> tuple[bool, str]:
     if payload.get("research_only") is not True:
         return False, "research_only_not_true"
@@ -78,14 +90,25 @@ def prospective_runtime_healthy(
     payload: dict[str, Any],
     expected_sha: str,
     *,
+    require_exact_recorder_sha: bool = True,
     now: datetime | None = None,
 ) -> tuple[bool, str]:
-    """Require the external recorder and controlled-pullback v2 runtime on exact main."""
+    """Validate the external recorder and controlled-pullback v2 runtime.
+
+    Exact recorder-deployment verifiers keep SHA equality enabled by default.
+    The scheduled readiness watch may explicitly disable only that equality check
+    because the isolated recorder is intentionally not redeployed for unrelated
+    main commits. Recorder identity, health, freshness and research guards remain
+    fail-closed in both modes.
+    """
     if payload.get("process_role") != "standalone":
         return False, "recorder_not_standalone"
     if payload.get("external_service_healthy") is not True:
         return False, "external_service_not_healthy"
-    if payload.get("source_commit_sha") != expected_sha:
+    recorder_sha = payload.get("source_commit_sha")
+    if not isinstance(recorder_sha, str) or not recorder_sha.strip():
+        return False, "external_recorder_sha_missing"
+    if require_exact_recorder_sha and recorder_sha != expected_sha:
         return False, "external_recorder_sha_mismatch"
     if float(payload.get("heartbeat_age_seconds") or 9999) > 30.0:
         return False, "external_heartbeat_stale"
@@ -161,9 +184,16 @@ def readiness_healthy(payload: dict[str, Any], expected_symbols: list[str]) -> t
     return True, "ok"
 
 
-def run_smoke(base_url: str, api_key: str, expected_sha: str, *, timeout: float = 15.0,
-              fetch: Callable[[str, str, float], dict[str, Any]] = fetch_json,
-              sleep: Callable[[float], None] = time.sleep) -> int:
+def run_smoke(
+    base_url: str,
+    api_key: str,
+    expected_sha: str,
+    *,
+    timeout: float = 15.0,
+    require_exact_recorder_sha: bool = True,
+    fetch: Callable[[str, str, float], dict[str, Any]] = fetch_json,
+    sleep: Callable[[float], None] = time.sleep,
+) -> int:
     deployed = False
     last_reason = "not_checked"
     for attempt in range(MAX_POLLS):
@@ -210,7 +240,11 @@ def run_smoke(base_url: str, api_key: str, expected_sha: str, *, timeout: float 
             return 1
         else:
             recorder_ok, recorder_reason = healthy(status)
-            prospective_ok, prospective_reason = prospective_runtime_healthy(status, expected_sha)
+            prospective_ok, prospective_reason = prospective_runtime_healthy(
+                status,
+                expected_sha,
+                require_exact_recorder_sha=require_exact_recorder_sha,
+            )
             last_reason = recorder_reason if not recorder_ok else prospective_reason
             safe = {
                 "enabled": status.get("enabled"),
@@ -268,7 +302,8 @@ def run_smoke(base_url: str, api_key: str, expected_sha: str, *, timeout: float 
         print(f"FAIL phase=readiness reason={readiness_reason}")
         return 1
 
-    print("MICROSTRUCTURE FORWARD RECORDER, PROSPECTIVE RUNTIME, AND READINESS VERIFIED.")
+    mode = "EXACT_RECORDER_SHA" if require_exact_recorder_sha else "HEALTH_ONLY_RECORDER_SHA"
+    print(f"MICROSTRUCTURE FORWARD RECORDER, PROSPECTIVE RUNTIME, AND READINESS VERIFIED. mode={mode}")
     return 0
 
 
@@ -279,7 +314,17 @@ def main() -> int:
     if not base_url or not api_key or not expected_sha:
         print("FAIL required microstructure smoke configuration is missing")
         return 1
-    return run_smoke(base_url, api_key, expected_sha)
+    try:
+        require_exact_recorder_sha = _env_bool("MICROSTRUCTURE_REQUIRE_EXACT_RECORDER_SHA", True)
+    except ValueError:
+        print("FAIL invalid MICROSTRUCTURE_REQUIRE_EXACT_RECORDER_SHA")
+        return 1
+    return run_smoke(
+        base_url,
+        api_key,
+        expected_sha,
+        require_exact_recorder_sha=require_exact_recorder_sha,
+    )
 
 
 if __name__ == "__main__":
