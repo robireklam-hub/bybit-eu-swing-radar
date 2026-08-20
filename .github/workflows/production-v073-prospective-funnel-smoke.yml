@@ -59,15 +59,22 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Preflight existing exact-main prospective capture
+        id: preflight
+        continue-on-error: true
+        working-directory: bybit_eu_swing_radar/backend
+        run: python -u scripts/preflight_v073_prospective_funnel.py
+
       - name: Provision exact-main standalone prospective worker
         id: provision
+        if: steps.preflight.outcome != 'success'
         continue-on-error: true
         working-directory: bybit_eu_swing_radar/backend
         run: python -u scripts/provision_prospective_funnel_worker.py
 
       - name: Verify standalone prospective funnel production capture
         id: funnel-smoke
-        if: steps.provision.outcome == 'success'
+        if: steps.preflight.outcome != 'success' && steps.provision.outcome == 'success'
         continue-on-error: true
         working-directory: bybit_eu_swing_radar/backend
         run: python -u scripts/production_v073_prospective_funnel_smoke.py
@@ -76,11 +83,14 @@ jobs:
         if: always()
         uses: actions/github-script@v7
         env:
+          PREFLIGHT_OUTCOME: ${{ steps.preflight.outcome }}
           PROVISION_OUTCOME: ${{ steps.provision.outcome }}
           SMOKE_OUTCOME: ${{ steps.funnel-smoke.outcome }}
         with:
           script: |
-            const ok = process.env.PROVISION_OUTCOME === 'success' && process.env.SMOKE_OUTCOME === 'success';
+            const preflightOk = process.env.PREFLIGHT_OUTCOME === 'success';
+            const fallbackOk = process.env.PROVISION_OUTCOME === 'success' && process.env.SMOKE_OUTCOME === 'success';
+            const ok = preflightOk || fallbackOk;
             await github.rest.repos.createCommitStatus({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -88,11 +98,13 @@ jobs:
               state: ok ? 'success' : 'failure',
               context: 'production/v073-prospective-funnel',
               description: ok
-                ? 'Standalone prospective funnel production verified'
+                ? (preflightOk
+                  ? 'Existing exact-main prospective capture verified'
+                  : 'Standalone prospective funnel production verified')
                 : 'Standalone prospective funnel verification failed',
               target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
             })
 
-      - name: Fail workflow when provisioning or smoke failed
-        if: steps.provision.outcome != 'success' || steps.funnel-smoke.outcome != 'success'
+      - name: Fail workflow when preflight and fallback verification failed
+        if: steps.preflight.outcome != 'success' && (steps.provision.outcome != 'success' || steps.funnel-smoke.outcome != 'success')
         run: exit 1
