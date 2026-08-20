@@ -19,6 +19,7 @@ CANDIDATE_SECTIONS = (
     "watch_only_longs",
     "watch_only_shorts",
 )
+NO_MARKET_REASON = "no matching coinalyze future market"
 
 
 def fetch_json(url: str, api_key: str, timeout: float) -> dict[str, Any]:
@@ -56,6 +57,34 @@ def candidate_symbols(top: dict[str, Any]) -> list[str]:
                 result.append(symbol)
                 seen.add(symbol)
     return result
+
+
+def candidate_rows(top: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    rows: dict[str, dict[str, Any]] = {}
+    for section in CANDIDATE_SECTIONS:
+        for row in top.get(section, []):
+            if isinstance(row, dict) and isinstance(row.get("symbol"), str):
+                rows[row["symbol"]] = row
+    return rows
+
+
+def market_support_partition(top: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Classify compact candidates using the explicit no-market reason.
+
+    UNAVAILABLE for any other reason is still treated as a supported target with
+    degraded/missing endpoint data. This keeps provider-market support separate
+    from endpoint payload completeness without changing strategy semantics.
+    """
+    supported: list[str] = []
+    unsupported: list[str] = []
+    for symbol, row in candidate_rows(top).items():
+        status = row.get("derivatives_status")
+        reason = str(row.get("derivatives_status_reason") or "").strip().lower()
+        if status == "UNAVAILABLE" and NO_MARKET_REASON in reason:
+            unsupported.append(symbol)
+        else:
+            supported.append(symbol)
+    return supported, unsupported
 
 
 def evaluate(top: dict[str, Any], status: dict[str, Any], expected_sha: str) -> list[str]:
@@ -99,17 +128,30 @@ def evaluate(top: dict[str, Any], status: dict[str, Any], expected_sha: str) -> 
     if set(complete) & set(partial):
         failures.append("priority symbol appears in both complete and partial lists")
 
-    candidate_statuses: dict[str, str] = {}
-    for section in CANDIDATE_SECTIONS:
-        for row in top.get(section, []):
-            if isinstance(row, dict) and isinstance(row.get("symbol"), str):
-                candidate_statuses[row["symbol"]] = str(row.get("derivatives_status"))
+    supported, unsupported = market_support_partition(top)
+    if set(supported) | set(unsupported) != set(priority):
+        failures.append("supported/unsupported market partition does not cover priority set")
+    if set(supported) & set(unsupported):
+        failures.append("priority symbol appears in both supported and unsupported market sets")
+    if not set(supported).issubset(set(targeted)):
+        failures.append(
+            f"Coinalyze-supported priority candidate was not targeted: supported={supported} targeted={targeted}"
+        )
+
+    rows = candidate_rows(top)
+    candidate_statuses = {
+        symbol: str(row.get("derivatives_status"))
+        for symbol, row in rows.items()
+    }
     if {symbol for symbol, value in candidate_statuses.items() if value == "GOOD"} != set(complete):
         failures.append("GOOD candidate set does not equal complete Coinalyze priority set")
     if {symbol for symbol, value in candidate_statuses.items() if value == "PARTIAL"} != set(partial):
         failures.append("PARTIAL candidate set does not equal partial Coinalyze priority set")
     if {symbol for symbol, value in candidate_statuses.items() if value == "UNAVAILABLE"} != set(missing):
         failures.append("UNAVAILABLE candidate set does not equal missing Coinalyze priority set")
+    for symbol in unsupported:
+        if candidate_statuses.get(symbol) != "UNAVAILABLE":
+            failures.append(f"{symbol}: unsupported Coinalyze market is not UNAVAILABLE")
 
     sources = status.get("sources")
     source = next(
@@ -121,17 +163,15 @@ def evaluate(top: dict[str, Any], status: dict[str, Any], expected_sha: str) -> 
     elif source.get("status") == "ok" and (partial or missing):
         failures.append("Coinalyze source health is ok while compact candidates are incomplete")
 
-    for section in CANDIDATE_SECTIONS:
-        for row in top.get(section, []):
-            symbol = row.get("symbol")
-            derivatives_status = row.get("derivatives_status")
-            reason = row.get("derivatives_status_reason")
-            if derivatives_status not in ALLOWED_STATUSES:
-                failures.append(f"{symbol}: invalid derivatives_status={derivatives_status!r}")
-            if not isinstance(reason, str) or not reason.strip():
-                failures.append(f"{symbol}: missing derivatives_status_reason")
-            if row.get("derivatives_context_only") is not True:
-                failures.append(f"{symbol}: derivatives_context_only is not true")
+    for symbol, row in rows.items():
+        derivatives_status = row.get("derivatives_status")
+        reason = row.get("derivatives_status_reason")
+        if derivatives_status not in ALLOWED_STATUSES:
+            failures.append(f"{symbol}: invalid derivatives_status={derivatives_status!r}")
+        if not isinstance(reason, str) or not reason.strip():
+            failures.append(f"{symbol}: missing derivatives_status_reason")
+        if row.get("derivatives_context_only") is not True:
+            failures.append(f"{symbol}: derivatives_context_only is not true")
 
     return failures
 
@@ -172,6 +212,7 @@ def run_smoke(base_url: str, api_key: str, expected_sha: str, *, timeout: float 
             return 1
         if not last_failures:
             worker = status["worker"]
+            supported, unsupported = market_support_partition(top)
             safe = {
                 "source_commit_sha": worker.get("source_commit_sha"),
                 "priority_symbols": worker.get("coinalyze_priority_symbols"),
@@ -180,6 +221,11 @@ def run_smoke(base_url: str, api_key: str, expected_sha: str, *, timeout: float 
                 "priority_complete_symbols": worker.get("coinalyze_priority_complete_symbols"),
                 "priority_partial_symbols": worker.get("coinalyze_priority_partial_symbols"),
                 "priority_missing_symbols": worker.get("coinalyze_priority_missing_symbols"),
+                "priority_supported_symbols": supported,
+                "priority_unsupported_symbols": unsupported,
+                "supported_priority_targeted": set(supported).issubset(
+                    set(worker.get("coinalyze_priority_targeted_symbols") or [])
+                ),
                 "compact_symbols": candidate_symbols(top),
                 "candidate_statuses": {
                     row["symbol"]: {
