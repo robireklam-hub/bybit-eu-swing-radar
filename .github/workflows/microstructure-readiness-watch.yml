@@ -20,6 +20,10 @@ jobs:
       PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
       PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
       EXPECTED_SHA: ${{ github.sha }}
+      # The standalone recorder is intentionally not redeployed for unrelated main
+      # commits. Scheduled monitoring still requires exact API/main plus recorder
+      # identity, health, freshness and label-blind prospective runtime guards.
+      MICROSTRUCTURE_REQUIRE_EXACT_RECORDER_SHA: "false"
 
     steps:
       - name: Check out current main
