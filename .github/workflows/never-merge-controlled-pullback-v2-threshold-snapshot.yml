@@ -1,0 +1,85 @@
+name: NEVER MERGE controlled-pullback v2 threshold snapshot
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/never-merge-controlled-pullback-v2-threshold-snapshot.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 72c19b75d50b60f5259722f94bd08aa639c2b16d
+    steps:
+      - name: Check out exact production main
+        uses: actions/checkout@v7
+        with:
+          ref: 72c19b75d50b60f5259722f94bd08aa639c2b16d
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Derive one outcome-blind threshold snapshot
+        working-directory: bybit_eu_swing_radar/backend
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os
+          from datetime import datetime, timedelta, timezone
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+
+          from research.microstructure.controlled_pullback_calibration_v2 import derive_thresholds
+          from research.microstructure.controlled_pullback_features_v2 import derive_calibration_feature_rows
+          from research.microstructure.controlled_pullback_v2 import SYMBOLS
+
+          base = os.environ["PRODUCTION_RADAR_API_BASE_URL"].rstrip("/")
+          key = os.environ["PRODUCTION_RADAR_API_KEY"]
+          expected = os.environ["EXPECTED_SHA"]
+
+          def get(path):
+              req = Request(base + path, headers={"Accept":"application/json","X-Radar-Key":key,"User-Agent":"controlled-pullback-v2-threshold-snapshot/1"})
+              with urlopen(req, timeout=20) as r:
+                  return json.load(r)
+
+          version = get("/version")
+          if version.get("commit_sha") != expected:
+              raise SystemExit(f"expected production SHA {expected}, got {version.get('commit_sha')}")
+
+          now = datetime.now(timezone.utc)
+          cutoff = now.replace(second=0, microsecond=0)
+          forward_start = cutoff + timedelta(minutes=30)
+          feature_rows = []
+          raw_counts = {}
+          eligible_counts = {}
+          for symbol in SYMBOLS:
+              query = urlencode({"symbol":symbol,"lookback_minutes":360,"limit":1000})
+              payload = get("/v1/research/microstructure/buckets?" + query)
+              if payload.get("research_only") is not True or payload.get("label_blind") is not True or payload.get("outcome_fields_read") is not False:
+                  raise SystemExit(f"label-blind contract failed for {symbol}")
+              rows = payload.get("rows") or []
+              raw_counts[symbol] = len(rows)
+              eligible = derive_calibration_feature_rows(rows, allowed_symbols=(symbol,))
+              eligible = [r for r in eligible if datetime.fromisoformat(str(r["bucket_start"]).replace("Z", "+00:00")) < cutoff]
+              eligible_counts[symbol] = len(eligible)
+              feature_rows.extend(eligible)
+
+          snapshot = derive_thresholds(feature_rows, calibration_until_utc=cutoff, forward_start_utc=forward_start)
+          envelope = {
+              "source_sha": expected,
+              "generated_at_utc": now.isoformat(),
+              "raw_rows_per_symbol": raw_counts,
+              "eligible_rows_per_symbol": eligible_counts,
+              "snapshot": snapshot,
+          }
+          print("CONTROLLED_PULLBACK_V2_THRESHOLD_SNAPSHOT=" + json.dumps(envelope, sort_keys=True))
+          PY
