@@ -70,11 +70,15 @@ def test_agent_keeps_swing_trigger_and_adds_separate_day_v075_rules():
     assert "category=STRICT" in text
     assert "state=TRIGGERED" in text
     assert "decision=TRADE" in text
+    assert "közvetlenül követő lezárt 5m gyertyán is aktív marad" in text
+    assert "következő 5m gyertya puszta lezárása nem lehet hard-veto" in text
 
 
-def test_backend_spec_keeps_swing_semantics_and_has_day_v075_annex():
+def test_backend_spec_keeps_historical_v074_and_adds_v075_persistence_annex():
     text = (ROOT / "BACKEND_SPEC_HU.md").read_text(encoding="utf-8")
     assert "A jelenlegi swing worker authoritative triggerje 4H lezárt gyertya" in text
-    assert "## 14. Day-trade v0.7.5 kiegészítés" in text
+    assert "## 14. Day-trade v0.7.4 kiegészítés" in text
+    assert "## 15. Day-trade v0.7.5 breakout-aktiváció" in text
     assert "A 4H `timeframe_conflict` diagnosztikai/context mező marad, de nem hard-veto" in text
     assert "Journal és historical replay `strategy_version=0.7.5`" in text
+    assert "közvetlenül követő egy lezárt 5m gyertyán aktív marad" in text
