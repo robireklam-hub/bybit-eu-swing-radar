@@ -1,0 +1,42 @@
+name: NEVER MERGE exact main verifier c723
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/exact-main-verifier-c723-never-merge.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  exact-production-verifier:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: c7231347b71bb13c501eea69d03baa4e745270e6
+
+    steps:
+      - name: Check out exact main
+        uses: actions/checkout@v7
+        with:
+          ref: c7231347b71bb13c501eea69d03baa4e745270e6
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Verify actual compact swing Coinalyze coverage
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_coinalyze_smoke.py
+
+      - name: Verify label-blind swing liquidity event construction
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_event_smoke.py
+
+      - name: Verify frozen liquidity maturity contract and readiness
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_maturity_status.py
