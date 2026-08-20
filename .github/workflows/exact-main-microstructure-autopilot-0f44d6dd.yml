@@ -1,0 +1,45 @@
+name: NEVER MERGE exact-main microstructure autopilot 0f44d6dd
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/exact-main-microstructure-autopilot-0f44d6dd.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 0f44d6ddfb6b8585a76d16d8cee0b86791f87ac5
+    steps:
+      - name: Check out exact current main
+        uses: actions/checkout@v7
+        with:
+          ref: 0f44d6ddfb6b8585a76d16d8cee0b86791f87ac5
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Verify recorder, prospective runtime and readiness
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_smoke.py
+
+      - name: Verify preregistered alignment v1 sample status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_alignment_status.py
+
+      - name: Verify preregistered effect v1 status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_effect_status.py
+
+      - name: Verify current v0.7.5 alignment v3 sample status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_alignment_status_v3.py
