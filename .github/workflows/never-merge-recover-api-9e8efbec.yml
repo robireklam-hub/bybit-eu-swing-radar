@@ -1,6 +1,9 @@
 name: NEVER MERGE recover production API 9e8efbec
 
 on:
+  push:
+    branches:
+      - "ops/recover-api-9e8efbec"
   pull_request:
     paths:
       - ".github/workflows/never-merge-recover-api-9e8efbec.yml"
