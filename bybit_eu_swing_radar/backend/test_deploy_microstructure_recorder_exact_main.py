@@ -55,10 +55,67 @@ def test_wait_for_success_fails_on_terminal_state(monkeypatch):
         deployer.wait_for_success("deployment-123")
 
 
+def test_build_boundary_repairs_only_fixed_recorder_build_fields(monkeypatch):
+    states = iter(
+        [
+            {"id": "instance", "rootDirectory": None, "startCommand": deployer.RECORDER_START_COMMAND, "builder": "RAILPACK"},
+            {
+                "id": "instance",
+                "rootDirectory": deployer.RECORDER_ROOT_DIRECTORY,
+                "startCommand": deployer.RECORDER_START_COMMAND,
+                "builder": "RAILPACK",
+            },
+        ]
+    )
+    calls = []
+
+    monkeypatch.setattr(deployer, "recorder_service_instance", lambda *_: next(states))
+
+    def gql(query, variables):
+        calls.append((query, variables))
+        return {"serviceInstanceUpdate": True}
+
+    monkeypatch.setattr(deployer, "_gql", gql)
+    deployer.ensure_recorder_build_boundary("env", "service")
+
+    assert len(calls) == 1
+    query, variables = calls[0]
+    assert "serviceInstanceUpdate" in query
+    assert variables == {
+        "serviceId": "service",
+        "environmentId": "env",
+        "input": {
+            "rootDirectory": "/bybit_eu_swing_radar/backend",
+            "startCommand": "python -m research.microstructure.standalone",
+            "builder": "RAILPACK",
+        },
+    }
+
+
+def test_build_boundary_is_noop_when_already_correct(monkeypatch):
+    state = {
+        "id": "instance",
+        "rootDirectory": deployer.RECORDER_ROOT_DIRECTORY,
+        "startCommand": deployer.RECORDER_START_COMMAND,
+        "builder": "RAILPACK",
+    }
+    monkeypatch.setattr(deployer, "recorder_service_instance", lambda *_: dict(state))
+    monkeypatch.setattr(deployer, "_gql", lambda *_: pytest.fail("update must not run"))
+    deployer.ensure_recorder_build_boundary("env", "service")
+
+
+def test_build_boundary_fails_closed_if_update_does_not_stick(monkeypatch):
+    state = {"id": "instance", "rootDirectory": None, "startCommand": deployer.RECORDER_START_COMMAND, "builder": "RAILPACK"}
+    monkeypatch.setattr(deployer, "recorder_service_instance", lambda *_: dict(state))
+    monkeypatch.setattr(deployer, "_gql", lambda *_: {"serviceInstanceUpdate": True})
+    with pytest.raises(RuntimeError, match="build boundary mismatch"):
+        deployer.ensure_recorder_build_boundary("env", "service")
+
+
 def test_deployer_contains_no_variable_or_owner_mutation():
     source = open("scripts/deploy_microstructure_recorder_exact_main.py", encoding="utf-8").read()
     assert "variableCollectionUpsert" not in source
-    assert "serviceInstanceUpdate" not in source
     assert "MICROSTRUCTURE_RECORDER_OWNER" not in source
     assert "MICROSTRUCTURE_RECORDER_ENABLED" not in source
     assert "serviceInstanceDeployV2" in source
+    assert "serviceInstanceUpdate" in source
