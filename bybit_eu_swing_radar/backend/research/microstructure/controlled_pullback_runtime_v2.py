@@ -1,14 +1,19 @@
 """Research-only runtime cycle for controlled-pullback v2 prospective collection.
 
-This module deliberately accepts an existing asyncpg connection so callers can
-serialize the cycle with recorder writes. It never touches live strategy state,
-never reads outcomes, and persists immutable first-seen research records only.
+The detector/store path is isolated from live strategy state. A periodic runner
+uses its own PostgreSQL connection so it cannot issue concurrent operations on
+the recorder connection. Failures are surfaced through operational status and
+do not stop the primary microstructure recorder.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, MutableMapping
+
+import asyncpg
 
 from research.microstructure.controlled_pullback_activation_v2 import activation_snapshot
 from research.microstructure.controlled_pullback_detector_v2 import detect_research_events
@@ -18,8 +23,10 @@ from research.microstructure.controlled_pullback_store_v2 import (
     install_schema,
 )
 
+logger = logging.getLogger(__name__)
 RUNTIME_ID = "microstructure-controlled-pullback-runtime-v2"
 LOOKBACK_SECONDS = 15 * 60
+DEFAULT_INTERVAL_SECONDS = 30.0
 
 LOAD_BUCKETS_SQL = """
 SELECT
@@ -47,7 +54,8 @@ def runtime_contract() -> dict[str, Any]:
         "promotion_allowed": False,
         "live_strategy_mutation": False,
         "lookback_seconds": LOOKBACK_SECONDS,
-        "connection_policy": "CALLER_SERIALIZES_WITH_RECORDER_DB_WRITES",
+        "connection_policy": "DEDICATED_RESEARCH_DB_CONNECTION",
+        "default_interval_seconds": DEFAULT_INTERVAL_SECONDS,
     }
 
 
@@ -58,7 +66,7 @@ def _utc(value: datetime) -> datetime:
 
 
 async def run_prospective_cycle(connection: Any, *, now: datetime | None = None) -> dict[str, Any]:
-    """Detect and persist one label-blind prospective cycle on an existing DB connection."""
+    """Detect and persist one label-blind prospective cycle."""
     contract = runtime_contract()
     snapshot = activation_snapshot()
     current = _utc(now or datetime.now(timezone.utc))
@@ -112,3 +120,71 @@ async def run_prospective_cycle(connection: Any, *, now: datetime | None = None)
         "promotion_allowed": False,
         "live_strategy_mutation": False,
     }
+
+
+async def run_periodic_prospective_collection(
+    database_url: str,
+    stop: asyncio.Event,
+    status: MutableMapping[str, Any],
+    *,
+    interval_seconds: float = DEFAULT_INTERVAL_SECONDS,
+) -> None:
+    """Run prospective collection independently of the recorder's DB connection.
+
+    Research failures are recorded in ``status`` and retried. They are never
+    propagated into the primary recorder task.
+    """
+    if not database_url:
+        status.update({"status": "degraded", "last_error": "DATABASE_URL is not configured"})
+        return
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+
+    connection: Any | None = None
+    try:
+        while not stop.is_set():
+            try:
+                if connection is None or getattr(connection, "is_closed", lambda: False)():
+                    connection = await asyncpg.connect(database_url)
+                result = await run_prospective_cycle(connection)
+                status.clear()
+                status.update(
+                    {
+                        "status": "ok",
+                        "last_cycle_at": datetime.now(timezone.utc).isoformat(),
+                        **result,
+                    }
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                status.clear()
+                status.update(
+                    {
+                        "status": "degraded",
+                        "last_error_at": datetime.now(timezone.utc).isoformat(),
+                        "last_error": str(exc)[:1000],
+                        "runtime": runtime_contract(),
+                        "outcome_visible": False,
+                        "promotion_allowed": False,
+                        "live_strategy_mutation": False,
+                    }
+                )
+                logger.exception("controlled-pullback v2 prospective cycle failed")
+                if connection is not None:
+                    try:
+                        await connection.close()
+                    except Exception:
+                        pass
+                    connection = None
+
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
+            except asyncio.TimeoutError:
+                pass
+    finally:
+        if connection is not None:
+            try:
+                await connection.close()
+            except Exception:
+                logger.exception("controlled-pullback v2 DB cleanup failed")
