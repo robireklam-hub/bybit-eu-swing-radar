@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.request import Request, urlopen
 
+from research.swing_liquidity_event_contract import maturity_at
+
 
 def _parse_timestamp(value: Any, field: str) -> datetime:
     if not isinstance(value, str) or not value.strip():
@@ -20,8 +22,25 @@ def _parse_timestamp(value: Any, field: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _event_identity(event: dict[str, Any], index: int) -> tuple[str, str, datetime]:
+    symbol = str(event.get("symbol") or "").strip().upper()
+    side = str(event.get("side") or "").strip().lower()
+    if not symbol:
+        raise ValueError(f"event_{index}_symbol_missing")
+    if side not in {"long", "short"}:
+        raise ValueError(f"event_{index}_side_invalid")
+    trigger_close = _parse_timestamp(event.get("trigger_close_at"), f"event_{index}_trigger_close_at")
+    return symbol, side, trigger_close
+
+
 def summarize_maturity_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Derive label-blind maturity readiness without reading any trade outcome."""
+    """Derive label-blind maturity readiness without reading any trade outcome.
+
+    The maturity clock is recomputed from each immutable trigger close using the
+    preregistered 10-day event contract. The payload's ``matures_at`` value is
+    therefore evidence to verify, not an authoritative input. Event identities
+    must also be unique so duplicate forward events cannot inflate readiness.
+    """
     if payload.get("research_only") is not True:
         raise ValueError("research_only_not_true")
     if payload.get("label_blind") is not True:
@@ -42,14 +61,41 @@ def summarize_maturity_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
     matured = 0
     pending_times: list[datetime] = []
+    seen_event_ids: set[str] = set()
+    seen_trigger_identities: set[tuple[str, str, datetime]] = set()
     for index, event in enumerate(events):
         if not isinstance(event, dict):
             raise ValueError(f"event_{index}_not_object")
-        matures_at = _parse_timestamp(event.get("matures_at"), f"event_{index}_matures_at")
-        if matures_at <= checked_at:
+
+        event_id = str(event.get("event_id") or "").strip()
+        if not event_id:
+            raise ValueError(f"event_{index}_event_id_missing")
+        if event_id in seen_event_ids:
+            raise ValueError(f"duplicate_event_id:{event_id}")
+        seen_event_ids.add(event_id)
+
+        identity = _event_identity(event, index)
+        if identity in seen_trigger_identities:
+            symbol, side, trigger_close = identity
+            raise ValueError(
+                "duplicate_symbol_side_trigger_bar:"
+                f"{symbol}:{side}:{trigger_close.isoformat()}"
+            )
+        seen_trigger_identities.add(identity)
+
+        trigger_close = identity[2]
+        expected_maturity = maturity_at(trigger_close)
+        declared_maturity = _parse_timestamp(event.get("matures_at"), f"event_{index}_matures_at")
+        if declared_maturity != expected_maturity:
+            raise ValueError(
+                f"event_{index}_wrong_maturity_horizon:"
+                f"{declared_maturity.isoformat()}/{expected_maturity.isoformat()}"
+            )
+
+        if expected_maturity <= checked_at:
             matured += 1
         else:
-            pending_times.append(matures_at)
+            pending_times.append(expected_maturity)
 
     declared_matured = int(payload.get("matured_event_count", -1))
     if declared_matured != matured:
@@ -74,7 +120,9 @@ def summarize_maturity_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "development_target_matured_events": 60,
         "validation_target_matured_events": 40,
         "development_maturity_count_ready": matured >= 60,
-        "note": "Maturity timing is label-blind and does not authorize outcome access or live promotion.",
+        "maturity_contract_verified": True,
+        "event_identity_uniqueness_verified": True,
+        "note": "Maturity timing is recomputed from trigger_close_at under the frozen 10-day contract; no outcome access or live promotion is authorized.",
     }
 
 
