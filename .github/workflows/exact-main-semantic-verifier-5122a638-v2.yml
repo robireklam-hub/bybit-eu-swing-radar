@@ -1,0 +1,45 @@
+name: NEVER MERGE exact-main semantic verifier 5122a638 v2
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/exact-main-semantic-verifier-5122a638-v2.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 5122a63819ee39e96bcf9c08e1aa5317178fb244
+    steps:
+      - name: Check out exact production main
+        uses: actions/checkout@v7
+        with:
+          ref: 5122a63819ee39e96bcf9c08e1aa5317178fb244
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Verify swing candidate Coinalyze semantics
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_coinalyze_smoke.py
+
+      - name: Verify label-blind swing liquidity event construction
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_event_smoke.py
+
+      - name: Report label-blind swing liquidity maturity readiness
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_maturity_status.py
+
+      - name: Report controlled-pullback v2 calibration sample readiness
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_controlled_pullback_calibration_readiness_v2.py
