@@ -44,6 +44,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Report controlled-pullback calibration sample readiness
+      - name: Report controlled-pullback v1 calibration sample readiness
         working-directory: bybit_eu_swing_radar/backend
         run: python scripts/production_controlled_pullback_calibration_readiness.py
+
+      - name: Report controlled-pullback v2 calibration sample readiness
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_controlled_pullback_calibration_readiness_v2.py
