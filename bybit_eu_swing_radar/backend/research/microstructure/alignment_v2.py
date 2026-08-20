@@ -10,9 +10,19 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 
-import asyncpg
-
 from research.microstructure import alignment as v1
+
+
+class _AsyncpgProxy:
+    """Load the DB driver only when the DB-backed loader actually needs it."""
+
+    def __getattr__(self, name: str) -> Any:
+        import asyncpg as module
+
+        return getattr(module, name)
+
+
+asyncpg = _AsyncpgProxy()
 
 SPEC_VERSION = "microstructure-forward-alignment-v2"
 PARENT_SPEC_VERSION = v1.SPEC_VERSION
