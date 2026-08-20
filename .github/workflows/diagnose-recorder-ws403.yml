@@ -1,0 +1,26 @@
+name: NEVER MERGE diagnose recorder WS 403
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/diagnose-recorder-ws403.yml"
+      - "bybit_eu_swing_radar/backend/scripts/diagnose_recorder_ws403.py"
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Compare old and exact recorder deployments
+        working-directory: bybit_eu_swing_radar/backend
+        run: python -u scripts/diagnose_recorder_ws403.py
