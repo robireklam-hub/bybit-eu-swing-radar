@@ -1,10 +1,11 @@
 name: NEVER MERGE exact main verifier c723
 
 on:
-  pull_request:
-    branches: [main]
+  push:
+    branches: [research/exact-main-verifier-c723-never-merge]
     paths:
       - ".github/workflows/exact-main-verifier-c723-never-merge.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read
