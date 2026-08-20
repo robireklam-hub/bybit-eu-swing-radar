@@ -48,6 +48,6 @@ jobs:
         working-directory: bybit_eu_swing_radar/backend
         run: python scripts/production_controlled_pullback_calibration_readiness.py
 
-      - name: Report controlled-pullback v2 calibration sample readiness
+      - name: Verify controlled-pullback v2 immutable activation
         working-directory: bybit_eu_swing_radar/backend
         run: python scripts/production_controlled_pullback_calibration_readiness_v2.py
