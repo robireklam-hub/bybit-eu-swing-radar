@@ -1,4 +1,8 @@
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+import os
+import subprocess
+import sys
 
 import pytest
 
@@ -103,6 +107,28 @@ def test_maturity_summary_rejects_duplicate_symbol_side_trigger_bar_even_with_ne
 
     with pytest.raises(ValueError, match="duplicate_symbol_side_trigger_bar"):
         summarize_maturity_payload(payload)
+
+
+def test_maturity_verifier_runs_as_standalone_script_from_foreign_cwd(tmp_path):
+    backend_root = Path(__file__).resolve().parent
+    script = backend_root / "scripts" / "production_swing_liquidity_maturity_status.py"
+    env = os.environ.copy()
+    env.pop("PRODUCTION_RADAR_API_BASE_URL", None)
+    env.pop("PRODUCTION_RADAR_API_KEY", None)
+    env.pop("EXPECTED_SHA", None)
+
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "Missing production API configuration" in result.stderr
+    assert "ModuleNotFoundError" not in result.stderr
 
 
 def test_maturity_summary_fails_closed_if_research_guards_change():
