@@ -55,6 +55,30 @@ jobs:
           raise SystemExit('exact API SHA did not deploy within verifier window')
           PY
 
+      - name: Verify microstructure recorder and readiness
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_smoke.py
+
+      - name: Verify preregistered v0.7.3 alignment status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_alignment_status.py
+
+      - name: Verify preregistered v0.7.4 alignment status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_alignment_status_v2.py
+
+      - name: Verify preregistered v0.7.5 alignment status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_alignment_status_v3.py
+
+      - name: Verify successor microstructure effect gates remain closed
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_successor_effect_gate_guard.py
+
+      - name: Verify preregistered v0.7.3 effect status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_effect_status.py
+
       - name: Verify swing candidate Coinalyze semantics
         working-directory: bybit_eu_swing_radar/backend
         run: python scripts/production_swing_coinalyze_smoke.py
@@ -70,7 +94,3 @@ jobs:
       - name: Verify sector rotation append-only history and source coverage
         working-directory: bybit_eu_swing_radar/backend
         run: python scripts/production_sector_rotation_smoke.py
-
-      - name: Verify successor microstructure effect gates remain closed
-        working-directory: bybit_eu_swing_radar/backend
-        run: python scripts/production_microstructure_successor_effect_gate_guard.py
