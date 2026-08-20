@@ -6,9 +6,6 @@ on:
   push:
     branches: [main]
 
-permissions:
-  contents: write
-
 jobs:
   backend-tests:
     runs-on: ubuntu-latest
@@ -19,27 +16,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
-
-      - name: Apply agent market-context reporting patch once
-        if: github.event_name == 'pull_request' && github.head_ref == 'fix/agent-market-context-reporting-v1'
-        working-directory: .
-        run: |
-          git fetch origin fix/agent-market-context-reporting-v1 main
-          git checkout -B fix/agent-market-context-reporting-v1 origin/fix/agent-market-context-reporting-v1
-          python scripts/temp_apply_agent_market_context_reporting.py
-          git checkout origin/main -- .github/workflows/backend-tests.yml
-          rm scripts/temp_apply_agent_market_context_reporting.py
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- \
-            bybit_eu_swing_radar/agent/AGENT_INSTRUCTIONS_HU.md \
-            bybit_eu_swing_radar/action/openapi.yaml \
-            bybit_eu_swing_radar/backend/test_agent_market_context_reporting_contract.py \
-            .github/workflows/backend-tests.yml \
-            scripts/temp_apply_agent_market_context_reporting.py
-          git diff --cached --check
-          git commit -m "Require explicit market-context reporting"
-          git push origin HEAD:fix/agent-market-context-reporting-v1
 
       - name: Set up Python
         uses: actions/setup-python@v7
