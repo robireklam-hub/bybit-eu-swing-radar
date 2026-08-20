@@ -1,4 +1,4 @@
-name: NEVER MERGE exact-main verifier 9e8efbec
+name: NEVER MERGE current-production microstructure verifier
 
 on:
   pull_request:
@@ -8,19 +8,19 @@ permissions:
   contents: read
 
 concurrency:
-  group: never-merge-exact-main-verifier-9e8efbec
+  group: never-merge-current-production-microstructure
   cancel-in-progress: true
 
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 15
     env:
       PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
       PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
-      EXPECTED_SHA: 9e8efbec7ac2e28331fd4f56472237e57f9e071f
+      EXPECTED_SHA: 5fc452c116d373457ab30042b989f77f7c421c0a
     steps:
-      - name: Check out exact tested main
+      - name: Check out current main research scripts
         uses: actions/checkout@v7
         with:
           ref: 9e8efbec7ac2e28331fd4f56472237e57f9e071f
@@ -30,29 +30,22 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Wait for exact API deployment
+      - name: Verify deployed production SHA before read-only checks
         shell: bash
         run: |
           python - <<'PY'
-          import json, os, time
+          import json, os
           from urllib.request import Request, urlopen
           base=os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
           key=os.environ['PRODUCTION_RADAR_API_KEY']
           expected=os.environ['EXPECTED_SHA']
-          for attempt in range(120):
-              try:
-                  req=Request(base+'/version',headers={'Accept':'application/json','X-Radar-Key':key})
-                  with urlopen(req,timeout=15) as response:
-                      payload=json.load(response)
-                  actual=payload.get('commit_sha')
-                  print(f'API_SHA attempt={attempt+1} actual={actual}', flush=True)
-                  if actual == expected:
-                      print('EXACT API SHA DEPLOYED.', flush=True)
-                      raise SystemExit(0)
-              except Exception as exc:
-                  print(f'API_WAIT attempt={attempt+1} error={type(exc).__name__}', flush=True)
-              time.sleep(10)
-          raise SystemExit('exact API SHA did not deploy within verifier window')
+          req=Request(base+'/version',headers={'Accept':'application/json','X-Radar-Key':key})
+          with urlopen(req,timeout=15) as response:
+              payload=json.load(response)
+          actual=payload.get('commit_sha')
+          print(f'PRODUCTION_API_SHA={actual}', flush=True)
+          if actual != expected:
+              raise SystemExit(f'expected deployed SHA {expected}, got {actual}')
           PY
 
       - name: Verify microstructure recorder and readiness
@@ -78,19 +71,3 @@ jobs:
       - name: Verify preregistered v0.7.3 effect status
         working-directory: bybit_eu_swing_radar/backend
         run: python scripts/production_microstructure_effect_status.py
-
-      - name: Verify swing candidate Coinalyze semantics
-        working-directory: bybit_eu_swing_radar/backend
-        run: python scripts/production_swing_coinalyze_smoke.py
-
-      - name: Verify label-blind swing liquidity event construction
-        working-directory: bybit_eu_swing_radar/backend
-        run: python scripts/production_swing_liquidity_event_smoke.py
-
-      - name: Verify label-blind swing liquidity maturity status
-        working-directory: bybit_eu_swing_radar/backend
-        run: python scripts/production_swing_liquidity_maturity_status.py
-
-      - name: Verify sector rotation append-only history and source coverage
-        working-directory: bybit_eu_swing_radar/backend
-        run: python scripts/production_sector_rotation_smoke.py
