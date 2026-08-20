@@ -1,3 +1,4 @@
+# Regression contract for explicit agent market-context visibility and barrier semantics.
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
