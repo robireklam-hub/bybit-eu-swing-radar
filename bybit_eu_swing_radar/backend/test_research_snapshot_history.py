@@ -38,7 +38,10 @@ class FakeConnection:
         row = self.rows.get((family, version, captured))
         if row is None:
             return None
-        return {"payload_fingerprint": row["payload_fingerprint"]}
+        return {
+            "payload_fingerprint": row["payload_fingerprint"],
+            "payload": row["payload"],
+        }
 
     async def fetchval(self, sql, *args):
         if "capture_bucket=$3" in sql:
@@ -138,3 +141,41 @@ async def test_same_identity_with_different_payload_fails_closed():
             snapshot={"captured_at": captured.isoformat(), "value": 2},
             **common,
         )
+
+
+@pytest.mark.asyncio
+async def test_matching_stored_fingerprint_with_tampered_payload_fails_closed():
+    conn = FakeConnection()
+    captured = datetime(2026, 8, 19, 7, 10, tzinfo=timezone.utc)
+    kwargs = dict(
+        research_family="sector-rotation",
+        spec_version="sector-rotation-shadow-v1",
+        captured_at=captured,
+        capture_bucket=captured.date(),
+        source_commit_sha="sha1",
+        snapshot={"captured_at": captured.isoformat(), "value": 1},
+    )
+    await append_snapshot_history(conn, **kwargs)
+    key = ("sector-rotation", "sector-rotation-shadow-v1", captured)
+    conn.rows[key]["payload"] = '{"captured_at":"2026-08-19T07:10:00+00:00","value":999}'
+    with pytest.raises(RuntimeError, match="stored_payload_fingerprint"):
+        await append_snapshot_history(conn, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_invalid_stored_payload_fails_closed():
+    conn = FakeConnection()
+    captured = datetime(2026, 8, 19, 7, 10, tzinfo=timezone.utc)
+    kwargs = dict(
+        research_family="sector-rotation",
+        spec_version="sector-rotation-shadow-v1",
+        captured_at=captured,
+        capture_bucket=captured.date(),
+        source_commit_sha="sha1",
+        snapshot={"captured_at": captured.isoformat(), "value": 1},
+    )
+    await append_snapshot_history(conn, **kwargs)
+    key = ("sector-rotation", "sector-rotation-shadow-v1", captured)
+    conn.rows[key]["payload"] = "not-json"
+    with pytest.raises(Exception):
+        await append_snapshot_history(conn, **kwargs)
