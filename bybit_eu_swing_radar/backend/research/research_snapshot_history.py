@@ -119,6 +119,16 @@ def validate_history_identity(research_family: str, spec_version: str) -> tuple[
     return family, version
 
 
+def _stored_payload_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        loaded = json.loads(value)
+        if isinstance(loaded, dict):
+            return loaded
+    raise RuntimeError("immutable research history stored payload is invalid")
+
+
 def validate_stored_history_row(
     row: Any,
     *,
@@ -126,9 +136,14 @@ def validate_stored_history_row(
 ) -> None:
     if row is None:
         raise RuntimeError("immutable research history row is missing after insert")
-    stored = str(dict(row).get("payload_fingerprint") or "")
-    if stored != expected_fingerprint:
+    stored_row = dict(row)
+    stored_fingerprint = str(stored_row.get("payload_fingerprint") or "")
+    if stored_fingerprint != expected_fingerprint:
         raise RuntimeError("immutable research history conflict: payload_fingerprint")
+    stored_payload = _stored_payload_object(stored_row.get("payload"))
+    recomputed_fingerprint = payload_fingerprint(stored_payload)
+    if recomputed_fingerprint != stored_fingerprint:
+        raise RuntimeError("immutable research history conflict: stored_payload_fingerprint")
 
 
 async def append_snapshot_history(
@@ -141,10 +156,12 @@ async def append_snapshot_history(
     source_commit_sha: str | None,
     snapshot: dict[str, Any],
 ) -> dict[str, Any]:
-    """Append one immutable raw capture and fail closed on identity conflict.
+    """Append one immutable raw capture and fail closed on identity/content conflict.
 
     Exact retry of the same family/spec/captured_at/payload is idempotent.
-    Reusing the same identity with different payload content is rejected.
+    Reusing the same identity with different payload content is rejected. The
+    persisted JSONB payload is also read back and re-hashed so a matching stored
+    fingerprint alone cannot masquerade as payload integrity.
     """
     family, version = validate_history_identity(research_family, spec_version)
     captured = _utc(captured_at)
@@ -171,7 +188,7 @@ async def append_snapshot_history(
     )
     row = await connection.fetchrow(
         """
-        SELECT payload_fingerprint
+        SELECT payload_fingerprint,payload
         FROM research_snapshot_history
         WHERE research_family=$1 AND spec_version=$2 AND captured_at=$3
         """,
