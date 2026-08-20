@@ -2,7 +2,8 @@
 
 The service retries the PostgreSQL advisory singleton lock until it becomes the
 active writer. Runtime status is persisted separately so the API can report the
-external collector state after cutover.
+external collector state after cutover. Controlled-pullback v2 prospective
+collection runs on a dedicated DB connection and cannot stop the recorder.
 """
 from __future__ import annotations
 
@@ -13,6 +14,10 @@ import signal
 from typing import Any
 
 from research.microstructure.collector import MicrostructureConfig, MicrostructureRecorder
+from research.microstructure.controlled_pullback_runtime_v2 import (
+    DEFAULT_INTERVAL_SECONDS,
+    run_periodic_prospective_collection,
+)
 from research.microstructure.runtime_status import RECORDER_ID, persist_runtime_status
 
 logger = logging.getLogger(__name__)
@@ -31,12 +36,17 @@ def _service_metadata() -> tuple[str | None, str | None, str | None]:
     )
 
 
-async def _persist(recorder: MicrostructureRecorder, config: MicrostructureConfig) -> None:
+async def _persist(
+    recorder: MicrostructureRecorder,
+    config: MicrostructureConfig,
+    prospective_status: dict[str, Any] | None = None,
+) -> None:
     source_commit_sha, service_id, service_name = _service_metadata()
     payload: dict[str, Any] = {
         **recorder.status(),
         "process_role": "standalone",
         "recorder_id": RECORDER_ID,
+        "controlled_pullback_v2": dict(prospective_status or {"status": "starting"}),
     }
     await persist_runtime_status(
         config.database_url,
@@ -62,36 +72,57 @@ async def run_standalone() -> None:
         except NotImplementedError:
             pass
 
-    while not stop.is_set():
-        recorder = MicrostructureRecorder(config)
-        recorder_task = asyncio.create_task(recorder.run(), name="microstructure-recorder-standalone")
-        try:
-            while not stop.is_set() and not recorder_task.done():
-                await _persist(recorder, config)
-                try:
-                    await asyncio.wait_for(stop.wait(), timeout=HEARTBEAT_SECONDS)
-                except asyncio.TimeoutError:
-                    pass
+    prospective_status: dict[str, Any] = {"status": "starting"}
+    prospective_task = asyncio.create_task(
+        run_periodic_prospective_collection(
+            config.database_url,
+            stop,
+            prospective_status,
+            interval_seconds=float(
+                os.getenv(
+                    "MICROSTRUCTURE_CONTROLLED_PULLBACK_V2_INTERVAL_SECONDS",
+                    str(DEFAULT_INTERVAL_SECONDS),
+                )
+            ),
+        ),
+        name="controlled-pullback-v2-prospective",
+    )
 
-            if stop.is_set() and not recorder_task.done():
+    try:
+        while not stop.is_set():
+            recorder = MicrostructureRecorder(config)
+            recorder_task = asyncio.create_task(recorder.run(), name="microstructure-recorder-standalone")
+            try:
+                while not stop.is_set() and not recorder_task.done():
+                    await _persist(recorder, config, prospective_status)
+                    try:
+                        await asyncio.wait_for(stop.wait(), timeout=HEARTBEAT_SECONDS)
+                    except asyncio.TimeoutError:
+                        pass
+
+                if stop.is_set() and not recorder_task.done():
+                    await recorder.stop()
+                await asyncio.gather(recorder_task, return_exceptions=True)
+                await _persist(recorder, config, prospective_status)
+            except asyncio.CancelledError:
                 await recorder.stop()
-            await asyncio.gather(recorder_task, return_exceptions=True)
-            await _persist(recorder, config)
-        except asyncio.CancelledError:
-            await recorder.stop()
-            recorder_task.cancel()
-            await asyncio.gather(recorder_task, return_exceptions=True)
-            raise
-        except Exception:
-            logger.exception("standalone microstructure recorder supervisor error")
+                recorder_task.cancel()
+                await asyncio.gather(recorder_task, return_exceptions=True)
+                raise
+            except Exception:
+                logger.exception("standalone microstructure recorder supervisor error")
 
-        if stop.is_set():
-            break
-        delay = LOCK_RETRY_SECONDS if not recorder.runtime.singleton_acquired else RESTART_RETRY_SECONDS
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=delay)
-        except asyncio.TimeoutError:
-            pass
+            if stop.is_set():
+                break
+            delay = LOCK_RETRY_SECONDS if not recorder.runtime.singleton_acquired else RESTART_RETRY_SECONDS
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                pass
+    finally:
+        stop.set()
+        prospective_task.cancel()
+        await asyncio.gather(prospective_task, return_exceptions=True)
 
 
 def main() -> None:
