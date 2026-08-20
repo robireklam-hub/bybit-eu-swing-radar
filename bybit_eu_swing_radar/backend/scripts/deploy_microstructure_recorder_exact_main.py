@@ -2,8 +2,9 @@
 
 Trusted main-only workflow utility. It preserves recorder ownership, variables,
 and live strategy state. Before requesting the exact-commit deployment it
-repairs and verifies the recorder's fixed monorepo build boundary so Railway
-builds the backend package rather than the repository root.
+repairs and verifies the recorder's fixed monorepo build boundary and EU West
+placement so Railway builds the backend package and Bybit EU WebSocket access
+remains available.
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ from urllib.request import Request, urlopen
 ENDPOINT = "https://backboard.railway.com/graphql/v2"
 RECORDER_ROOT_DIRECTORY = "/bybit_eu_swing_radar/backend"
 RECORDER_START_COMMAND = "python -m research.microstructure.standalone"
+RECORDER_REGION_CONFIG = {"europe-west4-drams3a": {"numReplicas": 1}}
 DEPLOYMENT_POLL_SECONDS = 5
 DEPLOYMENT_MAX_WAIT_SECONDS = 900
 GQL_RETRY_ATTEMPTS = 4
@@ -33,7 +35,7 @@ def _gql(query: str, variables: dict[str, Any]) -> dict[str, Any]:
             "Authorization": "Bearer " + token,
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "microstructure-recorder-exact-main-deployer/2",
+            "User-Agent": "microstructure-recorder-exact-main-deployer/3",
         },
     )
     for attempt in range(GQL_RETRY_ATTEMPTS):
@@ -61,7 +63,7 @@ def recorder_service_instance(environment_id: str, service_id: str) -> dict[str,
     query = """
     query instance($serviceId:String!,$environmentId:String!){
       serviceInstance(serviceId:$serviceId,environmentId:$environmentId){
-        id rootDirectory startCommand builder
+        id rootDirectory startCommand builder multiRegionConfig
       }
     }
     """
@@ -69,6 +71,24 @@ def recorder_service_instance(environment_id: str, service_id: str) -> dict[str,
         _gql(query, {"serviceId": service_id, "environmentId": environment_id}).get("serviceInstance")
         or {}
     )
+
+
+def _update_service_instance(environment_id: str, service_id: str, input_fields: dict[str, Any]) -> None:
+    mutation = """
+    mutation update($serviceId:String!,$environmentId:String!,$input:ServiceInstanceUpdateInput!){
+      serviceInstanceUpdate(serviceId:$serviceId,environmentId:$environmentId,input:$input)
+    }
+    """
+    result = _gql(
+        mutation,
+        {
+            "serviceId": service_id,
+            "environmentId": environment_id,
+            "input": input_fields,
+        },
+    )
+    if result.get("serviceInstanceUpdate") is not True:
+        raise RuntimeError("Railway recorder service instance update was not confirmed")
 
 
 def ensure_recorder_build_boundary(environment_id: str, service_id: str) -> None:
@@ -83,19 +103,7 @@ def ensure_recorder_build_boundary(environment_id: str, service_id: str) -> None
     }
     needs_update = any(str(current.get(key) or "") != value for key, value in expected.items())
     if needs_update:
-        mutation = """
-        mutation update($serviceId:String!,$environmentId:String!,$input:ServiceInstanceUpdateInput!){
-          serviceInstanceUpdate(serviceId:$serviceId,environmentId:$environmentId,input:$input)
-        }
-        """
-        _gql(
-            mutation,
-            {
-                "serviceId": service_id,
-                "environmentId": environment_id,
-                "input": expected,
-            },
-        )
+        _update_service_instance(environment_id, service_id, expected)
 
     verified = recorder_service_instance(environment_id, service_id)
     mismatches = {
@@ -106,6 +114,33 @@ def ensure_recorder_build_boundary(environment_id: str, service_id: str) -> None
     if mismatches:
         raise RuntimeError("Railway recorder build boundary mismatch: " + json.dumps(mismatches, sort_keys=True))
     print("MICROSTRUCTURE_RECORDER_BUILD_BOUNDARY_VERIFIED.", flush=True)
+
+
+def ensure_recorder_region(environment_id: str, service_id: str) -> None:
+    current = recorder_service_instance(environment_id, service_id)
+    if not current.get("id"):
+        raise RuntimeError("Railway recorder service instance is unavailable")
+
+    if current.get("multiRegionConfig") != RECORDER_REGION_CONFIG:
+        _update_service_instance(
+            environment_id,
+            service_id,
+            {"multiRegionConfig": RECORDER_REGION_CONFIG},
+        )
+
+    verified = recorder_service_instance(environment_id, service_id)
+    if verified.get("multiRegionConfig") != RECORDER_REGION_CONFIG:
+        raise RuntimeError(
+            "Railway recorder region mismatch: "
+            + json.dumps(
+                {
+                    "expected": RECORDER_REGION_CONFIG,
+                    "actual": verified.get("multiRegionConfig"),
+                },
+                sort_keys=True,
+            )
+        )
+    print("MICROSTRUCTURE_RECORDER_EU_WEST_REGION_VERIFIED.", flush=True)
 
 
 def request_exact_deployment(environment_id: str, service_id: str, commit_sha: str) -> str:
@@ -164,6 +199,7 @@ def main() -> int:
     commit_sha = os.environ["EXPECTED_SHA"].strip().lower()
 
     ensure_recorder_build_boundary(environment_id, service_id)
+    ensure_recorder_region(environment_id, service_id)
     deployment_id = request_exact_deployment(environment_id, service_id, commit_sha)
     print("MICROSTRUCTURE_RECORDER_SERVICE_ID=" + service_id, flush=True)
     print("MICROSTRUCTURE_RECORDER_DEPLOYMENT_ID=" + deployment_id, flush=True)
