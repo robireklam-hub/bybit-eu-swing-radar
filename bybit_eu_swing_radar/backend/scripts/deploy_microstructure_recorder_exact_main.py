@@ -1,9 +1,9 @@
 """Deploy the isolated microstructure recorder on one exact tested main commit.
 
-Trusted main-only workflow utility. It does not mutate recorder ownership,
-region, variables, or live strategy state; it only requests an exact-commit
-deployment of the already-provisioned standalone service and waits for the
-requested deployment to reach a terminal state.
+Trusted main-only workflow utility. It preserves recorder ownership, variables,
+and live strategy state. Before requesting the exact-commit deployment it
+repairs and verifies the recorder's fixed monorepo build boundary so Railway
+builds the backend package rather than the repository root.
 """
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 ENDPOINT = "https://backboard.railway.com/graphql/v2"
+RECORDER_ROOT_DIRECTORY = "/bybit_eu_swing_radar/backend"
+RECORDER_START_COMMAND = "python -m research.microstructure.standalone"
 DEPLOYMENT_POLL_SECONDS = 5
 DEPLOYMENT_MAX_WAIT_SECONDS = 900
 GQL_RETRY_ATTEMPTS = 4
@@ -31,7 +33,7 @@ def _gql(query: str, variables: dict[str, Any]) -> dict[str, Any]:
             "Authorization": "Bearer " + token,
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "microstructure-recorder-exact-main-deployer/1",
+            "User-Agent": "microstructure-recorder-exact-main-deployer/2",
         },
     )
     for attempt in range(GQL_RETRY_ATTEMPTS):
@@ -53,6 +55,57 @@ def _gql(query: str, variables: dict[str, Any]) -> dict[str, Any]:
                 raise
         time.sleep(min(2 ** attempt, 8))
     raise RuntimeError("Railway GraphQL retry loop exhausted")
+
+
+def recorder_service_instance(environment_id: str, service_id: str) -> dict[str, Any]:
+    query = """
+    query instance($serviceId:String!,$environmentId:String!){
+      serviceInstance(serviceId:$serviceId,environmentId:$environmentId){
+        id rootDirectory startCommand builder
+      }
+    }
+    """
+    return dict(
+        _gql(query, {"serviceId": service_id, "environmentId": environment_id}).get("serviceInstance")
+        or {}
+    )
+
+
+def ensure_recorder_build_boundary(environment_id: str, service_id: str) -> None:
+    current = recorder_service_instance(environment_id, service_id)
+    if not current.get("id"):
+        raise RuntimeError("Railway recorder service instance is unavailable")
+
+    expected = {
+        "rootDirectory": RECORDER_ROOT_DIRECTORY,
+        "startCommand": RECORDER_START_COMMAND,
+        "builder": "RAILPACK",
+    }
+    needs_update = any(str(current.get(key) or "") != value for key, value in expected.items())
+    if needs_update:
+        mutation = """
+        mutation update($serviceId:String!,$environmentId:String!,$input:ServiceInstanceUpdateInput!){
+          serviceInstanceUpdate(serviceId:$serviceId,environmentId:$environmentId,input:$input)
+        }
+        """
+        _gql(
+            mutation,
+            {
+                "serviceId": service_id,
+                "environmentId": environment_id,
+                "input": expected,
+            },
+        )
+
+    verified = recorder_service_instance(environment_id, service_id)
+    mismatches = {
+        key: {"expected": value, "actual": verified.get(key)}
+        for key, value in expected.items()
+        if str(verified.get(key) or "") != value
+    }
+    if mismatches:
+        raise RuntimeError("Railway recorder build boundary mismatch: " + json.dumps(mismatches, sort_keys=True))
+    print("MICROSTRUCTURE_RECORDER_BUILD_BOUNDARY_VERIFIED.", flush=True)
 
 
 def request_exact_deployment(environment_id: str, service_id: str, commit_sha: str) -> str:
@@ -110,6 +163,7 @@ def main() -> int:
     service_id = os.environ["MICROSTRUCTURE_RECORDER_SERVICE_ID"]
     commit_sha = os.environ["EXPECTED_SHA"].strip().lower()
 
+    ensure_recorder_build_boundary(environment_id, service_id)
     deployment_id = request_exact_deployment(environment_id, service_id, commit_sha)
     print("MICROSTRUCTURE_RECORDER_SERVICE_ID=" + service_id, flush=True)
     print("MICROSTRUCTURE_RECORDER_DEPLOYMENT_ID=" + deployment_id, flush=True)
