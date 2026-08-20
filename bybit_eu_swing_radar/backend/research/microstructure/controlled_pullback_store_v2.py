@@ -2,7 +2,9 @@
 
 Only label-blind detector/comparator records are persisted. The schema contains
 no outcome/PnL/return columns and first-seen records are immutable (`ON CONFLICT
-DO NOTHING`). This module is research-only and has no live strategy path.
+DO NOTHING`). PostgreSQL mutation guards also reject UPDATE, DELETE and TRUNCATE
+so the prospective sample cannot be rewritten by another database role after
+capture. This module is research-only and has no live strategy path.
 """
 from __future__ import annotations
 
@@ -72,6 +74,50 @@ CREATE INDEX IF NOT EXISTS idx_controlled_pullback_v2_trigger
 ON {TABLE_NAME}(trigger_at DESC, symbol, record_class)
 """
 
+IMMUTABILITY_GUARD_SQL = f"""
+DO $immutability$
+BEGIN
+    IF to_regprocedure(current_schema() || '.reject_controlled_pullback_v2_mutation()') IS NULL THEN
+        EXECUTE $create_function$
+            CREATE FUNCTION reject_controlled_pullback_v2_mutation()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $function$
+            BEGIN
+                RAISE EXCEPTION '{TABLE_NAME} is append-only';
+            END;
+            $function$
+        $create_function$;
+    END IF;
+END
+$immutability$;
+
+DO $immutability$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgrelid = '{TABLE_NAME}'::regclass
+          AND tgname = 'trg_controlled_pullback_v2_no_row_mutation'
+          AND NOT tgisinternal
+    ) THEN
+        EXECUTE 'CREATE TRIGGER trg_controlled_pullback_v2_no_row_mutation '
+                'BEFORE UPDATE OR DELETE ON {TABLE_NAME} '
+                'FOR EACH ROW EXECUTE FUNCTION reject_controlled_pullback_v2_mutation()';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgrelid = '{TABLE_NAME}'::regclass
+          AND tgname = 'trg_controlled_pullback_v2_no_truncate'
+          AND NOT tgisinternal
+    ) THEN
+        EXECUTE 'CREATE TRIGGER trg_controlled_pullback_v2_no_truncate '
+                'BEFORE TRUNCATE ON {TABLE_NAME} '
+                'FOR EACH STATEMENT EXECUTE FUNCTION reject_controlled_pullback_v2_mutation()';
+    END IF;
+END
+$immutability$;
+"""
+
 INSERT_SQL = f"""
 INSERT INTO {TABLE_NAME} (
     record_key, record_class, experiment_id, strategy_version, detector_id,
@@ -98,6 +144,7 @@ def store_contract() -> dict[str, Any]:
         "outcome_visible": False,
         "promotion_allowed": False,
         "conflict_policy": "DO_NOTHING_IMMUTABLE_FIRST_SEEN",
+        "database_mutation_guard": "REJECT_UPDATE_DELETE_TRUNCATE",
         "live_strategy_mutation": False,
     }
 
@@ -257,6 +304,7 @@ def build_storage_rows(detection_result: Mapping[str, Any]) -> list[dict[str, An
 async def install_schema(connection: asyncpg.Connection) -> None:
     await connection.execute(CREATE_TABLE_SQL)
     await connection.execute(CREATE_INDEX_SQL)
+    await connection.execute(IMMUTABILITY_GUARD_SQL)
 
 
 async def persist_detection_result(
