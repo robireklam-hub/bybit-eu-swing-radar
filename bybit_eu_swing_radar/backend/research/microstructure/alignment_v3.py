@@ -12,8 +12,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 
-import asyncpg
-
 from research.microstructure import alignment as v1
 from research.microstructure import alignment_v2 as v2
 
@@ -110,7 +108,12 @@ async def load_feature_rows(
     until: datetime,
     bucket_seconds: int = 5,
 ) -> list[dict[str, Any]]:
-    """Load only v0.7.5 signals at/after the preregistered v3 forward start."""
+    """Load only v0.7.5 signals at/after the preregistered v3 forward start.
+
+    The database driver is intentionally imported only on this DB-backed path so
+    label-blind feature/calibration consumers can import the frozen v3 contract
+    without requiring the production persistence dependency.
+    """
     if not database_url:
         raise RuntimeError("DATABASE_URL is not configured")
     if since.tzinfo is None or until.tzinfo is None:
@@ -119,6 +122,8 @@ async def load_feature_rows(
     effective_until = until.astimezone(timezone.utc)
     if effective_until <= effective_since:
         return []
+
+    import asyncpg
 
     wanted = tuple(dict.fromkeys(str(symbol).upper() for symbol in symbols))
     connection = await asyncpg.connect(database_url)
