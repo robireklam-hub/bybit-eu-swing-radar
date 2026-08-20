@@ -5,9 +5,9 @@ predeclared feature sequence, hypothesis, comparator, outcome definitions and
 sample gates, but its label-blind feature source is the isolated v0.7.5
 microstructure-forward-alignment-v3 cohort.
 
-Research-only. The forward outcome cohort is intentionally NOT activated here.
-A separate activation change must freeze a new UTC start before any v2 outcome
-inspection. No live ranking, scores, eligibility or execution are mutated.
+Research-only. The forward cohort was activated only after a separate,
+outcome-blind calibration snapshot was frozen. No live ranking, scores,
+eligibility or execution are mutated.
 """
 from __future__ import annotations
 
@@ -22,6 +22,8 @@ SPEC_VERSION = "2.0.0"
 STRATEGY_VERSION = "0.7.5"
 FEATURE_DATA_SPEC_VERSION = alignment_v3.SPEC_VERSION
 SYMBOLS = v1.SYMBOLS
+FORWARD_START_UTC = "2026-08-20T10:19:00+00:00"
+ACTIVATION_ID = "microstructure-controlled-pullback-activation-v2"
 
 _PARENT = v1.preregistration()
 
@@ -31,12 +33,13 @@ _PREREGISTRATION = {
     "spec_version": SPEC_VERSION,
     "research_only": True,
     "immutable_preregistration": True,
-    "activation_status": "PREREGISTERED_NOT_ACTIVATED",
-    "forward_start_utc": None,
+    "activation_status": "ACTIVATED_FORWARD_ONLY",
+    "activation_id": ACTIVATION_ID,
+    "forward_start_utc": FORWARD_START_UTC,
     "forward_start_rule": (
-        "Freeze an explicit UTC timestamp in a separate v2 activation PR after this "
-        "preregistration exists; do not inspect v2 outcomes before that timestamp. "
-        "Historical/backfilled observations are ineligible."
+        "Forward eligibility begins only at the explicitly frozen UTC timestamp; "
+        "historical/backfilled observations remain ineligible and the threshold "
+        "snapshot may not be recalibrated on forward outcomes."
     ),
     "strategy_version": STRATEGY_VERSION,
     "strategy_version_isolated": True,
@@ -73,12 +76,19 @@ def preregistration() -> dict:
 
 
 def activation_ready(spec: dict | None = None) -> bool:
-    """Fail closed until a later change freezes a v2 forward UTC start."""
+    """Validate that activation stays forward-only and all safety gates remain closed."""
     candidate = _PREREGISTRATION if spec is None else spec
     return (
         bool(candidate.get("forward_start_utc"))
+        and candidate.get("activation_status") == "ACTIVATED_FORWARD_ONLY"
+        and candidate.get("activation_id") == ACTIVATION_ID
         and candidate.get("outcome_visible") is False
         and candidate.get("promotion_allowed") is False
         and candidate.get("strategy_version") == STRATEGY_VERSION
         and candidate.get("feature_data_spec_version") == FEATURE_DATA_SPEC_VERSION
+        and candidate.get("threshold_search_allowed") is False
+        and candidate.get("mutate_scores") is False
+        and candidate.get("mutate_ranking") is False
+        and candidate.get("mutate_eligibility") is False
+        and candidate.get("mutate_execution") is False
     )

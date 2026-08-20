@@ -1,6 +1,13 @@
 from research.microstructure import alignment_v3
 from research.microstructure import controlled_pullback_v1 as v1
 from research.microstructure import controlled_pullback_v2 as v2
+from research.microstructure.controlled_pullback_activation_v2 import (
+    ACTIVATION_ID,
+    FORWARD_START_UTC,
+    activation_contract_valid,
+    activation_snapshot,
+)
+from research.microstructure.controlled_pullback_detector_v2 import _validate_calibration_snapshot
 
 
 def test_v1_remains_frozen_while_v2_isolated_to_v075_alignment_v3():
@@ -20,18 +27,52 @@ def test_v1_remains_frozen_while_v2_isolated_to_v075_alignment_v3():
     assert new["strategy_version_isolated"] is True
 
 
-def test_v2_is_preregistered_but_deliberately_not_activated():
+def test_v2_forward_activation_is_frozen_without_opening_outcomes_or_promotion():
     spec = v2.preregistration()
     assert spec["research_only"] is True
     assert spec["immutable_preregistration"] is True
-    assert spec["activation_status"] == "PREREGISTERED_NOT_ACTIVATED"
-    assert spec["forward_start_utc"] is None
+    assert spec["activation_status"] == "ACTIVATED_FORWARD_ONLY"
+    assert spec["activation_id"] == ACTIVATION_ID
+    assert spec["forward_start_utc"] == FORWARD_START_UTC
     assert spec["label_blind"] is True
     assert spec["post_signal_data_used_for_features"] is False
     assert spec["outcome_visible"] is False
     assert spec["promotion_allowed"] is False
     assert spec["threshold_search_allowed"] is False
-    assert v2.activation_ready(spec) is False
+    assert v2.activation_ready(spec) is True
+
+
+def test_v2_activation_snapshot_is_immutable_label_blind_and_detector_compatible():
+    snapshot = activation_snapshot()
+    assert activation_contract_valid(snapshot) is True
+    assert snapshot["outcome_visible"] is False
+    assert snapshot["promotion_allowed"] is False
+    assert snapshot["live_strategy_mutation"] is False
+    assert snapshot["threshold_recalibration_allowed"] is False
+    assert snapshot["sample_rows_per_symbol"] == {
+        "BTCUSDC": 479,
+        "ETHUSDC": 167,
+        "SOLUSDC": 123,
+    }
+    forward_start, thresholds, structural = _validate_calibration_snapshot(snapshot)
+    assert forward_start.isoformat() == FORWARD_START_UTC
+    assert set(thresholds) == {"BTCUSDC", "ETHUSDC", "SOLUSDC"}
+    assert structural["pullback_retracement_fraction_min"] == 0.2
+    assert structural["pullback_retracement_fraction_max"] == 0.6
+
+
+def test_v2_activation_contract_fails_closed_on_recalibration_or_gate_mutation():
+    snapshot = activation_snapshot()
+    snapshot["threshold_recalibration_allowed"] = True
+    assert activation_contract_valid(snapshot) is False
+
+    snapshot = activation_snapshot()
+    snapshot["outcome_visible"] = True
+    assert activation_contract_valid(snapshot) is False
+
+    snapshot = activation_snapshot()
+    snapshot["sample_rows_per_symbol"]["SOLUSDC"] = 99
+    assert activation_contract_valid(snapshot) is False
 
 
 def test_v2_inherits_frozen_design_but_not_v1_strategy_identity():
@@ -77,7 +118,8 @@ def test_v2_returns_defensive_copy_and_activation_fails_closed_on_contract_mutat
     assert second["promotion_allowed"] is False
 
     candidate = v2.preregistration()
-    candidate["forward_start_utc"] = "2026-08-21T00:00:00Z"
-    assert v2.activation_ready(candidate) is True
     candidate["feature_data_spec_version"] = "wrong"
+    assert v2.activation_ready(candidate) is False
+    candidate = v2.preregistration()
+    candidate["mutate_eligibility"] = True
     assert v2.activation_ready(candidate) is False
