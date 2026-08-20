@@ -26,6 +26,7 @@ jobs:
         run: |
           git fetch origin fix/day-v075-breakout-persistence main
           git checkout -B fix/day-v075-breakout-persistence origin/fix/day-v075-breakout-persistence
+          sed -i "s/replace_all(version_iso, '0.7.4', '0.7.5', minimum=4)/replace_all(version_iso, '0.7.4', '0.7.5', minimum=3)/" scripts/temp_apply_v075_breakout_persistence.py
           python scripts/temp_apply_v075_breakout_persistence.py
           git checkout origin/main -- .github/workflows/backend-tests.yml
           rm scripts/temp_apply_v075_breakout_persistence.py
