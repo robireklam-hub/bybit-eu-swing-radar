@@ -7,8 +7,8 @@ DO NOTHING`). This module is research-only and has no live strategy path.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
-from typing import Any, Iterable, Mapping
+from datetime import datetime, timedelta, timezone
+from typing import Any, Mapping
 
 import asyncpg
 
@@ -214,6 +214,7 @@ def build_storage_rows(detection_result: Mapping[str, Any]) -> list[dict[str, An
             raise ValueError("controlled-pullback event is not label-blind research")
         if event.get("outcome_visible") is not False or event.get("promotion_allowed") is not False:
             raise ValueError("controlled-pullback event opened outcome/promotion gate")
+        momentum_end = _utc(event.get("momentum_end_at"), "momentum_end_at")
         feature_payload = {
             key: value
             for key, value in dict(event).items()
@@ -230,10 +231,8 @@ def build_storage_rows(detection_result: Mapping[str, Any]) -> list[dict[str, An
                 "direction": str(event.get("direction") or ""),
                 "forward_start_utc": forward_start,
                 "momentum_start_at": _iso(event.get("momentum_start_at"), "momentum_start_at"),
-                "momentum_end_at": _iso(event.get("momentum_end_at"), "momentum_end_at"),
-                "momentum_trigger_at": _iso(
-                    event.get("momentum_end_at"), "momentum_end_at"
-                ),
+                "momentum_end_at": momentum_end.isoformat(),
+                "momentum_trigger_at": (momentum_end + timedelta(seconds=5)).isoformat(),
                 "pullback_at": _iso(event.get("pullback_at"), "pullback_at"),
                 "trigger_at": _iso(event.get("trigger_at"), "trigger_at"),
                 "feature_payload": feature_payload,
