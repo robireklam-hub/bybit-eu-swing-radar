@@ -2,9 +2,9 @@
 
 Trusted main-only workflow utility. It preserves recorder ownership, variables,
 and live strategy state. Before requesting the exact-commit deployment it
-repairs and verifies the recorder's fixed monorepo build boundary and EU West
-placement so Railway builds the backend package and Bybit EU WebSocket access
-remains available.
+repairs and verifies the recorder's fixed monorepo build boundary, then applies
+the frozen EU West placement so Bybit EU WebSocket access remains available.
+The end-to-end production smoke verifies the resulting runtime connectivity.
 """
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ def _gql(query: str, variables: dict[str, Any]) -> dict[str, Any]:
             "Authorization": "Bearer " + token,
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "microstructure-recorder-exact-main-deployer/3",
+            "User-Agent": "microstructure-recorder-exact-main-deployer/4",
         },
     )
     for attempt in range(GQL_RETRY_ATTEMPTS):
@@ -63,7 +63,7 @@ def recorder_service_instance(environment_id: str, service_id: str) -> dict[str,
     query = """
     query instance($serviceId:String!,$environmentId:String!){
       serviceInstance(serviceId:$serviceId,environmentId:$environmentId){
-        id rootDirectory startCommand builder multiRegionConfig
+        id rootDirectory startCommand builder
       }
     }
     """
@@ -116,31 +116,20 @@ def ensure_recorder_build_boundary(environment_id: str, service_id: str) -> None
     print("MICROSTRUCTURE_RECORDER_BUILD_BOUNDARY_VERIFIED.", flush=True)
 
 
-def ensure_recorder_region(environment_id: str, service_id: str) -> None:
-    current = recorder_service_instance(environment_id, service_id)
-    if not current.get("id"):
-        raise RuntimeError("Railway recorder service instance is unavailable")
+def apply_recorder_region(environment_id: str, service_id: str) -> None:
+    """Apply the previously validated EU West placement before exact deploy.
 
-    if current.get("multiRegionConfig") != RECORDER_REGION_CONFIG:
-        _update_service_instance(
-            environment_id,
-            service_id,
-            {"multiRegionConfig": RECORDER_REGION_CONFIG},
-        )
-
-    verified = recorder_service_instance(environment_id, service_id)
-    if verified.get("multiRegionConfig") != RECORDER_REGION_CONFIG:
-        raise RuntimeError(
-            "Railway recorder region mismatch: "
-            + json.dumps(
-                {
-                    "expected": RECORDER_REGION_CONFIG,
-                    "actual": verified.get("multiRegionConfig"),
-                },
-                sort_keys=True,
-            )
-        )
-    print("MICROSTRUCTURE_RECORDER_EU_WEST_REGION_VERIFIED.", flush=True)
+    Railway's serviceInstance query does not expose multiRegionConfig through
+    the connector path used here, so we require the mutation itself to confirm
+    success and let the real production WebSocket smoke verify the placement
+    end to end.
+    """
+    _update_service_instance(
+        environment_id,
+        service_id,
+        {"multiRegionConfig": RECORDER_REGION_CONFIG},
+    )
+    print("MICROSTRUCTURE_RECORDER_EU_WEST_REGION_APPLIED.", flush=True)
 
 
 def request_exact_deployment(environment_id: str, service_id: str, commit_sha: str) -> str:
@@ -199,7 +188,7 @@ def main() -> int:
     commit_sha = os.environ["EXPECTED_SHA"].strip().lower()
 
     ensure_recorder_build_boundary(environment_id, service_id)
-    ensure_recorder_region(environment_id, service_id)
+    apply_recorder_region(environment_id, service_id)
     deployment_id = request_exact_deployment(environment_id, service_id, commit_sha)
     print("MICROSTRUCTURE_RECORDER_SERVICE_ID=" + service_id, flush=True)
     print("MICROSTRUCTURE_RECORDER_DEPLOYMENT_ID=" + deployment_id, flush=True)
