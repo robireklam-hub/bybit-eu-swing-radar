@@ -1,0 +1,67 @@
+name: NEVER MERGE exact-main verifier 0f44d6dd
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/exact-main-verifier-0f44d6dd.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 0f44d6ddfb6b8585a76d16d8cee0b86791f87ac5
+    steps:
+      - name: Check out exact production main
+        uses: actions/checkout@v7
+        with:
+          ref: 0f44d6ddfb6b8585a76d16d8cee0b86791f87ac5
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Verify swing candidate Coinalyze semantics
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_coinalyze_smoke.py
+
+      - name: Verify label-blind swing liquidity event construction
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_event_smoke.py
+
+      - name: Report label-blind swing liquidity maturity readiness
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_maturity_status.py
+
+      - name: Verify microstructure recorder and controlled-pullback v2 prospective runtime
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_smoke.py
+
+      - name: Verify immutable controlled-pullback v2 activation contract
+        working-directory: bybit_eu_swing_radar/backend
+        run: |
+          python - <<'PY'
+          from research.microstructure.controlled_pullback_activation_v2 import activation_contract_valid, activation_snapshot
+          from research.microstructure.controlled_pullback_detector_v2 import _validate_calibration_snapshot
+          from research.microstructure.controlled_pullback_v2 import activation_ready, preregistration
+          snapshot = activation_snapshot()
+          assert activation_contract_valid(snapshot)
+          _validate_calibration_snapshot(snapshot)
+          spec = preregistration()
+          assert activation_ready(spec)
+          assert spec["forward_start_utc"] == snapshot["forward_start_utc"]
+          assert spec["outcome_visible"] is False
+          assert spec["promotion_allowed"] is False
+          assert spec["mutate_scores"] is False
+          assert spec["mutate_ranking"] is False
+          assert spec["mutate_eligibility"] is False
+          assert spec["mutate_execution"] is False
+          print("CONTROLLED-PULLBACK V2 IMMUTABLE FORWARD ACTIVATION VERIFIED.")
+          PY
