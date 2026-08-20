@@ -19,6 +19,7 @@ SOURCE_MAIN_SHA = "72c19b75d50b60f5259722f94bd08aa639c2b16d"
 GENERATED_AT_UTC = "2026-08-20T09:49:51.228331+00:00"
 CALIBRATION_UNTIL_UTC = "2026-08-20T09:49:00+00:00"
 FORWARD_START_UTC = "2026-08-20T10:19:00+00:00"
+_SYMBOLS = {"BTCUSDC", "ETHUSDC", "SOLUSDC"}
 
 _SNAPSHOT = {
     "activation_id": ACTIVATION_ID,
@@ -82,10 +83,14 @@ def activation_contract_valid(snapshot: dict[str, Any] | None = None) -> bool:
         cutoff = datetime.fromisoformat(str(candidate["calibration_until_utc"]).replace("Z", "+00:00"))
         start = datetime.fromisoformat(str(candidate["forward_start_utc"]).replace("Z", "+00:00"))
         latest = datetime.fromisoformat(str(candidate["latest_calibration_row_utc"]).replace("Z", "+00:00"))
+        counts = candidate["sample_rows_per_symbol"]
+        thresholds = candidate["thresholds_by_symbol"]
     except (KeyError, TypeError, ValueError):
         return False
     return (
         candidate.get("activation_id") == ACTIVATION_ID
+        and candidate.get("source_main_sha") == SOURCE_MAIN_SHA
+        and candidate.get("generated_at_utc") == GENERATED_AT_UTC
         and candidate.get("calibration_id") == CALIBRATION_ID
         and candidate.get("experiment_id") == EXPERIMENT_ID
         and candidate.get("strategy_version") == STRATEGY_VERSION
@@ -96,7 +101,12 @@ def activation_contract_valid(snapshot: dict[str, Any] | None = None) -> bool:
         and candidate.get("promotion_allowed") is False
         and candidate.get("live_strategy_mutation") is False
         and candidate.get("threshold_recalibration_allowed") is False
+        and candidate.get("calibration_until_utc") == CALIBRATION_UNTIL_UTC
+        and candidate.get("forward_start_utc") == FORWARD_START_UTC
         and latest < cutoff < start
-        and all(int(v) >= 100 for v in candidate.get("sample_rows_per_symbol", {}).values())
-        and set(candidate.get("thresholds_by_symbol", {})) == {"BTCUSDC", "ETHUSDC", "SOLUSDC"}
+        and isinstance(counts, dict)
+        and set(counts) == _SYMBOLS
+        and all(int(counts[symbol]) >= 100 for symbol in _SYMBOLS)
+        and isinstance(thresholds, dict)
+        and set(thresholds) == _SYMBOLS
     )
