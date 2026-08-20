@@ -39,6 +39,31 @@ def _forbidden_key(value: Any) -> str | None:
     return None
 
 
+def _immutable_history_error(capture: dict[str, Any]) -> str | None:
+    """Validate that the production capture was also written to append-only history."""
+    history = capture.get("immutable_history")
+    if not isinstance(history, dict):
+        return "immutable_history missing"
+    if history.get("immutable") is not True:
+        return "immutable_history is not immutable"
+    if history.get("purpose") != "append_only_raw_history":
+        return "immutable_history purpose changed"
+    if history.get("research_family") != "sector-rotation":
+        return "immutable_history research family changed"
+    if history.get("spec_version") != "sector-rotation-shadow-v1":
+        return "immutable_history spec version changed"
+    if history.get("captured_at") != capture.get("captured_at"):
+        return "immutable_history captured_at mismatch"
+    fingerprint = str(history.get("payload_fingerprint") or "")
+    if len(fingerprint) != 64:
+        return "immutable_history payload fingerprint missing"
+    if int(history.get("history_count") or 0) < 1:
+        return "immutable_history count is empty"
+    if int(history.get("bucket_history_count") or 0) < 1:
+        return "immutable_history bucket count is empty"
+    return None
+
+
 def main() -> int:
     base = os.getenv("PRODUCTION_RADAR_API_BASE_URL", "").strip()
     key = os.getenv("PRODUCTION_RADAR_API_KEY", "").strip()
@@ -80,6 +105,7 @@ def main() -> int:
         return 1
 
     capture = _request(base, "/v1/research/sector-rotation/capture", key, method="POST", timeout=100)
+    history = capture.get("immutable_history") or {}
     safe_capture = {
         "spec_version": capture.get("spec_version"),
         "captured_at": capture.get("captured_at"),
@@ -97,11 +123,23 @@ def main() -> int:
         "sector_rotation_available": capture.get("sector_rotation_available"),
         "source_status": capture.get("source_status"),
         "top_relative_strength_groups": capture.get("top_relative_strength_groups"),
+        "immutable_history": {
+            "immutable": history.get("immutable"),
+            "research_family": history.get("research_family"),
+            "spec_version": history.get("spec_version"),
+            "captured_at": history.get("captured_at"),
+            "history_count": history.get("history_count"),
+            "bucket_history_count": history.get("bucket_history_count"),
+        },
     }
     print("SECTOR_ROTATION_CAPTURE=" + json.dumps(safe_capture, sort_keys=True))
 
     if capture.get("source_commit_sha") != expected_sha or capture.get("persisted") is not True:
         print("FAIL sector-rotation capture not persisted on exact SHA")
+        return 1
+    history_error = _immutable_history_error(capture)
+    if history_error:
+        print(f"FAIL sector-rotation immutable history: {history_error}")
         return 1
     if capture.get("promotion_allowed") is not False or capture.get("live_strategy_mutated") is not False:
         print("FAIL sector-rotation live/promotion guard changed")
