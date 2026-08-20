@@ -1,0 +1,27 @@
+name: NEVER MERGE diagnose recorder source association
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.head_ref == 'ops/diagnose-recorder-source-association' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      RAILWAY_ENVIRONMENT_ID: 2be04d3c-82b3-487d-930c-a4fbc7d483d8
+      MICROSTRUCTURE_RECORDER_SERVICE_ID: 61664eb1-4a59-4947-bae9-18410a2221b8
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Read Railway recorder source association
+        working-directory: bybit_eu_swing_radar/backend
+        run: python -u scripts/diagnose_microstructure_recorder_source.py
