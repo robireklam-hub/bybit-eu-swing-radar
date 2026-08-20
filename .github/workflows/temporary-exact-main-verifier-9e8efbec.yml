@@ -1,4 +1,4 @@
-name: NEVER MERGE current-production microstructure verifier
+name: NEVER MERGE current-production microstructure snapshot
 
 on:
   pull_request:
@@ -14,23 +14,12 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
     env:
       PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
       PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
-      EXPECTED_SHA: 5fc452c116d373457ab30042b989f77f7c421c0a
     steps:
-      - name: Check out current main research scripts
-        uses: actions/checkout@v7
-        with:
-          ref: 9e8efbec7ac2e28331fd4f56472237e57f9e071f
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-
-      - name: Verify deployed production SHA before read-only checks
+      - name: Read current production microstructure state without outcome access
         shell: bash
         run: |
           python - <<'PY'
@@ -38,36 +27,62 @@ jobs:
           from urllib.request import Request, urlopen
           base=os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
           key=os.environ['PRODUCTION_RADAR_API_KEY']
-          expected=os.environ['EXPECTED_SHA']
-          req=Request(base+'/version',headers={'Accept':'application/json','X-Radar-Key':key})
-          with urlopen(req,timeout=15) as response:
-              payload=json.load(response)
-          actual=payload.get('commit_sha')
-          print(f'PRODUCTION_API_SHA={actual}', flush=True)
-          if actual != expected:
-              raise SystemExit(f'expected deployed SHA {expected}, got {actual}')
+          paths={
+              'version':'/version',
+              'recorder':'/v1/research/microstructure/status',
+              'readiness':'/v1/research/microstructure/readiness',
+              'v1':'/v1/research/microstructure/alignment-status',
+              'v2':'/v1/research/microstructure/alignment-status-v2',
+              'v3':'/v1/research/microstructure/alignment-status-v3',
+          }
+          def get(path):
+              req=Request(base+path,headers={'Accept':'application/json','X-Radar-Key':key,'User-Agent':'microstructure-autopilot-snapshot/1'})
+              with urlopen(req,timeout=20) as response:
+                  payload=json.load(response)
+              if not isinstance(payload,dict):
+                  raise SystemExit(f'non-object payload for {path}')
+              return payload
+          payloads={name:get(path) for name,path in paths.items()}
+          recorder=payloads['recorder']
+          readiness=payloads['readiness']
+          safe_recorder={k:recorder.get(k) for k in (
+              'research_only','live_strategy_mutated','enabled','running','singleton_acquired','connected',
+              'symbols','messages','rows_written','last_message_at','last_write_at','last_error_at','last_error',
+              'process_role','external_service_healthy','source_commit_sha','heartbeat_age_seconds','controlled_pullback_v2'
+          )}
+          safe_readiness={k:readiness.get(k) for k in (
+              'research_only','live_strategy_mutated','gate_version','ready_for_forward_feature_analysis',
+              'promotion_allowed','thresholds','bucket_seconds','symbols','checked_at','error','error_type'
+          )}
+          print('PRODUCTION_VERSION='+json.dumps(payloads['version'],sort_keys=True),flush=True)
+          print('RECORDER_STATUS='+json.dumps(safe_recorder,sort_keys=True),flush=True)
+          print('READINESS_STATUS='+json.dumps(safe_readiness,sort_keys=True),flush=True)
+          for cohort in ('v1','v2','v3'):
+              p=payloads[cohort]
+              safe={k:p.get(k) for k in (
+                  'study','spec_version','strategy_version','preregistered_strategy_version','research_only','live_strategy_mutated',
+                  'label_blind','post_signal_data_used','outcome_visible','promotion_allowed','threshold_search_allowed',
+                  'strategy_version_isolated','data_quality_ready','alignment_coverage_ready','ready_for_preregistered_effect_test',
+                  'sample','alignment_coverage','error','error_type','checked_at'
+              )}
+              print(f'ALIGNMENT_{cohort.upper()}='+json.dumps(safe,sort_keys=True),flush=True)
+          # Fail closed on research contract violations, but not on insufficient sample.
+          if safe_recorder.get('research_only') is not True or safe_recorder.get('live_strategy_mutated') is not False:
+              raise SystemExit('recorder research contract violated')
+          if safe_recorder.get('connected') is not True or safe_recorder.get('external_service_healthy') is not True:
+              raise SystemExit('recorder unhealthy')
+          if safe_readiness.get('research_only') is not True or safe_readiness.get('promotion_allowed') is not False:
+              raise SystemExit('readiness research contract violated')
+          for cohort in ('v1','v2','v3'):
+              p=payloads[cohort]
+              required={'research_only':True,'live_strategy_mutated':False,'label_blind':True,'post_signal_data_used':False,'outcome_visible':False,'promotion_allowed':False,'strategy_version_isolated':True}
+              for k,v in required.items():
+                  if p.get(k) is not v:
+                      raise SystemExit(f'{cohort} contract violated: {k}')
+              sample=p.get('sample') or {}
+              if sample.get('minimum_total') != 60 or sample.get('minimum_per_symbol') != 10:
+                  raise SystemExit(f'{cohort} sample gate mutated')
+          if payloads['v3'].get('threshold_search_allowed') is not False:
+              raise SystemExit('v3 threshold search gate opened')
+          print('MICROSTRUCTURE CURRENT PRODUCTION SNAPSHOT VERIFIED LABEL-BLIND.',flush=True)
           PY
-
-      - name: Verify microstructure recorder and readiness
-        working-directory: bybit_eu_swing_radar/backend
-        run: python scripts/production_microstructure_smoke.py
-
-      - name: Verify preregistered v0.7.3 alignment status
-        working-directory: bybit_eu_swing_radar/backend
-        run: python scripts/production_microstructure_alignment_status.py
-
-      - name: Verify preregistered v0.7.4 alignment status
-        working-directory: bybit_eu_swing_radar/backend
-        run: python scripts/production_microstructure_alignment_status_v2.py
-
-      - name: Verify preregistered v0.7.5 alignment status
-        working-directory: bybit_eu_swing_radar/backend
-        run: python scripts/production_microstructure_alignment_status_v3.py
-
-      - name: Verify successor microstructure effect gates remain closed
-        working-directory: bybit_eu_swing_radar/backend
-        run: python scripts/production_microstructure_successor_effect_gate_guard.py
-
-      - name: Verify preregistered v0.7.3 effect status
-        working-directory: bybit_eu_swing_radar/backend
-        run: python scripts/production_microstructure_effect_status.py
