@@ -1,17 +1,31 @@
-"""Single-shot production preflight for the standalone v0.7.3 prospective funnel.
+"""Bounded read-only preflight for the standalone v0.7.3 prospective funnel.
 
-This is intentionally read-only and non-polling. It lets trusted main CI skip a
-redundant Railway deploy when the auto-deployed standalone recorder already
-publishes a fresh exact-main capture.
+Trusted main CI uses this before requesting any explicit Railway deployment. The
+preflight gives normal auto-deploy + cron capture a short settling window and
+only falls back to provisioning when exact-main substantive evidence still does
+not appear.
 """
 from __future__ import annotations
 
 import json
 import os
-from typing import Any
+import sys
+import time
+from pathlib import Path
+from typing import Any, Callable
 from urllib.request import Request, urlopen
 
+# Direct script execution sets sys.path[0] to backend/scripts. Bootstrap the
+# backend package root explicitly so this path behaves like module imports used
+# by unit tests.
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
+
 from scripts.production_v073_prospective_funnel_smoke import validate_standalone_status
+
+PREFLIGHT_POLL_SECONDS = 10
+PREFLIGHT_MAX_WAIT_SECONDS = 300
 
 
 def validate_externalized_marker(payload: dict[str, Any]) -> list[str]:
@@ -50,13 +64,45 @@ def evaluate_preflight(
     }
 
 
+def wait_for_preflight(
+    fetch: Callable[[str, bool], dict[str, Any]],
+    *,
+    expected_sha: str,
+    max_attempts: int,
+    sleep_seconds: float,
+) -> dict[str, Any]:
+    """Wait for existing exact-main production evidence without mutating Railway."""
+    last: dict[str, Any] = {"ok": False, "errors": ["preflight not attempted"]}
+    for attempt in range(max(1, max_attempts)):
+        try:
+            last = evaluate_preflight(
+                version=fetch("/version", False),
+                live_status=fetch("/v1/day-trade/status", True),
+                prospective_status=fetch("/v1/day-trade/research/prospective-funnel/status", True),
+                expected_sha=expected_sha,
+            )
+        except Exception as exc:
+            last = {"ok": False, "errors": ["fetch error: " + type(exc).__name__]}
+        if attempt % 3 == 0 or last.get("ok"):
+            print(
+                "PROSPECTIVE_PREFLIGHT_PROGRESS="
+                + json.dumps({"attempt": attempt + 1, **last}, sort_keys=True, default=str),
+                flush=True,
+            )
+        if last.get("ok"):
+            return last
+        if attempt < max_attempts - 1:
+            time.sleep(sleep_seconds)
+    return last
+
+
 def main() -> int:
     base = os.environ["PRODUCTION_RADAR_API_BASE_URL"].rstrip("/")
     key = os.environ["PRODUCTION_RADAR_API_KEY"]
     expected_sha = os.environ["EXPECTED_API_SHA"]
 
-    def get(path: str, *, auth: bool = True) -> dict[str, Any]:
-        headers = {"Accept": "application/json", "User-Agent": "standalone-funnel-preflight/1"}
+    def get(path: str, auth: bool = True) -> dict[str, Any]:
+        headers = {"Accept": "application/json", "User-Agent": "standalone-funnel-preflight/2"}
         if auth:
             headers["X-Radar-Key"] = key
         with urlopen(Request(base + path, headers=headers), timeout=20) as response:
@@ -65,21 +111,18 @@ def main() -> int:
             raise RuntimeError("non-object payload: " + path)
         return payload
 
-    try:
-        result = evaluate_preflight(
-            version=get("/version", auth=False),
-            live_status=get("/v1/day-trade/status"),
-            prospective_status=get("/v1/day-trade/research/prospective-funnel/status"),
-            expected_sha=expected_sha,
-        )
-    except Exception as exc:
-        print("PROSPECTIVE_PREFLIGHT_ERROR=" + type(exc).__name__, flush=True)
-        return 1
-
+    max_attempts = max(1, PREFLIGHT_MAX_WAIT_SECONDS // PREFLIGHT_POLL_SECONDS)
+    result = wait_for_preflight(
+        get,
+        expected_sha=expected_sha,
+        max_attempts=max_attempts,
+        sleep_seconds=PREFLIGHT_POLL_SECONDS,
+    )
     print("PROSPECTIVE_PREFLIGHT=" + json.dumps(result, sort_keys=True, default=str), flush=True)
-    if result["ok"]:
+    if result.get("ok"):
         print("V0.7.3 PROSPECTIVE FUNNEL EXACT-MAIN PREFLIGHT VERIFIED.", flush=True)
         return 0
+    print("V0.7.3 PROSPECTIVE FUNNEL PREFLIGHT EXHAUSTED; FALLBACK REQUIRED.", flush=True)
     return 1
 
 
