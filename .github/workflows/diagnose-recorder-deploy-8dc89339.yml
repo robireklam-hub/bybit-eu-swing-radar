@@ -15,6 +15,7 @@ jobs:
     timeout-minutes: 5
     env:
       RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      RAILWAY_PROJECT_ID: 846f5088-4e8b-45fe-84d9-0728542b2c36
       RAILWAY_ENVIRONMENT_ID: 2be04d3c-82b3-487d-930c-a4fbc7d483d8
       MICROSTRUCTURE_RECORDER_SERVICE_ID: 61664eb1-4a59-4947-bae9-18410a2221b8
     steps:
@@ -27,4 +28,5 @@ jobs:
         run: railway logs 8dc89339-f688-4c49-a98e-4baff9e8bc67 --build --lines 250 --service "$MICROSTRUCTURE_RECORDER_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID"
 
       - name: Failed deployment runtime logs
+        if: always()
         run: railway logs 8dc89339-f688-4c49-a98e-4baff9e8bc67 --deployment --lines 150 --service "$MICROSTRUCTURE_RECORDER_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" || true
