@@ -40,14 +40,23 @@ jobs:
       - name: Link production project
         run: railway link --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" >/dev/null
 
-      - name: Trigger standalone recorder deployment on exact main
+      - name: Set exact source metadata
         run: |
           railway variable set \
             MICROSTRUCTURE_RECORDER_ENABLED=true \
             "MICROSTRUCTURE_SOURCE_COMMIT_SHA=$EXPECTED_SHA" \
             --service "$STANDALONE_SERVICE_ID" \
             --environment "$ENVIRONMENT_ID" >/dev/null
-          echo "Recorder redeploy requested for exact main."
+
+      - name: Upload exact current-main source to standalone recorder
+        run: |
+          railway up . \
+            --project "$PROJECT_ID" \
+            --environment "$ENVIRONMENT_ID" \
+            --service "$STANDALONE_SERVICE_ID" \
+            --detach \
+            --message "microstructure exact-main $EXPECTED_SHA"
+          echo "Exact main source upload queued for standalone recorder."
 
       - name: Wait for standalone recorder deployment
         run: |
