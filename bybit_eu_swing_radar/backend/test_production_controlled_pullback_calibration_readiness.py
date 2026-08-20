@@ -1,3 +1,10 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import subprocess
+import sys
+
 from scripts.production_controlled_pullback_calibration_readiness import summarize_payloads
 from research.microstructure.controlled_pullback_calibration_v1 import MIN_ROWS_PER_SYMBOL
 
@@ -68,3 +75,22 @@ def test_contract_failures_are_rejected():
     payloads["ETHUSDC"]["outcome_fields_read"] = True
     with pytest.raises(ValueError, match="label-blind contract failed"):
         summarize_payloads(payloads)
+
+
+def test_readiness_script_bootstraps_backend_imports_when_run_directly(tmp_path):
+    script = Path(__file__).resolve().parent / "scripts" / "production_controlled_pullback_calibration_readiness.py"
+    env = os.environ.copy()
+    env.pop("PRODUCTION_RADAR_API_BASE_URL", None)
+    env.pop("PRODUCTION_RADAR_API_KEY", None)
+    env.pop("EXPECTED_SHA", None)
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "FAIL required calibration readiness configuration is missing" in result.stdout
+    assert "ModuleNotFoundError" not in result.stderr
