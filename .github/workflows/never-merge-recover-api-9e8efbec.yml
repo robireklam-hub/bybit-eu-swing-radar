@@ -1,4 +1,4 @@
-name: NEVER MERGE verify production c69db4e6
+name: NEVER MERGE recover+verify production c69db4e6
 
 on:
   push:
@@ -12,17 +12,20 @@ permissions:
   contents: read
 
 concurrency:
-  group: never-merge-verify-production-c69db4e6
+  group: never-merge-recover-verify-production-c69db4e6
   cancel-in-progress: true
 
 jobs:
-  verify:
+  recover-and-verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     env:
       EXPECTED_SHA: c69db4e6fce5ad9930bbb9bc3bc7464cba0ace8c
       PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
       PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      RAILWAY_ENVIRONMENT_ID: 2be04d3c-82b3-487d-930c-a4fbc7d483d8
+      API_SERVICE_ID: 6b92a19d-a178-4eab-9b8a-9fed1855319b
 
     steps:
       - name: Check out exact current main
@@ -34,6 +37,74 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+
+      - name: Verify exact API SHA or request recovery deployment
+        run: |
+          python -u - <<'PY'
+          import json, os, time
+          from urllib.error import HTTPError, URLError
+          from urllib.request import Request, urlopen
+
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key = os.environ['PRODUCTION_RADAR_API_KEY']
+          expected = os.environ['EXPECTED_SHA']
+          endpoint = 'https://backboard.railway.com/graphql/v2'
+          token = os.environ['RAILWAY_API_TOKEN']
+          service_id = os.environ['API_SERVICE_ID']
+          environment_id = os.environ['RAILWAY_ENVIRONMENT_ID']
+
+          def production_sha():
+              req = Request(base + '/version', headers={'Accept':'application/json','X-Radar-Key':key})
+              with urlopen(req, timeout=15) as response:
+                  return str((json.load(response) or {}).get('commit_sha') or '')
+
+          try:
+              actual = production_sha()
+          except (HTTPError, URLError, TimeoutError, ValueError) as exc:
+              actual = ''
+              print(f'PRECHECK_API_SHA unavailable error={type(exc).__name__}', flush=True)
+          else:
+              print(f'PRECHECK_API_SHA actual={actual}', flush=True)
+
+          if actual == expected:
+              print('EXACT API SHA ALREADY DEPLOYED; RECOVERY SKIPPED.', flush=True)
+              raise SystemExit(0)
+
+          def gql(query, variables):
+              req = Request(endpoint, data=json.dumps({'query': query, 'variables': variables}).encode(), headers={
+                  'Authorization': 'Bearer ' + token,
+                  'Content-Type': 'application/json',
+                  'Accept': 'application/json',
+                  'User-Agent': 'exact-main-api-recovery/3',
+              })
+              with urlopen(req, timeout=30) as response:
+                  payload = json.load(response)
+              if payload.get('errors'):
+                  raise RuntimeError('Railway GraphQL error: ' + json.dumps([
+                      {'message': e.get('message'), 'path': e.get('path')} for e in payload['errors']
+                  ]))
+              return payload.get('data') or {}
+
+          deploy = '''mutation deploy($serviceId:String!,$environmentId:String!,$commitSha:String!){
+            serviceInstanceDeployV2(serviceId:$serviceId,environmentId:$environmentId,commitSha:$commitSha)
+          }'''
+          deployment_id = str(gql(deploy, {'serviceId': service_id, 'environmentId': environment_id, 'commitSha': expected}).get('serviceInstanceDeployV2') or '')
+          if not deployment_id:
+              raise SystemExit('Railway returned no deployment id')
+          print('API_RECOVERY_DEPLOYMENT_ID=' + deployment_id, flush=True)
+
+          query = 'query deployment($id:String!){deployment(id:$id){id status}}'
+          terminal = {'SUCCESS','FAILED','CRASHED','REMOVED','SKIPPED'}
+          status = 'UNKNOWN'
+          for attempt in range(100):
+              status = str((gql(query, {'id': deployment_id}).get('deployment') or {}).get('status') or 'UNKNOWN')
+              print(f'API_RECOVERY_STATUS attempt={attempt+1} status={status}', flush=True)
+              if status in terminal:
+                  break
+              time.sleep(10)
+          if status != 'SUCCESS':
+              raise SystemExit(f'exact-main API recovery deployment did not succeed; final_status={status}')
+          PY
 
       - name: Verify exact production API SHA
         run: |
@@ -52,7 +123,7 @@ jobs:
                   print('EXACT API SHA DEPLOYED.', flush=True)
                   raise SystemExit(0)
               time.sleep(10)
-          raise SystemExit('exact API SHA not served')
+          raise SystemExit('exact API SHA not served after successful recovery deployment')
           PY
 
       - name: Verify swing compact candidate Coinalyze semantics
