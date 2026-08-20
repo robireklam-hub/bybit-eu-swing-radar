@@ -15,6 +15,20 @@ from typing import Any, Iterable, Mapping
 from research.microstructure import alignment as v1
 from research.microstructure import alignment_v2 as v2
 
+
+class _AsyncpgProxy:
+    """Load the DB driver only when the DB-backed loader actually needs it."""
+
+    def __getattr__(self, name: str) -> Any:
+        import asyncpg as module
+
+        return getattr(module, name)
+
+
+# Keep the tested monkeypatch surface while avoiding an eager DB dependency for
+# label-blind controlled-pullback/calibration contract imports.
+asyncpg = _AsyncpgProxy()
+
 SPEC_VERSION = "microstructure-forward-alignment-v3"
 PARENT_SPEC_VERSION = v2.SPEC_VERSION
 FEATURE_DEFINITION_SOURCE = v1.SPEC_VERSION
@@ -108,12 +122,7 @@ async def load_feature_rows(
     until: datetime,
     bucket_seconds: int = 5,
 ) -> list[dict[str, Any]]:
-    """Load only v0.7.5 signals at/after the preregistered v3 forward start.
-
-    The database driver is intentionally imported only on this DB-backed path so
-    label-blind feature/calibration consumers can import the frozen v3 contract
-    without requiring the production persistence dependency.
-    """
+    """Load only v0.7.5 signals at/after the preregistered v3 forward start."""
     if not database_url:
         raise RuntimeError("DATABASE_URL is not configured")
     if since.tzinfo is None or until.tzinfo is None:
@@ -122,8 +131,6 @@ async def load_feature_rows(
     effective_until = until.astimezone(timezone.utc)
     if effective_until <= effective_since:
         return []
-
-    import asyncpg
 
     wanted = tuple(dict.fromkeys(str(symbol).upper() for symbol in symbols))
     connection = await asyncpg.connect(database_url)
