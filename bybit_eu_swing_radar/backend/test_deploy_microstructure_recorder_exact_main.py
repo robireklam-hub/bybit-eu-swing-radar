@@ -147,6 +147,64 @@ def test_region_fails_closed_if_mutation_not_confirmed(monkeypatch):
         deployer.apply_recorder_region("env", "service")
 
 
+def test_recent_deployments_uses_service_filter_and_normalizes_status(monkeypatch):
+    seen = {}
+
+    def gql(query, variables):
+        seen["query"] = query
+        seen["variables"] = variables
+        return {
+            "deployments": {
+                "edges": [
+                    {"node": {"id": "d1", "status": "building"}},
+                    {"node": {"id": "d2", "status": "SUCCESS"}},
+                ]
+            }
+        }
+
+    monkeypatch.setattr(deployer, "_gql", gql)
+    assert deployer.recent_deployments("project", "service") == [
+        {"id": "d1", "status": "BUILDING"},
+        {"id": "d2", "status": "SUCCESS"},
+    ]
+    assert "DeploymentListInput" in seen["query"]
+    assert seen["variables"] == {
+        "input": {"projectId": "project", "serviceId": "service"}
+    }
+
+
+def test_wait_for_no_inflight_requires_consecutive_clean_polls(monkeypatch):
+    polls = iter(
+        [
+            [{"id": "auto", "status": "BUILDING"}],
+            [{"id": "auto", "status": "SUCCESS"}],
+            [{"id": "auto", "status": "SUCCESS"}],
+            [{"id": "auto", "status": "SUCCESS"}],
+        ]
+    )
+    sleeps = []
+    monkeypatch.setattr(deployer, "recent_deployments", lambda *_: next(polls))
+    monkeypatch.setattr(deployer.time, "sleep", sleeps.append)
+
+    deployer.wait_for_no_inflight_deployments("project", "service")
+
+    assert len(sleeps) == 3
+    assert sleeps == [deployer.DEPLOYMENT_POLL_SECONDS] * 3
+
+
+def test_wait_for_no_inflight_fails_closed_if_queue_never_settles(monkeypatch):
+    monkeypatch.setattr(
+        deployer,
+        "recent_deployments",
+        lambda *_: [{"id": "auto", "status": "DEPLOYING"}],
+    )
+    monkeypatch.setattr(deployer.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(deployer, "SETTLE_MAX_WAIT_SECONDS", deployer.DEPLOYMENT_POLL_SECONDS * 2)
+
+    with pytest.raises(RuntimeError, match="did not settle"):
+        deployer.wait_for_no_inflight_deployments("project", "service")
+
+
 def test_deployer_contains_no_variable_or_owner_mutation():
     source = open("scripts/deploy_microstructure_recorder_exact_main.py", encoding="utf-8").read()
     assert "variableCollectionUpsert" not in source

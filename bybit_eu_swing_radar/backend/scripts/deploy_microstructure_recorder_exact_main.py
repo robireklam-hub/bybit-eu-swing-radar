@@ -2,8 +2,9 @@
 
 Trusted main-only workflow utility. It preserves recorder ownership, variables,
 and live strategy state. Before requesting the exact-commit deployment it
-repairs and verifies the recorder's fixed monorepo build boundary, then applies
-the frozen EU West placement so Bybit EU WebSocket access remains available.
+repairs the fixed monorepo build boundary, applies the frozen EU West placement,
+and waits for source-connection/config deployment activity to settle. This
+prevents a Railway auto-deployment from superseding the requested exact commit.
 The end-to-end production smoke verifies the resulting runtime connectivity.
 """
 from __future__ import annotations
@@ -21,9 +22,19 @@ RECORDER_START_COMMAND = "python -m research.microstructure.standalone"
 RECORDER_REGION_CONFIG = {"europe-west4-drams3a": {"numReplicas": 1}}
 DEPLOYMENT_POLL_SECONDS = 5
 DEPLOYMENT_MAX_WAIT_SECONDS = 900
+SETTLE_MAX_WAIT_SECONDS = 300
+SETTLE_CLEAN_POLLS = 3
 GQL_RETRY_ATTEMPTS = 4
 TRANSIENT_HTTP_CODES = {429, 500, 502, 503, 504}
 TERMINAL_FAILURES = {"FAILED", "CRASHED", "REMOVED", "CANCELLED"}
+INFLIGHT_DEPLOYMENT_STATUSES = {
+    "INITIALIZING",
+    "BUILDING",
+    "DEPLOYING",
+    "WAITING",
+    "QUEUED",
+    "REMOVING",
+}
 
 
 def _gql(query: str, variables: dict[str, Any]) -> dict[str, Any]:
@@ -35,7 +46,7 @@ def _gql(query: str, variables: dict[str, Any]) -> dict[str, Any]:
             "Authorization": "Bearer " + token,
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "microstructure-recorder-exact-main-deployer/4",
+            "User-Agent": "microstructure-recorder-exact-main-deployer/5",
         },
     )
     for attempt in range(GQL_RETRY_ATTEMPTS):
@@ -117,19 +128,78 @@ def ensure_recorder_build_boundary(environment_id: str, service_id: str) -> None
 
 
 def apply_recorder_region(environment_id: str, service_id: str) -> None:
-    """Apply the previously validated EU West placement before exact deploy.
-
-    Railway's serviceInstance query does not expose multiRegionConfig through
-    the connector path used here, so we require the mutation itself to confirm
-    success and let the real production WebSocket smoke verify the placement
-    end to end.
-    """
+    """Apply the previously validated EU West placement before exact deploy."""
     _update_service_instance(
         environment_id,
         service_id,
         {"multiRegionConfig": RECORDER_REGION_CONFIG},
     )
     print("MICROSTRUCTURE_RECORDER_EU_WEST_REGION_APPLIED.", flush=True)
+
+
+def recent_deployments(project_id: str, service_id: str) -> list[dict[str, str]]:
+    """Return recent deployment IDs/statuses for the recorder service."""
+    query = """
+    query deployments($input:DeploymentListInput!){
+      deployments(input:$input,first:5){
+        edges{node{id status}}
+      }
+    }
+    """
+    payload = _gql(
+        query,
+        {
+            "input": {
+                "projectId": project_id,
+                "serviceId": service_id,
+            }
+        },
+    )
+    edges = ((payload.get("deployments") or {}).get("edges") or [])
+    result: list[dict[str, str]] = []
+    for edge in edges:
+        node = (edge or {}).get("node") or {}
+        deployment_id = str(node.get("id") or "")
+        status = str(node.get("status") or "UNKNOWN").upper()
+        if deployment_id:
+            result.append({"id": deployment_id, "status": status})
+    return result
+
+
+def wait_for_no_inflight_deployments(project_id: str, service_id: str) -> None:
+    """Wait for source-connect/config deployments to settle before exact deploy.
+
+    Three consecutive clean polls are required so an asynchronously-created
+    source deployment has time to appear before the exact deployment is sent.
+    """
+    attempts = max(1, SETTLE_MAX_WAIT_SECONDS // DEPLOYMENT_POLL_SECONDS)
+    clean_polls = 0
+    last_inflight: list[dict[str, str]] = []
+    for attempt in range(attempts):
+        deployments = recent_deployments(project_id, service_id)
+        last_inflight = [
+            item for item in deployments if item["status"] in INFLIGHT_DEPLOYMENT_STATUSES
+        ]
+        if last_inflight:
+            clean_polls = 0
+            if attempt % 6 == 0:
+                print(
+                    "MICROSTRUCTURE_RECORDER_WAITING_FOR_EXISTING_DEPLOYMENTS="
+                    + json.dumps(last_inflight, sort_keys=True),
+                    flush=True,
+                )
+        else:
+            clean_polls += 1
+            if clean_polls >= SETTLE_CLEAN_POLLS:
+                print("MICROSTRUCTURE_RECORDER_DEPLOYMENT_QUEUE_SETTLED.", flush=True)
+                return
+        time.sleep(DEPLOYMENT_POLL_SECONDS)
+    raise RuntimeError(
+        "Recorder deployment queue did not settle within "
+        + str(SETTLE_MAX_WAIT_SECONDS)
+        + "s; inflight="
+        + json.dumps(last_inflight, sort_keys=True)
+    )
 
 
 def request_exact_deployment(environment_id: str, service_id: str, commit_sha: str) -> str:
@@ -183,12 +253,14 @@ def wait_for_success(deployment_id: str) -> str:
 
 
 def main() -> int:
+    project_id = os.environ["RAILWAY_PROJECT_ID"]
     environment_id = os.environ["RAILWAY_ENVIRONMENT_ID"]
     service_id = os.environ["MICROSTRUCTURE_RECORDER_SERVICE_ID"]
     commit_sha = os.environ["EXPECTED_SHA"].strip().lower()
 
     ensure_recorder_build_boundary(environment_id, service_id)
     apply_recorder_region(environment_id, service_id)
+    wait_for_no_inflight_deployments(project_id, service_id)
     deployment_id = request_exact_deployment(environment_id, service_id, commit_sha)
     print("MICROSTRUCTURE_RECORDER_SERVICE_ID=" + service_id, flush=True)
     print("MICROSTRUCTURE_RECORDER_DEPLOYMENT_ID=" + deployment_id, flush=True)
