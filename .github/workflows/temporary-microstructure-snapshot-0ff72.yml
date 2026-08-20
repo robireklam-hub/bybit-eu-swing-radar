@@ -1,0 +1,45 @@
+name: NEVER MERGE microstructure snapshot 0ff72
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 0ff72d914bfc92cfe4de5b12c01e0fb87a7fa513
+    steps:
+      - name: Check out verifier branch
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Verify recorder and readiness exact production SHA
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_smoke.py
+
+      - name: Verify frozen v1 cohort
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_alignment_status.py
+
+      - name: Verify preregistered v2 cohort
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_alignment_status_v2.py
+
+      - name: Verify active preregistered v3 cohort
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_alignment_status_v3.py
+
+      - name: Guard successor effect gates closed until sample-ready
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_successor_effect_gate_guard.py
