@@ -58,12 +58,19 @@ def test_wait_for_success_fails_on_terminal_state(monkeypatch):
 def test_build_boundary_repairs_only_fixed_recorder_build_fields(monkeypatch):
     states = iter(
         [
-            {"id": "instance", "rootDirectory": None, "startCommand": deployer.RECORDER_START_COMMAND, "builder": "RAILPACK"},
+            {
+                "id": "instance",
+                "rootDirectory": None,
+                "startCommand": deployer.RECORDER_START_COMMAND,
+                "builder": "RAILPACK",
+                "multiRegionConfig": deployer.RECORDER_REGION_CONFIG,
+            },
             {
                 "id": "instance",
                 "rootDirectory": deployer.RECORDER_ROOT_DIRECTORY,
                 "startCommand": deployer.RECORDER_START_COMMAND,
                 "builder": "RAILPACK",
+                "multiRegionConfig": deployer.RECORDER_REGION_CONFIG,
             },
         ]
     )
@@ -98,6 +105,7 @@ def test_build_boundary_is_noop_when_already_correct(monkeypatch):
         "rootDirectory": deployer.RECORDER_ROOT_DIRECTORY,
         "startCommand": deployer.RECORDER_START_COMMAND,
         "builder": "RAILPACK",
+        "multiRegionConfig": deployer.RECORDER_REGION_CONFIG,
     }
     monkeypatch.setattr(deployer, "recorder_service_instance", lambda *_: dict(state))
     monkeypatch.setattr(deployer, "_gql", lambda *_: pytest.fail("update must not run"))
@@ -105,11 +113,81 @@ def test_build_boundary_is_noop_when_already_correct(monkeypatch):
 
 
 def test_build_boundary_fails_closed_if_update_does_not_stick(monkeypatch):
-    state = {"id": "instance", "rootDirectory": None, "startCommand": deployer.RECORDER_START_COMMAND, "builder": "RAILPACK"}
+    state = {
+        "id": "instance",
+        "rootDirectory": None,
+        "startCommand": deployer.RECORDER_START_COMMAND,
+        "builder": "RAILPACK",
+        "multiRegionConfig": deployer.RECORDER_REGION_CONFIG,
+    }
     monkeypatch.setattr(deployer, "recorder_service_instance", lambda *_: dict(state))
     monkeypatch.setattr(deployer, "_gql", lambda *_: {"serviceInstanceUpdate": True})
     with pytest.raises(RuntimeError, match="build boundary mismatch"):
         deployer.ensure_recorder_build_boundary("env", "service")
+
+
+def test_region_repairs_to_eu_west_only(monkeypatch):
+    states = iter(
+        [
+            {
+                "id": "instance",
+                "rootDirectory": deployer.RECORDER_ROOT_DIRECTORY,
+                "startCommand": deployer.RECORDER_START_COMMAND,
+                "builder": "RAILPACK",
+                "multiRegionConfig": {"sfo": {"numReplicas": 1}},
+            },
+            {
+                "id": "instance",
+                "rootDirectory": deployer.RECORDER_ROOT_DIRECTORY,
+                "startCommand": deployer.RECORDER_START_COMMAND,
+                "builder": "RAILPACK",
+                "multiRegionConfig": deployer.RECORDER_REGION_CONFIG,
+            },
+        ]
+    )
+    calls = []
+    monkeypatch.setattr(deployer, "recorder_service_instance", lambda *_: next(states))
+
+    def gql(query, variables):
+        calls.append((query, variables))
+        return {"serviceInstanceUpdate": True}
+
+    monkeypatch.setattr(deployer, "_gql", gql)
+    deployer.ensure_recorder_region("env", "service")
+
+    assert len(calls) == 1
+    assert calls[0][1] == {
+        "serviceId": "service",
+        "environmentId": "env",
+        "input": {"multiRegionConfig": {"europe-west4-drams3a": {"numReplicas": 1}}},
+    }
+
+
+def test_region_is_noop_when_already_eu_west(monkeypatch):
+    state = {
+        "id": "instance",
+        "rootDirectory": deployer.RECORDER_ROOT_DIRECTORY,
+        "startCommand": deployer.RECORDER_START_COMMAND,
+        "builder": "RAILPACK",
+        "multiRegionConfig": deployer.RECORDER_REGION_CONFIG,
+    }
+    monkeypatch.setattr(deployer, "recorder_service_instance", lambda *_: dict(state))
+    monkeypatch.setattr(deployer, "_gql", lambda *_: pytest.fail("update must not run"))
+    deployer.ensure_recorder_region("env", "service")
+
+
+def test_region_fails_closed_if_update_does_not_stick(monkeypatch):
+    state = {
+        "id": "instance",
+        "rootDirectory": deployer.RECORDER_ROOT_DIRECTORY,
+        "startCommand": deployer.RECORDER_START_COMMAND,
+        "builder": "RAILPACK",
+        "multiRegionConfig": {"sfo": {"numReplicas": 1}},
+    }
+    monkeypatch.setattr(deployer, "recorder_service_instance", lambda *_: dict(state))
+    monkeypatch.setattr(deployer, "_gql", lambda *_: {"serviceInstanceUpdate": True})
+    with pytest.raises(RuntimeError, match="region mismatch"):
+        deployer.ensure_recorder_region("env", "service")
 
 
 def test_deployer_contains_no_variable_or_owner_mutation():
@@ -119,3 +197,4 @@ def test_deployer_contains_no_variable_or_owner_mutation():
     assert "MICROSTRUCTURE_RECORDER_ENABLED" not in source
     assert "serviceInstanceDeployV2" in source
     assert "serviceInstanceUpdate" in source
+    assert "europe-west4-drams3a" in source
