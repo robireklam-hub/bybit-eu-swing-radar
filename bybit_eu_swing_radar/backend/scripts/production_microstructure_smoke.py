@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -14,6 +15,7 @@ MAX_POLLS = 24
 POLL_INTERVAL_SECONDS = 5
 TRANSIENT_STATUSES = frozenset((404, 502, 503, 504))
 AUTH_OR_RATE_LIMIT_STATUSES = frozenset((401, 403, 429))
+PROSPECTIVE_MAX_AGE_SECONDS = 120.0
 
 
 def fetch_json(url: str, api_key: str, timeout: float) -> dict[str, Any]:
@@ -32,6 +34,15 @@ def fetch_json(url: str, api_key: str, timeout: float) -> dict[str, Any]:
 def _get(fetch: Callable[[str, str, float], dict[str, Any]], base_url: str,
          path: str, api_key: str, timeout: float) -> dict[str, Any]:
     return fetch(f"{base_url.rstrip('/')}{path}", api_key, timeout)
+
+
+def _parse_utc(value: Any) -> datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("timestamp is missing")
+    parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp must be timezone-aware")
+    return parsed.astimezone(timezone.utc)
 
 
 def healthy(payload: dict[str, Any]) -> tuple[bool, str]:
@@ -60,6 +71,58 @@ def healthy(payload: dict[str, Any]) -> tuple[bool, str]:
         return False, "missing_last_message_at"
     if not payload.get("last_write_at"):
         return False, "missing_last_write_at"
+    return True, "ok"
+
+
+def prospective_runtime_healthy(
+    payload: dict[str, Any],
+    expected_sha: str,
+    *,
+    now: datetime | None = None,
+) -> tuple[bool, str]:
+    """Require the external recorder and controlled-pullback v2 runtime on exact main."""
+    if payload.get("process_role") != "standalone":
+        return False, "recorder_not_standalone"
+    if payload.get("external_service_healthy") is not True:
+        return False, "external_service_not_healthy"
+    if payload.get("source_commit_sha") != expected_sha:
+        return False, "external_recorder_sha_mismatch"
+    if float(payload.get("heartbeat_age_seconds") or 9999) > 30.0:
+        return False, "external_heartbeat_stale"
+
+    prospective = payload.get("controlled_pullback_v2")
+    if not isinstance(prospective, dict):
+        return False, "prospective_runtime_missing"
+    if prospective.get("status") != "ok":
+        return False, "prospective_runtime_not_ok"
+    runtime = prospective.get("runtime")
+    if not isinstance(runtime, dict):
+        return False, "prospective_runtime_contract_missing"
+    required_false = (
+        "outcome_fields_read",
+        "outcome_visible",
+        "promotion_allowed",
+        "live_strategy_mutation",
+    )
+    if runtime.get("research_only") is not True or runtime.get("label_blind") is not True:
+        return False, "prospective_research_contract_changed"
+    if any(runtime.get(field) is not False for field in required_false):
+        return False, "prospective_guard_changed"
+    if runtime.get("connection_policy") != "DEDICATED_RESEARCH_DB_CONNECTION":
+        return False, "prospective_connection_policy_changed"
+    try:
+        last_cycle = _parse_utc(prospective.get("last_cycle_at"))
+    except ValueError:
+        return False, "prospective_last_cycle_missing"
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    age = (current - last_cycle).total_seconds()
+    if age < -5.0 or age > PROSPECTIVE_MAX_AGE_SECONDS:
+        return False, "prospective_cycle_stale"
+    if int(prospective.get("bucket_rows") or 0) <= 0:
+        return False, "prospective_no_bucket_rows"
+    for field in ("candidate_records", "inserted_records", "duplicate_records"):
+        if field not in prospective:
+            return False, f"prospective_metric_missing:{field}"
     return True, "ok"
 
 
@@ -146,7 +209,9 @@ def run_smoke(base_url: str, api_key: str, expected_sha: str, *, timeout: float 
             print(f"FAIL phase=recorder error_type={type(exc).__name__}")
             return 1
         else:
-            ok, last_reason = healthy(status)
+            recorder_ok, recorder_reason = healthy(status)
+            prospective_ok, prospective_reason = prospective_runtime_healthy(status, expected_sha)
+            last_reason = recorder_reason if not recorder_ok else prospective_reason
             safe = {
                 "enabled": status.get("enabled"),
                 "running": status.get("running"),
@@ -159,9 +224,14 @@ def run_smoke(base_url: str, api_key: str, expected_sha: str, *, timeout: float 
                 "last_write_at": status.get("last_write_at"),
                 "last_error_at": status.get("last_error_at"),
                 "last_error": status.get("last_error"),
+                "process_role": status.get("process_role"),
+                "external_service_healthy": status.get("external_service_healthy"),
+                "source_commit_sha": status.get("source_commit_sha"),
+                "heartbeat_age_seconds": status.get("heartbeat_age_seconds"),
+                "controlled_pullback_v2": status.get("controlled_pullback_v2"),
             }
             print("RECORDER_STATUS=" + json.dumps(safe, sort_keys=True))
-            if ok:
+            if recorder_ok and prospective_ok:
                 recorder_status = status
                 break
         if attempt + 1 < MAX_POLLS:
@@ -198,7 +268,7 @@ def run_smoke(base_url: str, api_key: str, expected_sha: str, *, timeout: float 
         print(f"FAIL phase=readiness reason={readiness_reason}")
         return 1
 
-    print("MICROSTRUCTURE FORWARD RECORDER AND READINESS VERIFIED.")
+    print("MICROSTRUCTURE FORWARD RECORDER, PROSPECTIVE RUNTIME, AND READINESS VERIFIED.")
     return 0
 
 
