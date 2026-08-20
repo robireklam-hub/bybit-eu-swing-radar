@@ -80,14 +80,16 @@ async def test_cycle_uses_existing_connection_and_does_not_create_live_mutation(
 
 
 @pytest.mark.asyncio
-async def test_cycle_rejects_outcome_contamination_before_persistence():
+async def test_cycle_fails_closed_on_outcome_contamination_before_persistence():
     now = datetime(2026, 8, 20, 10, 30, tzinfo=timezone.utc)
     contaminated = _bucket("BTCUSDC", now - timedelta(seconds=5))
     contaminated["future_return"] = 0.1
     connection = FakeConnection([contaminated])
 
-    # LOAD_BUCKETS_SQL selects a fixed label-blind column set, so an upstream row
-    # object cannot inject outcome fields into detector input.
-    result = await run_prospective_cycle(connection, now=now)
-    assert result["candidate_records"] == 0
-    assert all("future_return" not in str(call) for call in connection.execute_calls)
+    with pytest.raises(ValueError, match="forbidden outcome fields"):
+        await run_prospective_cycle(connection, now=now)
+
+    assert not any(
+        sql.lstrip().startswith("INSERT INTO research_controlled_pullback_v2_records")
+        for sql, _ in connection.execute_calls
+    )
