@@ -1,0 +1,69 @@
+name: NEVER MERGE verify EU recorder 0ff72
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/verify-eu-recorder-0ff72-never-merge.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      RAILWAY_PROJECT_ID: 846f5088-4e8b-45fe-84d9-0728542b2c36
+      RAILWAY_ENVIRONMENT_ID: 2be04d3c-82b3-487d-930c-a4fbc7d483d8
+      MICROSTRUCTURE_RECORDER_SERVICE_ID: 61664eb1-4a59-4947-bae9-18410a2221b8
+      EXPECTED_SHA: 0ff72d914bfc92cfe4de5b12c01e0fb87a7fa513
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+    steps:
+      - name: Check out exact current main
+        uses: actions/checkout@v7
+        with:
+          ref: 0ff72d914bfc92cfe4de5b12c01e0fb87a7fa513
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install Railway CLI
+        run: |
+          bash <(curl -fsSL https://railway.com/install.sh) -y
+          echo "$HOME/.railway/bin" >> "$GITHUB_PATH"
+
+      - name: Connect standalone recorder to GitHub main source
+        run: |
+          railway service source connect \
+            --repo robireklam-hub/bybit-eu-swing-radar \
+            --branch main \
+            --service "$MICROSTRUCTURE_RECORDER_SERVICE_ID" \
+            --environment "$RAILWAY_ENVIRONMENT_ID" \
+            --project "$RAILWAY_PROJECT_ID" \
+            --json
+
+      - name: Deploy exact main recorder in frozen EU West region
+        working-directory: bybit_eu_swing_radar/backend
+        run: python -u scripts/deploy_microstructure_recorder_exact_main.py
+
+      - name: Verify exact external recorder and controlled-pullback runtime
+        working-directory: bybit_eu_swing_radar/backend
+        run: python -u scripts/production_microstructure_smoke.py
+
+      - name: Verify successor microstructure effect gates remain closed
+        working-directory: bybit_eu_swing_radar/backend
+        run: python -u scripts/production_microstructure_successor_effect_gate_guard.py
+
+      - name: Disconnect GitHub source to preserve recorder isolation
+        if: always()
+        run: |
+          railway service source disconnect \
+            --service "$MICROSTRUCTURE_RECORDER_SERVICE_ID" \
+            --environment "$RAILWAY_ENVIRONMENT_ID" \
+            --project "$RAILWAY_PROJECT_ID" \
+            --json || true
