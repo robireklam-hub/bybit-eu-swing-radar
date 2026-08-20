@@ -1,0 +1,74 @@
+name: TEMP market-context alerts exact-production verifier
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/temp-market-context-alerts-postmerge.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify-production:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: "3642e339013c767bdd8f7c2265c2c01aeec1ab10"
+    steps:
+      - name: Verify exact production and market-context envelope
+        shell: python
+        run: |
+          import json
+          import os
+          import time
+          import urllib.error
+          import urllib.request
+
+          base = os.environ["PRODUCTION_RADAR_API_BASE_URL"].rstrip("/")
+          key = os.environ["PRODUCTION_RADAR_API_KEY"]
+          expected = os.environ["EXPECTED_SHA"]
+
+          def get(path):
+              req = urllib.request.Request(
+                  base + path,
+                  headers={
+                      "Accept": "application/json",
+                      "User-Agent": "market-context-postmerge-verifier/1",
+                      "X-Radar-Key": key,
+                  },
+              )
+              with urllib.request.urlopen(req, timeout=15) as response:
+                  return json.load(response)
+
+          deployed = False
+          for attempt in range(20):
+              try:
+                  version = get("/version")
+              except (urllib.error.URLError, TimeoutError, OSError):
+                  version = {}
+              if version.get("commit_sha") == expected:
+                  deployed = True
+                  break
+              if attempt < 19:
+                  time.sleep(15)
+          assert deployed, "expected exact production SHA was not observed"
+
+          payload = get("/v1/day-trade/status")
+          context = payload.get("market_context_alerts")
+          assert isinstance(context, dict), "market_context_alerts missing from live day status"
+          assert context.get("version") == "market-context-alert-v1"
+          assert context.get("context_only") is True
+          assert context.get("hard_gate") is False
+          assert context.get("score_mutation") is False
+          assert context.get("eligibility_mutation") is False
+          assert context.get("execution_mutation") is False
+          assert isinstance(context.get("market_impulse"), dict)
+          assert isinstance(context.get("geopolitical"), dict)
+          assert isinstance(context.get("macro_liquidity"), dict)
+          assert context.get("causal_attribution") == "UNCONFIRMED_UNLESS_INDEPENDENTLY_CORROBORATED"
+          policy = context.get("reporting_policy") or {}
+          assert policy.get("must_surface_elevated_or_high") is True
+          assert policy.get("must_not_be_suppressed_by_trade_score") is True
+          print("EXACT PRODUCTION VERIFIED: market_context_alerts live and non-gating")
