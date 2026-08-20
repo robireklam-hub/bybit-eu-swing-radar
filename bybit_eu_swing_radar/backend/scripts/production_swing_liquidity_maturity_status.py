@@ -4,8 +4,17 @@ import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
+
+# This verifier is invoked directly as `python scripts/...py` in production
+# workflows. In that mode Python puts the scripts directory, not the backend
+# root, on sys.path. Bootstrap the backend root before importing sibling
+# research contracts so standalone execution matches module-import execution.
+_BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if str(_BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_ROOT))
 
 from research.swing_liquidity_event_contract import maturity_at
 
