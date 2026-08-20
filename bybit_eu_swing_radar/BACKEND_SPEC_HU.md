@@ -251,3 +251,14 @@ A v0.7.3 történeti szemantikája változatlanul sweep-only és reprodukálhat�
 - OI/funding/Flow továbbra is context-only és nem hard gate.
 - Journal és historical replay `strategy_version=0.7.4`; a v0.7.3 sorok és backtest jobok változatlanul elkülönítve maradnak.
 - A v0.7.3 prospective sweep-funnel kutatási kohorsz változatlanul `v073-prospective-funnel-v1`; nem kerül visszamenőleg átértelmezésre v0.7.4-ként.
+
+## 15. Day-trade v0.7.5 breakout-aktiváció
+A v0.7.4 crossing-bar-only impulse trigger történeti szemantikája változatlanul reprodukálható. A v0.7.5 külön live stratégia-kohorsz.
+
+- A `CLOSED_5M_RANGE_BREAKOUT` esemény az eredeti breakout gyertyán és az azt közvetlenül követő egy lezárt 5m gyertyán aktív marad (`validity_bars=2`), amennyiben az eredeti 12-bar range boundary továbbra is tart.
+- A következő lezárt 5m gyertya puszta megjelenése nem törölheti a már valid breakout ajánlást. Hard invalidáció csak az eredeti boundary elvesztése vagy a meglévő STRICT score/RR/target-path/liquidity/execution gate hibája lehet.
+- A triggerár az eredeti breakout boundaryhez marad horgonyozva; a rolling 12-bar high/low nem ratchetelheti el az aktív eventet a következő gyertyán.
+- Journal deduplikáció az eredeti breakout event gyertyájához kötött, ezért a follow-through gyertya nem hozhat létre duplikált signalt.
+- Historical replay ugyanazt a direct breakout + egy follow-through gyertya triggerutat használja.
+- Journal és historical replay `strategy_version=0.7.5`; a v0.7.3 és v0.7.4 korábbi kohorszok nem kerülnek visszamenőleg átértelmezésre.
+- USDC-only execution, spot long, igazolt USDC spot-margin short és context-only derivatives invariáns változatlan.

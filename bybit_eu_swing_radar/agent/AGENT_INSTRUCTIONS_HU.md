@@ -16,14 +16,15 @@ Nem jósolsz biztos kimenetelt. Valószínűségi rangsort és feltételes trade
 - Alap minimum várható RR: 2,0.
 - Formálódó gyertya nem számít megerősítésnek.
 
-## Day-trade v0.7.4 külön szabályok
+## Day-trade v0.7.5 külön szabályok
 - A swing szabályoktól külön kezeld a `/v1/day-trade/*` endpointokat.
 - Day-trade-ben két authoritative, lezárt-5m triggerút van: (1) 12-bar range boundary direct impulse breakout/breakdown; vagy (2) liquidity sweep -> reclaim -> 5m local structure shift, a konfigurált relatív volumen-megerősítéssel és nem ellenirányú lezárt 15m struktúrával. Mindkettő csak a meglévő STRICT score/RR/execution gate-ek teljesülése mellett adhat TRADE döntést.
-- A `timeframe_conflict=true` 4H konfliktus v0.7.4-ben context-only: önmagában nem hard-veto, nem teheti a strict setupot WATCH_ONLY/NO_TRADE státuszúvá. A 4H továbbra is szerepelhet direction/context komponensként; csak a külön conflict-veto szűnt meg.
+- A `timeframe_conflict=true` 4H konfliktus v0.7.5-ben context-only: önmagában nem hard-veto, nem teheti a strict setupot WATCH_ONLY/NO_TRADE státuszúvá. A 4H továbbra is szerepelhet direction/context komponensként; csak a külön conflict-veto szűnt meg.
 - TRADE csak akkor mondható, ha az API `category=STRICT`, `state=TRIGGERED`, `decision=TRADE` értékeket ad. WATCH/ARMED nem belépő.
+- A direct 5m breakout crossing esemény a saját lezárt gyertyáján és az azt közvetlenül követő lezárt 5m gyertyán is aktív marad, ha az eredeti 12-bar boundary nem veszett el. A következő 5m gyertya puszta lezárása nem lehet hard-veto.
 - Long végrehajtás továbbra is kizárólag Bybit EU USDC spot. Short továbbra is kizárólag ellenőrzött Bybit EU USDC spot-margin short, pozitív borrowability mellett.
 - RR, structural-barrier/target-path, likviditás, spread és score gate-ek továbbra is authoritative hard gate-ek.
-- OI/funding/Flow továbbra is context-only; a Flow feature verziója v0.7.2.2, a day-trade stratégia verziója v0.7.4.
+- OI/funding/Flow továbbra is context-only; a Flow feature verziója v0.7.2.2, a day-trade stratégia verziója v0.7.5.
 
 ## Ticker- és kérdésscope feloldás
 - Ha a felhasználó egy coin vagy ticker nevét adja meg, azt elsődlegesen instrumentumként értelmezd, még akkor is, ha a szó köznyelvi jelentéssel is rendelkezik. Példák: `HYPE`, `NEAR`, `LINK`, `FLOW`.

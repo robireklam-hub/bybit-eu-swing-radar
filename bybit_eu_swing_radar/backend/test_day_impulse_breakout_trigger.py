@@ -93,3 +93,53 @@ def test_v073_policy_keeps_direct_breakout_non_executable(monkeypatch):
     assert c["trigger"]["route"] == "NONE"
     assert c["trigger"]["model"] == "NONE"
     assert c["decision"] != "TRADE"
+
+def _with_follow_through(analysis: DayAnalysis, *, close: float = 101.1, high: float = 101.3, low: float = 100.6) -> DayAnalysis:
+    analysis.bars_5m = list(analysis.bars_5m) + [_bar(13, close=close, high=high, low=low)]
+    analysis.instrument.last_price = close
+    analysis.instrument.bid = close - 0.1
+    analysis.instrument.ask = close
+    return analysis
+
+
+def test_v075_immediate_next_closed_5m_bar_cannot_erase_valid_breakout(monkeypatch):
+    monkeypatch.setattr(day_worker, "latest_bar_sweep_setup", lambda *args, **kwargs: None)
+    c = build_day_candidate(
+        _with_follow_through(_analysis()),
+        "long",
+        datetime(2026, 8, 20, tzinfo=timezone.utc),
+    )
+    assert c is not None
+    assert (c["category"], c["state"], c["decision"]) == ("STRICT", "TRIGGERED", "TRADE")
+    assert c["trigger"]["route"] == "CLOSED_5M_RANGE_BREAKOUT"
+    assert c["trigger"]["age_bars"] == 1
+    assert c["trigger"]["validity_bars"] == 2
+    assert c["trigger"]["boundary_held"] is True
+    assert c["trigger"]["price"] == 100.0
+
+
+def test_v074_historical_semantics_remain_crossing_bar_only(monkeypatch):
+    monkeypatch.setattr(day_worker, "latest_bar_sweep_setup", lambda *args, **kwargs: None)
+    c = build_day_candidate(
+        _with_follow_through(_analysis()),
+        "long",
+        datetime(2026, 8, 20, tzinfo=timezone.utc),
+        strategy_version="0.7.4",
+    )
+    assert c is not None
+    assert c["strategy_version"] == "0.7.4"
+    assert c["trigger"]["triggered"] is False
+    assert c["decision"] != "TRADE"
+
+
+def test_v075_follow_through_invalidates_only_if_original_boundary_is_lost(monkeypatch):
+    monkeypatch.setattr(day_worker, "latest_bar_sweep_setup", lambda *args, **kwargs: None)
+    c = build_day_candidate(
+        _with_follow_through(_analysis(), close=99.8, high=101.0, low=99.5),
+        "long",
+        datetime(2026, 8, 20, tzinfo=timezone.utc),
+    )
+    assert c is not None
+    assert c["trigger"]["triggered"] is False
+    assert c["decision"] != "TRADE"
+

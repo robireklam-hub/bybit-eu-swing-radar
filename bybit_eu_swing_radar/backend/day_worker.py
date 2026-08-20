@@ -1,4 +1,4 @@
-"""Bybit EU Trading Radar — day-trade worker v0.7.4.
+"""Bybit EU Trading Radar — day-trade worker v0.7.5.
 
 Separate engine from the swing worker:
 - universe: active Bybit EU USDC spot pairs
@@ -78,7 +78,11 @@ def env_int(name: str, default: int) -> int:
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 SOURCE_COMMIT_SHA = os.getenv("RAILWAY_GIT_COMMIT_SHA") or None
 LEGACY_DAY_STRATEGY_VERSION = "0.7.3"
-DAY_STRATEGY_VERSION = "0.7.4"
+IMPULSE_DAY_STRATEGY_VERSION = "0.7.4"
+DAY_STRATEGY_VERSION = "0.7.5"
+# A breakout event stays executable on its own closed bar and the immediately
+# following closed 5m bar while the original boundary remains held.
+DAY_BREAKOUT_ACTIVE_BARS = 2
 DAY_MIN_TURNOVER_USDC = env_float("DAY_MIN_TURNOVER_USDC", 250_000.0)
 DAY_MAX_SPREAD_BPS = env_float("DAY_MAX_SPREAD_BPS", 25.0)
 DAY_DISCOVERY_MAX_SPREAD_BPS = env_float("DAY_DISCOVERY_MAX_SPREAD_BPS", 150.0)
@@ -676,6 +680,10 @@ def compact_day_audit_side(candidate: dict[str, Any]) -> dict[str, Any]:
             "triggered": bool(trigger.get("triggered")),
             "route": trigger.get("route", "NONE"),
             "model": trigger.get("model", ""),
+            "event_bar_time": trigger.get("event_bar_time"),
+            "age_bars": trigger.get("age_bars"),
+            "validity_bars": trigger.get("validity_bars"),
+            "boundary_held": trigger.get("boundary_held"),
         },
         "entry": entry,
         "entry_zone": candidate["entry_zone"],
@@ -735,6 +743,60 @@ def watch_rank(item: dict[str, Any]) -> tuple:
     )
 
 
+
+def recent_closed_5m_range_breakout(
+    bars_5m: list[Bar],
+    side: str,
+    *,
+    active_bars: int = DAY_BREAKOUT_ACTIVE_BARS,
+) -> dict[str, Any] | None:
+    """Return the newest still-active closed-5m range breakout event.
+
+    The event boundary is anchored to the 12 fully closed bars preceding the
+    breakout bar. A newly closed follow-through bar must not erase a valid
+    recommendation merely because the crossing happened one bar earlier.
+    The state expires after ``active_bars`` closed bars or immediately when a
+    close loses the original boundary. No future/unfinished candle is read.
+    """
+    if side not in {"long", "short"} or active_bars < 1 or len(bars_5m) < 13:
+        return None
+    current_close = bars_5m[-1].close
+    for age_bars in range(active_bars):
+        event_index = len(bars_5m) - 1 - age_bars
+        if event_index < 12:
+            break
+        prior = bars_5m[event_index - 12:event_index]
+        boundary = (
+            max(bar.high for bar in prior)
+            if side == "long"
+            else min(bar.low for bar in prior)
+        )
+        previous_close = bars_5m[event_index - 1].close
+        event_bar = bars_5m[event_index]
+        crossed = (
+            event_bar.close > boundary and previous_close <= boundary
+            if side == "long"
+            else event_bar.close < boundary and previous_close >= boundary
+        )
+        if not crossed:
+            continue
+        boundary_held = (
+            current_close > boundary if side == "long" else current_close < boundary
+        )
+        if not boundary_held:
+            return None
+        return {
+            "trigger_price": boundary,
+            "event_bar_start_ms": event_bar.start_ms,
+            "event_bar_time": _iso_from_ms(event_bar.start_ms),
+            "event_close": event_bar.close,
+            "age_bars": age_bars,
+            "validity_bars": active_bars,
+            "boundary_held": True,
+            "trigger_window_start_ms": prior[0].start_ms,
+        }
+    return None
+
 def resolve_day_trigger_policy(
     strategy_version: str,
     *,
@@ -751,7 +813,7 @@ def resolve_day_trigger_policy(
             sweep_triggered,
             "LIQUIDITY_SWEEP_RECLAIM" if sweep_triggered else "NONE",
         )
-    if strategy_version == DAY_STRATEGY_VERSION:
+    if strategy_version in {IMPULSE_DAY_STRATEGY_VERSION, DAY_STRATEGY_VERSION}:
         if sweep_triggered:
             return True, "LIQUIDITY_SWEEP_RECLAIM"
         if range_breakout_triggered:
@@ -782,20 +844,35 @@ def build_day_candidate(
     )
 
     previous_5m = analysis.bars_5m[-13:-1]
-    trigger_price = (
+    rolling_trigger_price = (
         max(bar.high for bar in previous_5m)
         if side == "long"
         else min(bar.low for bar in previous_5m)
     )
     last = analysis.bars_5m[-1]
     previous_close = analysis.bars_5m[-2].close
-    # Closed-5m range breakout is a first-class live trigger route.
-    # Keep it separate from the sweep detector so a missing sweep can never
-    # overwrite a valid direct impulse breakout again.
-    range_breakout_triggered = (
-        last.close > trigger_price and previous_close <= trigger_price
+    range_breakout_crossed_now = (
+        last.close > rolling_trigger_price and previous_close <= rolling_trigger_price
         if side == "long"
-        else last.close < trigger_price and previous_close >= trigger_price
+        else last.close < rolling_trigger_price and previous_close >= rolling_trigger_price
+    )
+    breakout_event = None
+    if strategy_version == DAY_STRATEGY_VERSION:
+        breakout_event = recent_closed_5m_range_breakout(analysis.bars_5m, side)
+        range_breakout_triggered = breakout_event is not None
+    elif strategy_version == IMPULSE_DAY_STRATEGY_VERSION:
+        # Preserve v0.7.4 historical semantics exactly: crossing bar only.
+        range_breakout_triggered = range_breakout_crossed_now
+        if range_breakout_crossed_now:
+            breakout_event = recent_closed_5m_range_breakout(
+                analysis.bars_5m, side, active_bars=1
+            )
+    else:
+        range_breakout_triggered = False
+    trigger_price = (
+        float(breakout_event["trigger_price"])
+        if breakout_event is not None
+        else rolling_trigger_price
     )
     distance_atr = abs(trigger_price - current) / max(analysis.atr_5m, 1e-12)
 
@@ -913,7 +990,11 @@ def build_day_candidate(
     gross_tp2 = target_for_net_r(DAY_MIN_RR)
     gross_tp3 = target_for_net_r(2.5)
 
-    trigger_window_start_ms = previous_5m[0].start_ms
+    trigger_window_start_ms = (
+        int(breakout_event["trigger_window_start_ms"])
+        if breakout_event is not None
+        else previous_5m[0].start_ms
+    )
     if sweep_trigger is not None and sweep_trigger.get("sweep_index") is not None:
         sweep_index = int(sweep_trigger["sweep_index"])
         if 0 <= sweep_index < len(analysis.bars_5m):
@@ -1021,11 +1102,13 @@ def build_day_candidate(
         )
     elif trigger_route == "CLOSED_5M_RANGE_BREAKOUT":
         trigger_condition = (
-            f"Closed 5m candle crosses above the prior 12-bar high near "
-            f"{round_to_tick(trigger_price, analysis.instrument.tick_size)}"
+            f"Closed 5m breakout above the anchored prior 12-bar high near "
+            f"{round_to_tick(trigger_price, analysis.instrument.tick_size)}; remains active "
+            f"through the immediate next closed 5m bar while the boundary holds"
             if side == "long"
-            else f"Closed 5m candle crosses below the prior 12-bar low near "
-            f"{round_to_tick(trigger_price, analysis.instrument.tick_size)}"
+            else f"Closed 5m breakdown below the anchored prior 12-bar low near "
+            f"{round_to_tick(trigger_price, analysis.instrument.tick_size)}; remains active "
+            f"through the immediate next closed 5m bar while the boundary holds"
         )
     else:
         trigger_condition = "No closed 5m live trigger confirmed"
@@ -1054,7 +1137,12 @@ def build_day_candidate(
     if trigger_route == "LIQUIDITY_SWEEP_RECLAIM":
         why_now.append("Latest closed 5m bar completed the sweep/reclaim/structure confirmation sequence")
     elif trigger_route == "CLOSED_5M_RANGE_BREAKOUT":
-        why_now.append("Latest closed 5m bar crossed the prior 12-bar range boundary")
+        age_bars = int((breakout_event or {}).get("age_bars", 0))
+        why_now.append(
+            "Latest closed 5m bar crossed the prior 12-bar range boundary"
+            if age_bars == 0
+            else "Prior breakout remains executable on the immediate next closed 5m bar; original boundary is still held"
+        )
     if conflict_4h:
         why_now.append(f"4H structure conflicts with the side but is context-only in v{strategy_version}")
     if vwap_reclaim:
@@ -1114,6 +1202,19 @@ def build_day_candidate(
                 else "NONE"
             ),
             "sweep_confirmation": sweep_trigger,
+            "event_bar_start_ms": (
+                None if breakout_event is None else int(breakout_event["event_bar_start_ms"])
+            ),
+            "event_bar_time": (
+                None if breakout_event is None else breakout_event["event_bar_time"]
+            ),
+            "age_bars": (None if breakout_event is None else int(breakout_event["age_bars"])),
+            "validity_bars": (
+                None if breakout_event is None else int(breakout_event["validity_bars"])
+            ),
+            "boundary_held": (
+                None if breakout_event is None else bool(breakout_event["boundary_held"])
+            ),
         },
         "entry_zone": {
             "low": round_to_tick(min(entry_low, entry_high), analysis.instrument.tick_size),

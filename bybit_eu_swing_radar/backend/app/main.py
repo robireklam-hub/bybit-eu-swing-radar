@@ -13,8 +13,8 @@ from backtest import BACKTEST_JOB_NAME, STRATEGY_VERSION, run_backtest_batch
 
 app = FastAPI(
     title="Bybit EU Trading Radar API",
-    version="0.7.4",
-    description="Read-only cached USDC swing/day scanner; day-trade strategy v0.7.4 with context-only derivatives Flow feature v0.7.2.2.",
+    version="0.7.5",
+    description="Read-only cached USDC swing/day scanner; day-trade strategy v0.7.5 with context-only derivatives Flow feature v0.7.2.2.",
 )
 
 repo = RadarRepository()
@@ -34,9 +34,9 @@ async def _run_backtest_batch_background() -> None:
     global _backtest_task
     try:
         result = await run_backtest_batch()
-        logger.info("v0.7.4 backtest batch finished: %s", result)
+        logger.info("v0.7.5 backtest batch finished: %s", result)
     except Exception:
-        logger.exception("v0.7.4 backtest batch failed")
+        logger.exception("v0.7.5 backtest batch failed")
     finally:
         _backtest_task = None
 

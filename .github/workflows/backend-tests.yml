@@ -6,9 +6,6 @@ on:
   push:
     branches: [main]
 
-permissions:
-  contents: write
-
 jobs:
   backend-tests:
     runs-on: ubuntu-latest
@@ -19,38 +16,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
-
-      - name: Apply v0.7.5 breakout persistence patch once
-        if: github.event_name == 'pull_request' && github.head_ref == 'fix/day-v075-breakout-persistence'
-        working-directory: .
-        run: |
-          git fetch origin fix/day-v075-breakout-persistence main
-          git checkout -B fix/day-v075-breakout-persistence origin/fix/day-v075-breakout-persistence
-          sed -i "s/replace_all(version_iso, '0.7.4', '0.7.5', minimum=4)/replace_all(version_iso, '0.7.4', '0.7.5', minimum=3)/" scripts/temp_apply_v075_breakout_persistence.py
-          python scripts/temp_apply_v075_breakout_persistence.py
-          git checkout origin/main -- .github/workflows/backend-tests.yml
-          rm scripts/temp_apply_v075_breakout_persistence.py
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- \
-            bybit_eu_swing_radar/backend/day_worker.py \
-            bybit_eu_swing_radar/backend/journal_core.py \
-            bybit_eu_swing_radar/backend/backtest.py \
-            bybit_eu_swing_radar/backend/app/repository.py \
-            bybit_eu_swing_radar/backend/app/main.py \
-            bybit_eu_swing_radar/backend/flow_context.py \
-            bybit_eu_swing_radar/action/openapi.yaml \
-            bybit_eu_swing_radar/agent/AGENT_INSTRUCTIONS_HU.md \
-            bybit_eu_swing_radar/BACKEND_SPEC_HU.md \
-            bybit_eu_swing_radar/backend/test_day_impulse_breakout_trigger.py \
-            bybit_eu_swing_radar/backend/test_day_breakout_journal_dedupe_v075.py \
-            bybit_eu_swing_radar/backend/test_v073_contract_alignment.py \
-            bybit_eu_swing_radar/backend/test_v073_version_isolation.py \
-            bybit_eu_swing_radar/backend/test_v073_railway_backtest_dispatch.py \
-            .github/workflows/backend-tests.yml \
-            scripts/temp_apply_v075_breakout_persistence.py
-          git commit -m "Fix day v0.7.5 breakout persistence"
-          git push origin HEAD:fix/day-v075-breakout-persistence
 
       - name: Set up Python
         uses: actions/setup-python@v7

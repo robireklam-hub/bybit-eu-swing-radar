@@ -20,7 +20,7 @@ from typing import Any
 import asyncpg
 
 
-STRATEGY_VERSION = "0.7.4"
+STRATEGY_VERSION = "0.7.5"
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -244,6 +244,12 @@ def build_signal_record(
         return None
 
     trigger = candidate.get("trigger") or {}
+    trigger_event_start_ms = int(_as_float(trigger.get("event_bar_start_ms"), 0.0))
+    signal_key_bar_start = (
+        datetime.fromtimestamp(trigger_event_start_ms / 1000.0, tz=timezone.utc)
+        if trigger_event_start_ms > 0
+        else signal_bar_start
+    )
     entry_zone = candidate.get("entry_zone") or {}
     metrics = candidate.get("metrics") or {}
     cost_price = entry * JOURNAL_COST_BPS / 10_000.0
@@ -258,7 +264,7 @@ def build_signal_record(
     )
 
     return {
-        "signal_key": _signal_key(str(candidate["symbol"]), side, signal_bar_start),
+        "signal_key": _signal_key(str(candidate["symbol"]), side, signal_key_bar_start),
         "strategy_version": STRATEGY_VERSION,
         "signal_class": signal_class,
         "symbol": str(candidate["symbol"]).upper(),

@@ -1,6 +1,6 @@
 """Day-trade derivatives flow context v0.7.2.2.
 
-Context-only enrichment. This module does NOT change the v0.7.4 STRICT gates,
+Context-only enrichment. This module does NOT change the v0.7.5 STRICT gates,
 trade decisions, entries, stops, targets, journal logic, or historical replay.
 
 Primary source: Bybit global public linear-derivatives market data.
@@ -118,7 +118,7 @@ def build_flow_payload(
     if not derivative_instrument or not derivative_ticker:
         return {
             "strategy_mode": "DAY_TRADE",
-            "strategy_version": "0.7.4",
+            "strategy_version": "0.7.5",
             "feature_version": "0.7.2.2",
             "symbol": spot_symbol,
             "data_as_of": now.isoformat(),
@@ -163,7 +163,7 @@ def build_flow_payload(
 
     return {
         "strategy_mode": "DAY_TRADE",
-        "strategy_version": "0.7.4",
+        "strategy_version": "0.7.5",
         "feature_version": "0.7.2.2",
         "symbol": spot_symbol,
         "data_as_of": now.isoformat(),
@@ -250,7 +250,7 @@ def _nullable_int(value: Any) -> int | None:
 
 def _notes() -> list[str]:
     return [
-        "Flow context is informational only and does not change v0.7.4 STRICT gates or trade decisions.",
+        "Flow context is informational only and does not change v0.7.5 STRICT gates or trade decisions.",
         "Bybit global derivatives are not Bybit EU spot or Bybit EU spot-margin execution data.",
         "Open-interest direction does not identify which side opened or closed; use price action and funding as context, not proof.",
         "coinalyze_existing is the already-cached secondary derivatives payload and is not Bybit EU-specific unless explicitly marked.",
