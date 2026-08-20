@@ -1,0 +1,65 @@
+name: NEVER MERGE verify recorder EU West bde50e1a
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/verify-recorder-region-bde50e1a.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      RAILWAY_PROJECT_ID: 846f5088-4e8b-45fe-84d9-0728542b2c36
+      RAILWAY_ENVIRONMENT_ID: 2be04d3c-82b3-487d-930c-a4fbc7d483d8
+      MICROSTRUCTURE_RECORDER_SERVICE_ID: 61664eb1-4a59-4947-bae9-18410a2221b8
+      EXPECTED_SHA: bde50e1a422ef3e5b9e1fbf11bdf3269acf9432b
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+    steps:
+      - name: Check out exact current main
+        uses: actions/checkout@v7
+        with:
+          ref: bde50e1a422ef3e5b9e1fbf11bdf3269acf9432b
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install Railway CLI
+        run: |
+          bash <(curl -fsSL https://railway.com/install.sh) -y
+          echo "$HOME/.railway/bin" >> "$GITHUB_PATH"
+
+      - name: Connect standalone recorder to GitHub main source
+        run: |
+          railway service source connect \
+            --repo robireklam-hub/bybit-eu-swing-radar \
+            --branch main \
+            --service "$MICROSTRUCTURE_RECORDER_SERVICE_ID" \
+            --environment "$RAILWAY_ENVIRONMENT_ID" \
+            --project "$RAILWAY_PROJECT_ID" \
+            --json
+
+      - name: Deploy standalone recorder from exact tested main commit
+        working-directory: bybit_eu_swing_radar/backend
+        run: python -u scripts/deploy_microstructure_recorder_exact_main.py
+
+      - name: Verify exact external recorder and prospective runtime
+        working-directory: bybit_eu_swing_radar/backend
+        run: python -u scripts/production_microstructure_smoke.py
+
+      - name: Disconnect GitHub source to preserve recorder isolation
+        if: always()
+        run: |
+          railway service source disconnect \
+            --service "$MICROSTRUCTURE_RECORDER_SERVICE_ID" \
+            --environment "$RAILWAY_ENVIRONMENT_ID" \
+            --project "$RAILWAY_PROJECT_ID" \
+            --json || true
