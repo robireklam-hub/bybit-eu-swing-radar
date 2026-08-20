@@ -1,4 +1,4 @@
-"""Incremental historical replay engine for Trading Radar v0.7.4.
+"""Incremental historical replay engine for Trading Radar v0.7.5.
 
 The replay is research infrastructure, not an execution guarantee.
 It reuses the live day-trade scoring functions while enforcing closed-bar
@@ -9,7 +9,7 @@ Known limitations are stored with every job:
 - current active-symbol selection creates survivorship bias;
 - historical bid/ask spread and borrowability are unavailable from the kline
   endpoint, so spread is modelled and short borrowability is not verified;
-- Coinalyze derivatives context is not part of v0.7.4 replay scoring;
+- Coinalyze derivatives context is not part of v0.7.5 replay scoring;
 - the selected liquid universe is evaluated directly rather than recreating the
   live full-universe top-30 promotion at every 5m timestamp.
 """
@@ -32,6 +32,7 @@ import httpx
 
 from day_worker import (
     DAY_ASSUMED_ROUND_TRIP_COST_BPS,
+    DAY_BREAKOUT_ACTIVE_BARS,
     DAY_MAX_SPREAD_BPS,
     DAY_MIN_RR,
     DAY_MIN_TURNOVER_USDC,
@@ -41,11 +42,12 @@ from day_worker import (
     build_day_candidate,
     calculate_fast_result,
     normalize_usdc_universe,
+    recent_closed_5m_range_breakout,
 )
 from sweep_research import SweepResearchConfig, latest_bar_sweep_setup
 from worker import Bar, BybitAPI, Instrument, safe_float
 
-STRATEGY_VERSION = "0.7.4"
+STRATEGY_VERSION = "0.7.5"
 FIVE_MIN_MS = 5 * 60 * 1000
 
 
@@ -78,7 +80,7 @@ def env_float(name: str, default: float) -> float:
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 BACKTEST_ENABLED = env_bool("BACKTEST_ENABLED", True)
-BACKTEST_JOB_NAME = os.getenv("BACKTEST_JOB_NAME", "v074-90d-netrr-structural-barrier").strip()
+BACKTEST_JOB_NAME = os.getenv("BACKTEST_JOB_NAME", "v075-90d-netrr-structural-barrier").strip()
 BACKTEST_LOOKBACK_DAYS = min(max(env_int("BACKTEST_LOOKBACK_DAYS", 90), 7), 365)
 BACKTEST_WARMUP_DAYS = min(max(env_int("BACKTEST_WARMUP_DAYS", 14), 14), 45)
 BACKTEST_SYMBOL_LIMIT = min(max(env_int("BACKTEST_SYMBOL_LIMIT", 30), 3), 60)
@@ -520,15 +522,20 @@ def replay_symbol(
         sweep_config = SweepResearchConfig(
             volume_confirmation_ratio=DAY_TRIGGER_VOLUME_RATIO
         )
-        trigger_sides = [
-            side
-            for side in ("long", "short")
-            if latest_bar_sweep_setup(
+        trigger_sides = []
+        for side in ("long", "short"):
+            sweep_ready = latest_bar_sweep_setup(
                 bars5_slice,
                 side,
                 config=sweep_config,
             ) is not None
-        ]
+            breakout_ready = recent_closed_5m_range_breakout(
+                bars5_slice,
+                side,
+                active_bars=DAY_BREAKOUT_ACTIVE_BARS,
+            ) is not None
+            if sweep_ready or breakout_ready:
+                trigger_sides.append(side)
         if not trigger_sides:
             continue
         symbol15 = _higher_prefix(bars15, closes15, evaluation_time_ms, 220)
@@ -729,7 +736,7 @@ WARNINGS = [
     "Current active-symbol selection creates survivorship bias.",
     "Historical spread is modelled from rolling 24h turnover; it is not bid/ask history.",
     "Historical short borrowability is unavailable; technical shorts are research-only unless explicitly labelled current proxy.",
-    "Coinalyze OI/funding is excluded from replay v0.7.4.",
+    "Coinalyze OI/funding is excluded from replay v0.7.5.",
     "The selected liquid universe is replayed directly; historical full-universe top-30 promotion is not reconstructed.",
     "Entry is modelled at the closed trigger-bar close and costs are a configurable assumption.",
     "Same-candle stop and TP2 is treated as stop-first.",
