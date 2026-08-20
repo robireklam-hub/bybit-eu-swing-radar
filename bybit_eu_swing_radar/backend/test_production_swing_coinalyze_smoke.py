@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from scripts.production_swing_coinalyze_smoke import evaluate, run_smoke
+from scripts.production_swing_coinalyze_smoke import (
+    evaluate,
+    market_support_partition,
+    run_smoke,
+)
 
 
 def top_payload():
@@ -44,6 +48,53 @@ def test_evaluate_requires_exact_priority_target_coverage_and_status_reason():
     top = top_payload()
     top["strict_longs"][0]["derivatives_status_reason"] = ""
     assert any("missing derivatives_status_reason" in value for value in evaluate(top, status_payload(), "abc"))
+
+
+def test_market_support_partition_distinguishes_no_market_from_endpoint_degradation():
+    top = top_payload()
+    top["watch_only_longs"] = [
+        {
+            "symbol": "BBBUSBCC",
+            "derivatives_status": "UNAVAILABLE",
+            "derivatives_status_reason": "No matching Coinalyze future market.",
+            "derivatives_context_only": True,
+        },
+        {
+            "symbol": "CCCUSDC",
+            "derivatives_status": "UNAVAILABLE",
+            "derivatives_status_reason": "Coinalyze endpoint data unavailable after targeting.",
+            "derivatives_context_only": True,
+        },
+    ]
+
+    supported, unsupported = market_support_partition(top)
+
+    assert supported == ["AAAUSDC", "CCCUSDC"]
+    assert unsupported == ["BBBUSBCC"]
+
+
+def test_evaluate_requires_all_supported_priority_candidates_targeted():
+    top = top_payload()
+    top["watch_only_longs"] = [
+        {
+            "symbol": "BBBUSBCC",
+            "derivatives_status": "UNAVAILABLE",
+            "derivatives_status_reason": "No matching Coinalyze future market.",
+            "derivatives_context_only": True,
+        }
+    ]
+    status = status_payload()
+    worker = status["worker"]
+    worker["coinalyze_priority_symbols"] = ["AAAUSDC", "BBBUSBCC"]
+    worker["coinalyze_priority_targeted_symbols"] = ["BBBUSBCC"]
+    worker["coinalyze_priority_enriched_symbols"] = ["AAAUSDC"]
+    worker["coinalyze_priority_partial_symbols"] = ["AAAUSDC"]
+    worker["coinalyze_priority_missing_symbols"] = ["BBBUSBCC"]
+    worker["coinalyze_priority_full_target_coverage"] = False
+
+    failures = evaluate(top, status, "abc")
+
+    assert any("Coinalyze-supported priority candidate was not targeted" in value for value in failures)
 
 
 def test_run_smoke_polls_until_exact_worker_executes():
