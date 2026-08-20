@@ -1,0 +1,40 @@
+name: NEVER MERGE exact recorder deploy 8fb22e81
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/verify-exact-recorder-8fb22e81.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      RAILWAY_ENVIRONMENT_ID: 2be04d3c-82b3-487d-930c-a4fbc7d483d8
+      MICROSTRUCTURE_RECORDER_SERVICE_ID: 61664eb1-4a59-4947-bae9-18410a2221b8
+      EXPECTED_SHA: 8fb22e818dca27d31054ebeb600677d66730e4cf
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+    steps:
+      - name: Check out exact current main
+        uses: actions/checkout@v7
+        with:
+          ref: 8fb22e818dca27d31054ebeb600677d66730e4cf
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Deploy standalone recorder from exact tested main commit
+        working-directory: bybit_eu_swing_radar/backend
+        run: python -u scripts/deploy_microstructure_recorder_exact_main.py
+
+      - name: Verify exact external recorder and prospective runtime
+        working-directory: bybit_eu_swing_radar/backend
+        run: python -u scripts/production_microstructure_smoke.py
