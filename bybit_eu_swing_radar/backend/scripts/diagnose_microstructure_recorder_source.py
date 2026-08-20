@@ -48,11 +48,11 @@ def main() -> int:
     service_id = os.environ["MICROSTRUCTURE_RECORDER_SERVICE_ID"]
     environment_id = os.environ["RAILWAY_ENVIRONMENT_ID"]
 
-    for type_name in ("Service", "ServiceInstance", "Deployment"):
+    for type_name in ("Service", "ServiceInstance", "Deployment", "ServiceSource"):
         safe_schema = []
         for field in type_fields(type_name):
             name = str(field.get("name") or "")
-            if any(token in name.lower() for token in INTERESTING):
+            if type_name == "ServiceSource" or any(token in name.lower() for token in INTERESTING):
                 kind, nested = base_type(field)
                 safe_schema.append({"name": name, "kind": kind, "type": nested, "args": [a.get("name") for a in field.get("args") or []]})
         print(type_name.upper() + "_INTERESTING_FIELDS=" + json.dumps(safe_schema, sort_keys=True))
@@ -61,7 +61,6 @@ def main() -> int:
     query instance($serviceId:String!,$environmentId:String!){
       serviceInstance(serviceId:$serviceId,environmentId:$environmentId){
         id serviceName startCommand buildCommand rootDirectory region restartPolicyType
-        source
         latestDeployment{id status createdAt meta}
       }
     }
