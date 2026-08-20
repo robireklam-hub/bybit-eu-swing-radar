@@ -1,9 +1,17 @@
 from __future__ import annotations
 
-from scripts.production_microstructure_smoke import healthy, readiness_healthy, run_smoke
+from datetime import datetime, timezone
+
+from scripts.production_microstructure_smoke import (
+    healthy,
+    prospective_runtime_healthy,
+    readiness_healthy,
+    run_smoke,
+)
 
 
 def _healthy_status(**overrides):
+    now = datetime.now(timezone.utc).isoformat()
     payload = {
         "research_only": True,
         "live_strategy_mutated": False,
@@ -14,8 +22,29 @@ def _healthy_status(**overrides):
         "symbols": ["BTCUSDC", "ETHUSDC", "SOLUSDC"],
         "messages": 100,
         "rows_written": 10,
-        "last_message_at": "2026-08-16T16:00:00+00:00",
-        "last_write_at": "2026-08-16T16:00:00+00:00",
+        "last_message_at": now,
+        "last_write_at": now,
+        "process_role": "standalone",
+        "external_service_healthy": True,
+        "source_commit_sha": "abc",
+        "heartbeat_age_seconds": 4.0,
+        "controlled_pullback_v2": {
+            "status": "ok",
+            "last_cycle_at": now,
+            "bucket_rows": 100,
+            "candidate_records": 0,
+            "inserted_records": 0,
+            "duplicate_records": 0,
+            "runtime": {
+                "research_only": True,
+                "label_blind": True,
+                "outcome_fields_read": False,
+                "outcome_visible": False,
+                "promotion_allowed": False,
+                "live_strategy_mutation": False,
+                "connection_policy": "DEDICATED_RESEARCH_DB_CONNECTION",
+            },
+        },
     }
     payload.update(overrides)
     return payload
@@ -60,6 +89,30 @@ def test_healthy_requires_real_messages_and_rows():
     assert healthy(_healthy_status(connected=False))[1] == "websocket_not_connected"
 
 
+def test_prospective_runtime_requires_exact_external_sha_and_label_blind_cycle():
+    now = datetime.now(timezone.utc)
+    assert prospective_runtime_healthy(_healthy_status(), "abc", now=now) == (True, "ok")
+    assert prospective_runtime_healthy(_healthy_status(source_commit_sha="old"), "abc", now=now)[1] == "external_recorder_sha_mismatch"
+    assert prospective_runtime_healthy(
+        _healthy_status(controlled_pullback_v2={"status": "degraded"}), "abc", now=now
+    )[1] == "prospective_runtime_not_ok"
+
+    contaminated = _healthy_status()
+    contaminated["controlled_pullback_v2"]["runtime"]["outcome_visible"] = True
+    assert prospective_runtime_healthy(contaminated, "abc", now=now)[1] == "prospective_guard_changed"
+
+
+def test_prospective_runtime_allows_zero_events_but_requires_real_bucket_cycle():
+    now = datetime.now(timezone.utc)
+    status = _healthy_status()
+    assert status["controlled_pullback_v2"]["candidate_records"] == 0
+    assert prospective_runtime_healthy(status, "abc", now=now) == (True, "ok")
+
+    no_buckets = _healthy_status()
+    no_buckets["controlled_pullback_v2"]["bucket_rows"] = 0
+    assert prospective_runtime_healthy(no_buckets, "abc", now=now)[1] == "prospective_no_bucket_rows"
+
+
 def test_readiness_contract_does_not_require_24h_gate_to_have_passed():
     symbols = ["BTCUSDC", "ETHUSDC", "SOLUSDC"]
     assert readiness_healthy(_readiness(), symbols) == (True, "ok")
@@ -67,7 +120,7 @@ def test_readiness_contract_does_not_require_24h_gate_to_have_passed():
     assert readiness_healthy(_readiness(error="db failed"), symbols)[1] == "readiness_query_error"
 
 
-def test_smoke_polls_until_recorder_writes_rows_then_checks_readiness():
+def test_smoke_polls_until_exact_external_recorder_and_prospective_cycle_then_checks_readiness():
     responses = iter([
         {"commit_sha": "abc"},
         _healthy_status(rows_written=0),
@@ -82,6 +135,16 @@ def test_smoke_polls_until_recorder_writes_rows_then_checks_readiness():
     result = run_smoke("https://example.test", "secret", "abc", fetch=fetch, sleep=sleeps.append)
     assert result == 0
     assert sleeps == [5]
+
+
+def test_smoke_fails_closed_on_old_external_recorder_even_when_api_sha_matches():
+    responses = iter([{"commit_sha": "abc"}] + [_healthy_status(source_commit_sha="old")] * 24)
+
+    def fetch(url, api_key, timeout):
+        return next(responses)
+
+    result = run_smoke("https://example.test", "secret", "abc", fetch=fetch, sleep=lambda _: None)
+    assert result == 1
 
 
 def test_smoke_fails_closed_on_readiness_query_error():
