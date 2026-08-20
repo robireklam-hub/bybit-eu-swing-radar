@@ -102,6 +102,25 @@ def test_prospective_runtime_requires_exact_external_sha_and_label_blind_cycle()
     assert prospective_runtime_healthy(contaminated, "abc", now=now)[1] == "prospective_guard_changed"
 
 
+def test_monitor_mode_allows_healthy_older_recorder_sha_but_requires_identity():
+    now = datetime.now(timezone.utc)
+    older = _healthy_status(source_commit_sha="recorder-relevant-old-sha")
+    assert prospective_runtime_healthy(
+        older,
+        "current-api-main-sha",
+        require_exact_recorder_sha=False,
+        now=now,
+    ) == (True, "ok")
+
+    missing = _healthy_status(source_commit_sha="")
+    assert prospective_runtime_healthy(
+        missing,
+        "current-api-main-sha",
+        require_exact_recorder_sha=False,
+        now=now,
+    )[1] == "external_recorder_sha_missing"
+
+
 def test_prospective_runtime_allows_zero_events_but_requires_real_bucket_cycle():
     now = datetime.now(timezone.utc)
     status = _healthy_status()
@@ -145,6 +164,27 @@ def test_smoke_fails_closed_on_old_external_recorder_even_when_api_sha_matches()
 
     result = run_smoke("https://example.test", "secret", "abc", fetch=fetch, sleep=lambda _: None)
     assert result == 1
+
+
+def test_monitor_smoke_accepts_older_healthy_recorder_without_weakening_api_sha():
+    responses = iter([
+        {"commit_sha": "api-current"},
+        _healthy_status(source_commit_sha="recorder-last-relevant"),
+        _readiness(),
+    ])
+
+    def fetch(url, api_key, timeout):
+        return next(responses)
+
+    result = run_smoke(
+        "https://example.test",
+        "secret",
+        "api-current",
+        require_exact_recorder_sha=False,
+        fetch=fetch,
+        sleep=lambda _: None,
+    )
+    assert result == 0
 
 
 def test_smoke_fails_closed_on_readiness_query_error():
