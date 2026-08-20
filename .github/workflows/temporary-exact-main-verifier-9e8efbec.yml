@@ -1,0 +1,76 @@
+name: NEVER MERGE exact-main verifier 9e8efbec
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: never-merge-exact-main-verifier-9e8efbec
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 9e8efbec7ac2e28331fd4f56472237e57f9e071f
+    steps:
+      - name: Check out exact tested main
+        uses: actions/checkout@v7
+        with:
+          ref: 9e8efbec7ac2e28331fd4f56472237e57f9e071f
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Wait for exact API deployment
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, time
+          from urllib.request import Request, urlopen
+          base=os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key=os.environ['PRODUCTION_RADAR_API_KEY']
+          expected=os.environ['EXPECTED_SHA']
+          for attempt in range(120):
+              try:
+                  req=Request(base+'/version',headers={'Accept':'application/json','X-Radar-Key':key})
+                  with urlopen(req,timeout=15) as response:
+                      payload=json.load(response)
+                  actual=payload.get('commit_sha')
+                  print(f'API_SHA attempt={attempt+1} actual={actual}', flush=True)
+                  if actual == expected:
+                      print('EXACT API SHA DEPLOYED.', flush=True)
+                      raise SystemExit(0)
+              except Exception as exc:
+                  print(f'API_WAIT attempt={attempt+1} error={type(exc).__name__}', flush=True)
+              time.sleep(10)
+          raise SystemExit('exact API SHA did not deploy within verifier window')
+          PY
+
+      - name: Verify swing candidate Coinalyze semantics
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_coinalyze_smoke.py
+
+      - name: Verify label-blind swing liquidity event construction
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_event_smoke.py
+
+      - name: Verify label-blind swing liquidity maturity status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_maturity_status.py
+
+      - name: Verify sector rotation append-only history and source coverage
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_sector_rotation_smoke.py
+
+      - name: Verify successor microstructure effect gates remain closed
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_successor_effect_gate_guard.py
