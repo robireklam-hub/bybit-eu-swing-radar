@@ -5,10 +5,19 @@ from __future__ import annotations
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+
+# This script is invoked directly from backend/scripts by GitHub Actions. Python
+# otherwise puts only the scripts directory on sys.path, which makes the sibling
+# backend/research package unavailable. Bootstrap the backend root explicitly so
+# direct production execution and test imports use the same modules.
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
 
 from research.microstructure.controlled_pullback_calibration_v1 import MIN_ROWS_PER_SYMBOL
 from research.microstructure.controlled_pullback_features_v1 import derive_calibration_feature_rows
