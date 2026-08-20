@@ -1,8 +1,8 @@
 name: NEVER MERGE exact main verifier c723
 
 on:
-  push:
-    branches: [research/exact-main-verifier-c723-never-merge]
+  pull_request:
+    branches: [main]
     paths:
       - ".github/workflows/exact-main-verifier-c723-never-merge.yml"
   workflow_dispatch:
