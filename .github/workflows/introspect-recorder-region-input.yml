@@ -1,0 +1,54 @@
+name: NEVER MERGE introspect recorder region input
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/introspect-recorder-region-input.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  introspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Print ServiceInstanceUpdateInput shape
+        run: |
+          python - <<'PY'
+          import json, os
+          from urllib.request import Request, urlopen
+          query = '''
+          query schema($name:String!){
+            __type(name:$name){
+              inputFields{
+                name
+                type{kind name ofType{kind name ofType{kind name ofType{kind name}}}}
+              }
+            }
+          }
+          '''
+          req = Request(
+              'https://backboard.railway.com/graphql/v2',
+              data=json.dumps({'query': query, 'variables': {'name':'ServiceInstanceUpdateInput'}}).encode(),
+              headers={
+                  'Authorization': 'Bearer ' + os.environ['RAILWAY_API_TOKEN'],
+                  'Content-Type': 'application/json',
+                  'Accept': 'application/json',
+                  'User-Agent': 'recorder-region-schema-diagnostic/1',
+              },
+          )
+          with urlopen(req, timeout=30) as response:
+              payload=json.loads(response.read().decode())
+          if payload.get('errors'):
+              raise SystemExit(json.dumps(payload['errors']))
+          fields=((payload.get('data') or {}).get('__type') or {}).get('inputFields') or []
+          print('SERVICE_INSTANCE_UPDATE_INPUT=' + json.dumps(fields, sort_keys=True))
+          PY
