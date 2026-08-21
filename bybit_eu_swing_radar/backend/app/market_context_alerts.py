@@ -570,7 +570,7 @@ async def get_market_context_alerts(market_payload: Any) -> dict[str, Any]:
     elif policy_state == "ACTIVE":
         headline = "Friss elsődleges policy/liquidity katalizátor látható; ez kontextus, nem önálló trade-jel."
     elif policy_gap_during_impulse:
-        headline = "Piaci volumenimpulzus látható, de a valós idejű policy/liquidity attribúció nem ellenőrizhető friss forráscapture nélkül."
+        headline = "Piaci volumenimpulzus látható, de a valós idejű policy/liquidity attribúció nem teljes és friss forráscapture nélkül nem ellenőrizhető."
     else:
         headline = _headline(geo, impulse, overall)
     return {
