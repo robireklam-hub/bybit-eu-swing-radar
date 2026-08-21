@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 
 import day_worker as live
+from research.day_barrier_clear_context_v1 import CONTEXT_VERSION, build_clear_context_snapshot
 from research.day_barrier_clear_rearm_v1 import STUDY_ID
 from research.research_governance import trial_fingerprint
 from sweep_research import classify_15m_structure
@@ -347,6 +348,7 @@ def resolve_parent_against_analysis(parent: Mapping[str, Any], analysis: Any) ->
                 "clearance_atr_5m": clearance / atr_5m if atr_5m > 0 else None,
                 "structure_state_15m": structure_state,
                 "fresh_geometry": fresh_geometry_as_of_clear(analysis, side, index),
+                "clear_time_context": build_clear_context_snapshot(analysis, index),
             }
     return None
 
@@ -401,9 +403,12 @@ async def _persist_resolution(
         "derivatives_context_only": True,
         "outcome_visibility": OUTCOME_VISIBILITY,
         "resolution_reason": resolution.get("resolution_reason"),
+        "clear_time_context": resolution.get("clear_time_context") or {},
         "shortable_at_observer_run": bool(getattr(analysis, "shortable", False)),
         "tradeable_at_observer_run": bool(getattr(analysis.instrument, "tradeable", False)),
         "observer_run_at": _utc(observed_at).isoformat(),
+        "derivatives_snapshot_timing": "OBSERVER_RUN_CONTEXT_ONLY_NOT_CLEAR_TIME",
+        "derivatives_at_observer_run": getattr(analysis, "derivatives", {}) or {},
         "execution_state_is_not_reconstructed_at_clear_time": True,
     })
     geometry = _sanitize(resolution.get("fresh_geometry") or {})
@@ -479,6 +484,7 @@ async def persist_pending_resolutions(
         "status": "COMPLETE",
         "study": STUDY_ID,
         "observer_version": OBSERVER_VERSION,
+        "context_version": CONTEXT_VERSION,
         "research_only": True,
         "label_free": True,
         "execution_authorized": False,
@@ -505,6 +511,7 @@ async def persist_pending_resolutions(
             "Only fully closed 5m bars after parent capture can resolve a parent.",
             "Original breakout/reclaim boundary loss or an opposing closed 15m shift terminates the parent before barrier clear.",
             "Fresh geometry is rebuilt as-of the clear bar; parent entry/stop/targets are never inherited.",
+            "Clear-time candle context uses closed prefixes only; bid/ask spread remains an explicitly separate observer-run snapshot.",
             "No execution state is retrospectively reconstructed at the clear bar.",
             "No forward return, PnL, MFE/MAE, win/loss or target/stop outcome is stored.",
         ],

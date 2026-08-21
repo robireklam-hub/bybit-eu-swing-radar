@@ -9,6 +9,7 @@ from scripts import preflight_v073_prospective_funnel as preflight
 
 
 LOCKED = "LOCKED_UNTIL_PREREGISTERED_DEVELOPMENT_GATE"
+CONTEXT = "day-barrier-clear-context-v1"
 
 
 def _prospective_payload(sha: str) -> dict[str, object]:
@@ -71,6 +72,7 @@ def _observer_payload(sha: str) -> dict[str, object]:
     return {
         "status": "COMPLETE",
         "observer_version": "day-barrier-clear-observer-v1",
+        "context_version": CONTEXT,
         "research_only": True,
         "label_free": True,
         "execution_authorized": False,
