@@ -44,6 +44,17 @@ def _persisted(*, execution_authorized: bool = False) -> dict:
     }
 
 
+def _run(tmp_path: Path, result: dict) -> int:
+    return run_capture(
+        "https://example.test",
+        "secret",
+        "https://api.bybit.eu",
+        tmp_path / "capture.json",
+        collect=lambda *_: _snapshot(),
+        persist=lambda *_: result,
+    )
+
+
 def test_guarded_runner_accepts_one_safe_natural_capture(tmp_path: Path):
     output = tmp_path / "capture.json"
     calls = {"collect": 0, "persist": 0}
@@ -73,28 +84,34 @@ def test_guarded_runner_accepts_one_safe_natural_capture(tmp_path: Path):
 
 
 def test_guarded_runner_fails_closed_on_unsafe_lifecycle_response(tmp_path: Path):
-    output = tmp_path / "capture.json"
-
-    assert run_capture(
-        "https://example.test",
-        "secret",
-        "https://api.bybit.eu",
-        output,
-        collect=lambda *_: _snapshot(),
-        persist=lambda *_: _persisted(execution_authorized=True),
-    ) == 1
+    assert _run(tmp_path, _persisted(execution_authorized=True)) == 1
 
 
 def test_guarded_runner_fails_closed_when_lifecycle_response_is_missing(tmp_path: Path):
-    output = tmp_path / "capture.json"
     result = _persisted()
     result.pop("lifecycle_adoption")
+    assert _run(tmp_path, result) == 1
 
-    assert run_capture(
-        "https://example.test",
-        "secret",
-        "https://api.bybit.eu",
-        output,
-        collect=lambda *_: _snapshot(),
-        persist=lambda *_: result,
-    ) == 1
+
+def test_guarded_runner_fails_closed_on_persisted_capture_timestamp_mismatch(tmp_path: Path):
+    result = _persisted()
+    result["captured_at"] = "2026-08-21T06:00:05+00:00"
+    assert _run(tmp_path, result) == 1
+
+
+def test_guarded_runner_fails_closed_on_persisted_candidate_count_mismatch(tmp_path: Path):
+    result = _persisted()
+    result["candidate_count"] = 2
+    assert _run(tmp_path, result) == 1
+
+
+def test_guarded_runner_fails_closed_on_persisted_orderbook_count_mismatch(tmp_path: Path):
+    result = _persisted()
+    result["orderbook_count"] = 0
+    assert _run(tmp_path, result) == 1
+
+
+def test_guarded_runner_fails_closed_on_persisted_orderbook_error_count_mismatch(tmp_path: Path):
+    result = _persisted()
+    result["orderbook_error_count"] = 1
+    assert _run(tmp_path, result) == 1
