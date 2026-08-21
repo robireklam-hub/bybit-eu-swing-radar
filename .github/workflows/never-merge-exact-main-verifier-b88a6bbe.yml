@@ -1,0 +1,113 @@
+name: NEVER MERGE exact-main production verifier b88a6bbe
+
+on:
+  push:
+    branches: [ops/exact-main-verifier-b88a6bbe]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: b88a6bbef7dd206ec3eb37264e7eb14346f398ca
+      EXPECTED_API_SHA: b88a6bbef7dd206ec3eb37264e7eb14346f398ca
+
+    steps:
+      - name: Check out exact production main
+        uses: actions/checkout@v7
+        with:
+          ref: b88a6bbef7dd206ec3eb37264e7eb14346f398ca
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: bybit_eu_swing_radar/backend/requirements.txt
+
+      - name: Verify exact production API SHA
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.request
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          expected = os.environ['EXPECTED_SHA']
+          for attempt in range(120):
+              try:
+                  req = urllib.request.Request(base + '/version')
+                  with urllib.request.urlopen(req, timeout=15) as r:
+                      payload = json.load(r)
+                  actual = payload.get('source_commit_sha') or payload.get('commit_sha') or payload.get('git_sha')
+                  print(f'attempt={attempt+1} actual={actual} expected={expected}')
+                  if actual == expected:
+                      raise SystemExit(0)
+              except Exception as exc:
+                  print(f'attempt={attempt+1} error={type(exc).__name__}: {exc}')
+              time.sleep(5)
+          raise SystemExit('exact production API SHA did not converge')
+          PY
+
+      - name: Verify swing candidate Coinalyze semantics
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_coinalyze_smoke.py
+
+      - name: Verify label-blind swing liquidity event construction
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_event_smoke.py
+
+      - name: Verify swing liquidity maturity
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_maturity_status.py
+
+      - name: Install policy semantic test dependencies
+        working-directory: bybit_eu_swing_radar/backend
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install pytest pytest-asyncio
+
+      - name: Verify deterministic policy catalyst impulse semantics
+        working-directory: bybit_eu_swing_radar/backend
+        run: python -m pytest -q test_policy_catalyst_market_impulse_semantics.py
+
+      - name: Verify live policy catalyst impulse response wiring
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key = os.environ.get('PRODUCTION_RADAR_API_KEY', '')
+          req = urllib.request.Request(
+              base + '/v1/top-candidates?direction=both&limit=3&min_score=0',
+              headers={'Accept':'application/json','X-Radar-Key':key,'User-Agent':'policy-impulse-exact-smoke/1'},
+          )
+          with urllib.request.urlopen(req, timeout=30) as r:
+              payload = json.load(r)
+          alerts = payload.get('market_context_alerts') if isinstance(payload, dict) else None
+          if not isinstance(alerts, dict):
+              raise SystemExit('market_context_alerts missing')
+          for field, wanted in {
+              'context_only': True,
+              'hard_gate': False,
+              'score_mutation': False,
+              'eligibility_mutation': False,
+              'execution_mutation': False,
+          }.items():
+              if alerts.get(field) is not wanted:
+                  raise SystemExit(f'{field} contract mismatch')
+          if not isinstance(alerts.get('market_impulse'), dict):
+              raise SystemExit('market_impulse missing')
+          if not isinstance(alerts.get('policy_catalyst'), dict):
+              raise SystemExit('policy_catalyst missing')
+          reporting = alerts.get('reporting_policy') or {}
+          if reporting.get('must_surface_policy_gap_during_elevated_impulse') is not True:
+              raise SystemExit('policy-gap reporting contract missing')
+          if reporting.get('must_not_be_suppressed_by_trade_score') is not True:
+              raise SystemExit('trade-score suppression guard missing')
+          print('POLICY CATALYST IMPULSE LIVE RESPONSE WIRING VERIFIED.')
+          PY
