@@ -1,3 +1,5 @@
+import inspect
+
 import backtest
 import day_worker
 import journal_core
@@ -14,3 +16,8 @@ def test_historical_replay_remains_frozen_at_v075():
     assert day_worker.V075_DAY_STRATEGY_VERSION == "0.7.5"
     assert backtest.STRATEGY_VERSION == "0.7.5"
     assert backtest.DAY_BREAKOUT_ACTIVE_BARS == 2
+
+
+def test_replay_calls_candidate_builder_with_explicit_historical_version():
+    source = inspect.getsource(backtest.replay_symbol)
+    assert "strategy_version=STRATEGY_VERSION" in source
