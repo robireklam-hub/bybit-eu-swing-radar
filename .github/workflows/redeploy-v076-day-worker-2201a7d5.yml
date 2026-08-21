@@ -1,0 +1,211 @@
+name: Redeploy v0.7.6 day worker exact main 2201a7d5
+
+on:
+  push:
+    branches: [ops/redeploy-v076-day-worker-2201a7d5]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  redeploy-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PROJECT_ID: 846f5088-4e8b-45fe-84d9-0728542b2c36
+      ENVIRONMENT_ID: 2be04d3c-82b3-487d-930c-a4fbc7d483d8
+      EXPECTED_SHA: 2201a7d5b4e5e54ee65a17ebc51a11ac3d90e281
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+
+    steps:
+      - name: Check out exact main
+        uses: actions/checkout@v7
+        with:
+          ref: 2201a7d5b4e5e54ee65a17ebc51a11ac3d90e281
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Guarded day-worker redeploy and v0.7.6 verification
+        run: |
+          python - <<'PY'
+          import json, os, re, time
+          from urllib.request import Request, urlopen
+
+          railway = 'https://backboard.railway.com/graphql/v2'
+          token = os.environ['RAILWAY_API_TOKEN']
+          project = os.environ['PROJECT_ID']
+          environment = os.environ['ENVIRONMENT_ID']
+          expected = os.environ['EXPECTED_SHA']
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          radar_key = os.environ['PRODUCTION_RADAR_API_KEY']
+
+          def gql(query, variables=None):
+              body = json.dumps({'query': query, 'variables': variables or {}}).encode()
+              req = Request(railway, data=body, headers={
+                  'Authorization': 'Bearer ' + token,
+                  'Content-Type': 'application/json',
+                  'Accept': 'application/json',
+                  'User-Agent': 'v076-day-worker-redeploy/1',
+              })
+              with urlopen(req, timeout=30) as r:
+                  payload = json.load(r)
+              if payload.get('errors'):
+                  safe = [{'message': e.get('message'), 'path': e.get('path')} for e in payload['errors']]
+                  raise RuntimeError('Railway GraphQL errors: ' + json.dumps(safe))
+              return payload.get('data') or {}
+
+          def get(path, auth=True):
+              req = Request(base + path, headers={'Accept': 'application/json', 'User-Agent': 'v076-day-worker-redeploy/1'})
+              if auth:
+                  req.add_header('X-Radar-Key', radar_key)
+              with urlopen(req, timeout=20) as r:
+                  return json.load(r)
+
+          version = get('/version', auth=False)
+          actual_api_sha = version.get('commit_sha') or version.get('source_commit_sha') or version.get('git_sha')
+          print('API_SHA=' + str(actual_api_sha))
+          if actual_api_sha != expected:
+              raise SystemExit(f'FAIL API not on expected SHA: {actual_api_sha}')
+
+          try:
+              before = get('/v1/day-trade/status')
+              before_sha = (before.get('worker') or {}).get('source_commit_sha')
+          except Exception as exc:
+              print(f'DAY_STATUS_BEFORE_ERROR={type(exc).__name__}: {exc}')
+              before_sha = None
+          print('DAY_WORKER_SHA_BEFORE=' + str(before_sha))
+
+          if before_sha != expected:
+              services_data = gql('''
+                query project($id: String!) {
+                  project(id: $id) { services { edges { node { id name } } } }
+                }
+              ''', {'id': project})
+              edges = (((services_data.get('project') or {}).get('services') or {}).get('edges') or [])
+              services = [e.get('node') or {} for e in edges]
+
+              def is_day_worker(name):
+                  n = re.sub(r'[^a-z0-9]+', '-', str(name or '').lower()).strip('-')
+                  excluded = ('swing','flow','microstructure','backtest','diagnostic','postgres','api')
+                  return 'day' in n and 'worker' in n and not any(x in n for x in excluded)
+
+              candidates = [s for s in services if is_day_worker(s.get('name'))]
+              print('DAY_WORKER_CANDIDATES=' + json.dumps([{'id': s.get('id'), 'name': s.get('name')} for s in candidates]))
+              if len(candidates) != 1:
+                  raise SystemExit('FAIL day-worker service identification ambiguous')
+              service_id = str(candidates[0]['id'])
+
+              mutation = '''
+                mutation Deploy($serviceId:String!,$environmentId:String!,$commitSha:String!){
+                  serviceInstanceDeployV2(serviceId:$serviceId,environmentId:$environmentId,commitSha:$commitSha)
+                }
+              '''
+              deployed = gql(mutation, {'serviceId': service_id, 'environmentId': environment, 'commitSha': expected})
+              deployment_id = deployed.get('serviceInstanceDeployV2')
+              if not deployment_id:
+                  raise SystemExit('FAIL deployment did not return id')
+              print('DAY_WORKER_DEPLOYMENT_ID=' + str(deployment_id))
+
+              query_deploy = '''
+                query deployments($input: DeploymentListInput!) {
+                  deployments(input: $input, first: 10) { edges { node { id status createdAt } } }
+                }
+              '''
+              ok = False
+              for attempt in range(100):
+                  data = gql(query_deploy, {'input': {'projectId': project, 'serviceId': service_id}})
+                  rows = [e.get('node') or {} for e in (((data.get('deployments') or {}).get('edges')) or [])]
+                  row = next((r for r in rows if str(r.get('id')) == str(deployment_id)), None)
+                  if row:
+                      status = str(row.get('status') or '')
+                      if attempt % 5 == 0:
+                          print(f'DEPLOY_STATUS attempt={attempt+1} status={status}')
+                      if status == 'SUCCESS':
+                          ok = True
+                          break
+                      if status in {'FAILED','CRASHED','REMOVED','SKIPPED'}:
+                          raise SystemExit('FAIL day-worker deployment terminal state=' + status)
+                  time.sleep(4)
+              if not ok:
+                  raise SystemExit('FAIL day-worker deployment timeout')
+          else:
+              print('DAY_WORKER_ALREADY_ON_EXACT_SHA=true')
+
+          evidence = None
+          for attempt in range(150):
+              try:
+                  status = get('/v1/day-trade/status')
+                  worker_sha = (status.get('worker') or {}).get('source_commit_sha')
+                  audit = get('/v1/day-trade/audit/BTCUSDC')
+                  long_side = audit.get('long') or {}
+                  short_side = audit.get('short') or {}
+                  ready = (
+                      worker_sha == expected
+                      and audit.get('strategy_version') == '0.7.6'
+                      and long_side.get('setup_state') is not None
+                      and long_side.get('entry_state') is not None
+                      and short_side.get('setup_state') is not None
+                      and short_side.get('entry_state') is not None
+                  )
+                  if attempt % 5 == 0:
+                      print('VERIFY=' + json.dumps({
+                          'attempt': attempt + 1,
+                          'worker_sha': worker_sha,
+                          'audit_version': audit.get('strategy_version'),
+                          'long': [long_side.get('setup_state'), long_side.get('entry_state'), long_side.get('decision')],
+                          'short': [short_side.get('setup_state'), short_side.get('entry_state'), short_side.get('decision')],
+                          'ready': ready,
+                      }, sort_keys=True))
+                  if ready:
+                      evidence = {'status': status, 'audit': audit}
+                      break
+              except Exception as exc:
+                  if attempt % 5 == 0:
+                      print(f'VERIFY_ERROR attempt={attempt+1} {type(exc).__name__}: {exc}')
+              time.sleep(5)
+
+          if evidence is None:
+              raise SystemExit('FAIL no fresh exact-main v0.7.6 BTC audit observed')
+
+          audit = evidence['audit']
+          for label in ('long', 'short'):
+              side = audit[label]
+              if side['setup_state'] == 'VALID':
+                  assert side['entry_state'] != 'NO_SETUP', f'{label}: valid setup erased into NO_SETUP'
+              hard = side.get('hard_stop') or {}
+              assert hard.get('requires_candle_close') is False, f'{label}: hard stop waits for candle close'
+              if side['entry_state'] == 'BLOCKED_BY_BARRIER':
+                  assert side['decision'] == 'WAIT', f'{label}: barrier-blocked valid setup not WAIT-visible'
+
+          print('V076_DAY_WORKER_EXACT_MAIN_VERIFIED=' + json.dumps({
+              'worker_sha': (evidence['status'].get('worker') or {}).get('source_commit_sha'),
+              'audit_strategy_version': audit.get('strategy_version'),
+              'data_as_of': audit.get('data_as_of'),
+              'long': {
+                  'setup_state': audit['long'].get('setup_state'),
+                  'entry_state': audit['long'].get('entry_state'),
+                  'decision': audit['long'].get('decision'),
+                  'setup_score': audit['long'].get('setup_score'),
+                  'expected_rr': audit['long'].get('expected_rr'),
+                  'barrier': audit['long'].get('nearest_structural_barrier'),
+                  'hard_stop': audit['long'].get('hard_stop'),
+              },
+              'short': {
+                  'setup_state': audit['short'].get('setup_state'),
+                  'entry_state': audit['short'].get('entry_state'),
+                  'decision': audit['short'].get('decision'),
+                  'setup_score': audit['short'].get('setup_score'),
+                  'expected_rr': audit['short'].get('expected_rr'),
+                  'barrier': audit['short'].get('nearest_structural_barrier'),
+                  'hard_stop': audit['short'].get('hard_stop'),
+              },
+          }, sort_keys=True))
+          PY
