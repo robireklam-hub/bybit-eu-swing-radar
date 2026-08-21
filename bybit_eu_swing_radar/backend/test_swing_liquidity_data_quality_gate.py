@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from research import swing_liquidity_lifecycle as lifecycle
 from research.research_governance import PIT_VERSION, trial_fingerprint
 from research.swing_liquidity_data_quality import (
+    DATA_QUALITY_FORWARD_START_UTC,
     DATA_QUALITY_SPEC_VERSION,
     MIN_CONSECUTIVE_CAPTURES,
     evaluate_capture_rows,
@@ -12,10 +15,11 @@ from research.swing_liquidity_data_quality import (
 
 
 def _row(index: int, **overrides):
+    inserted_at = DATA_QUALITY_FORWARD_START_UTC + timedelta(minutes=index)
     row = {
-        "captured_at": f"2026-08-21T04:0{index}:00+00:00",
-        "inserted_at": f"2026-08-21T04:0{index}:05+00:00",
-        "feature_available_at": f"2026-08-21T04:0{index}:00+00:00",
+        "captured_at": inserted_at.isoformat(),
+        "inserted_at": inserted_at,
+        "feature_available_at": inserted_at.isoformat(),
         "provenance_version": PIT_VERSION,
         "source_commit_sha": "a" * 40,
         "candidate_count": 5,
@@ -24,6 +28,12 @@ def _row(index: int, **overrides):
     }
     row.update(overrides)
     return row
+
+
+def test_data_quality_spec_freezes_forward_start_before_activation():
+    result = evaluate_capture_rows([_row(1), _row(2)])
+    assert result["spec"]["forward_start_utc"] == "2026-08-21T03:55:25+00:00"
+    assert result["spec"]["historical_backfill_allowed"] is False
 
 
 def test_data_quality_requires_three_consecutive_post_pit_captures():
@@ -41,6 +51,7 @@ def test_data_quality_requires_three_consecutive_post_pit_captures():
         ({"candidate_count": 0, "orderbook_count": 0}, "candidate_count_not_positive"),
         ({"provenance_version": "wrong"}, "provenance_version_mismatch"),
         ({"feature_available_at": None}, "feature_available_at_missing"),
+        ({"inserted_at": DATA_QUALITY_FORWARD_START_UTC - timedelta(seconds=1)}, "predates_data_quality_forward_start"),
     ],
 )
 def test_data_quality_fails_closed_on_bad_capture(override, expected):
@@ -61,6 +72,25 @@ def test_data_quality_pass_is_label_blind_and_deterministic():
     assert first["spec"]["outcome_fields_used"] is False
     assert first["spec"]["threshold_search_allowed"] is False
     assert first["spec"]["live_strategy_mutated"] is False
+
+
+@pytest.mark.asyncio
+async def test_loader_passes_frozen_forward_start_to_database_query():
+    calls = []
+
+    class Conn:
+        async def fetch(self, sql, *args):
+            calls.append((sql, args))
+            return []
+
+    result = await lifecycle._load_post_pit_data_quality_rows(
+        Conn(), trial_id=lifecycle.STUDY, trial_fp=trial_fingerprint(lifecycle.STUDY)
+    )
+    assert result == []
+    assert len(calls) == 1
+    sql, args = calls[0]
+    assert "c.inserted_at >= $5" in sql
+    assert args[4] == DATA_QUALITY_FORWARD_START_UTC
 
 
 @pytest.mark.asyncio
@@ -120,6 +150,7 @@ async def test_three_good_post_pit_captures_record_exact_data_quality_event(monk
     payload = recorded["event_payload"]
     assert payload["data_quality_gate_passed"] is True
     assert payload["data_quality_spec_version"] == DATA_QUALITY_SPEC_VERSION
+    assert payload["data_quality_forward_start_utc"] == DATA_QUALITY_FORWARD_START_UTC.isoformat()
     assert payload["consecutive_capture_count"] == 3
     assert payload["required_consecutive_capture_count"] == 3
     assert payload["full_orderbook_coverage"] is True
