@@ -14,6 +14,7 @@ from app.providers.bybit import BybitClient
 from research.research_governance import snapshot_governance_metadata
 from research.research_trial_registry import ensure_trial_registered, trial_registry_status
 from research.swing_liquidity_event_builder import build_trigger_events
+from research.swing_liquidity_lifecycle import record_lifecycle_on_capture_persistence
 
 STUDY = "swing-liquidity-validation-v1"
 FORBIDDEN_LABEL_KEYS = {
@@ -226,6 +227,8 @@ async def persist_forward_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(orderbooks, dict) or not isinstance(errors, dict):
         raise HTTPException(status_code=400, detail="orderbook coverage fields are invalid")
 
+    source_commit_sha = os.getenv("RAILWAY_GIT_COMMIT_SHA") or None
+    lifecycle_adoption: dict[str, Any] | None = None
     conn = await asyncpg.connect(settings.database_url)
     try:
         async with conn.transaction():
@@ -233,7 +236,7 @@ async def persist_forward_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             await ensure_trial_registered(
                 conn,
                 STUDY,
-                source_commit_sha=os.getenv("RAILWAY_GIT_COMMIT_SHA") or None,
+                source_commit_sha=source_commit_sha,
             )
             result = await conn.execute(
                 """
@@ -246,7 +249,7 @@ async def persist_forward_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 """,
                 captured_at,
                 STUDY,
-                os.getenv("RAILWAY_GIT_COMMIT_SHA") or None,
+                source_commit_sha,
                 scan_data_as_of,
                 len(candidates),
                 len(orderbooks),
@@ -289,6 +292,11 @@ async def persist_forward_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                         json.dumps(candidate.get("participation_sensitivity") or []),
                         json.dumps(candidate, ensure_ascii=False, default=str),
                     )
+            lifecycle_adoption = await record_lifecycle_on_capture_persistence(
+                conn,
+                inserted_capture=inserted_capture,
+                source_commit_sha=source_commit_sha,
+            )
     finally:
         await conn.close()
 
@@ -309,6 +317,7 @@ async def persist_forward_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         "candidate_count": len(candidates),
         "orderbook_count": len(orderbooks),
         "orderbook_error_count": len(errors),
+        "lifecycle_adoption": lifecycle_adoption,
     }
 
 
