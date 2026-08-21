@@ -1,6 +1,9 @@
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 import app.market_context_alerts as alerts
+import app.research_policy_catalyst_api as policy_api
 from app.main import app as radar_app
 from app.research_policy_catalyst_api import SCHEMA_SQL
 
@@ -22,6 +25,46 @@ def test_policy_persistence_contract_has_first_seen_and_separate_captures():
     assert "first_seen_at TIMESTAMPTZ NOT NULL" in SCHEMA_SQL
     assert "last_seen_at TIMESTAMPTZ NOT NULL" in SCHEMA_SQL
     assert "PRIMARY KEY (spec_version, event_id)" in SCHEMA_SQL
+
+
+@pytest.mark.asyncio
+async def test_status_lookback_uses_database_clock_without_untyped_interval_parameter(monkeypatch):
+    class FakeConnection:
+        def __init__(self):
+            self.fetch_calls = []
+
+        async def execute(self, *_args):
+            return None
+
+        async def fetchrow(self, *_args):
+            return None
+
+        async def fetch(self, query, *args):
+            self.fetch_calls.append((query, args))
+            return []
+
+        async def fetchval(self, *_args):
+            return 0
+
+        async def close(self):
+            return None
+
+    connection = FakeConnection()
+
+    async def fake_connect(*_args, **_kwargs):
+        return connection
+
+    monkeypatch.setattr(policy_api.asyncpg, "connect", fake_connect)
+    monkeypatch.setattr(policy_api, "_database_url", lambda: "postgresql://unused")
+
+    result = await policy_api.status_payload()
+
+    assert result["freshness"] == "UNAVAILABLE"
+    assert len(connection.fetch_calls) == 1
+    query, args = connection.fetch_calls[0]
+    assert "first_seen_at >= NOW() - INTERVAL '24 hours'" in query
+    assert args == (policy_api.SPEC_VERSION,)
+    assert "$2 - INTERVAL" not in query
 
 
 def test_old_provider_content_does_not_become_active_on_first_bootstrap_observation():
