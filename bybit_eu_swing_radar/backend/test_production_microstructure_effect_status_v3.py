@@ -21,6 +21,9 @@ def _payload(status="WAITING_FOR_SAMPLE"):
             "minimum_total": 60,
             "minimum_per_symbol": 10,
             "per_symbol": {"BTCUSDC": 27, "ETHUSDC": 11, "SOLUSDC": 22},
+            "cohort_last_opened_at": "2026-08-21T08:55:00+00:00",
+            "cohort_last_signal_id": 12345,
+            "cohort_boundary_order": ["opened_at", "signal_id"],
         }
     return payload
 
@@ -63,6 +66,18 @@ def test_validator_rejects_mutated_frozen_cohort_symbol_partition():
     payload.update({"closed_outcomes": 54, "missing_outcomes": 6, "results": []})
     payload["cohort_gate"]["per_symbol"]["BTCUSDC"] = 26
     assert validate_effect_status_v3(payload) == (False, "cohort_symbol_partition_mismatch")
+
+
+def test_validator_requires_exact_tuple_boundary_identity():
+    payload = _payload("WAITING_FOR_CLOSED_OUTCOMES")
+    payload.update({"closed_outcomes": 54, "missing_outcomes": 6, "results": []})
+    del payload["cohort_gate"]["cohort_last_signal_id"]
+    assert validate_effect_status_v3(payload) == (False, "cohort_boundary_signal_id_missing")
+
+    payload = _payload("WAITING_FOR_CLOSED_OUTCOMES")
+    payload.update({"closed_outcomes": 54, "missing_outcomes": 6, "results": []})
+    payload["cohort_gate"]["cohort_boundary_order"] = ["signal_id", "opened_at"]
+    assert validate_effect_status_v3(payload) == (False, "cohort_boundary_order_mutated")
 
 
 def test_validator_rejects_results_before_all_outcomes_close():
