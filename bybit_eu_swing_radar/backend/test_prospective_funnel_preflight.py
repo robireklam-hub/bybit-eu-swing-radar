@@ -8,6 +8,49 @@ from pathlib import Path
 from scripts import preflight_v073_prospective_funnel as preflight
 
 
+def _barrier_payload(sha: str) -> dict[str, object]:
+    now = datetime.now(timezone.utc).isoformat()
+    return {
+        "status": "COMPLETE",
+        "research_only": True,
+        "label_free": True,
+        "outcome_labels_stored": False,
+        "outcome_visibility": "LOCKED_UNTIL_PREREGISTERED_DEVELOPMENT_GATE",
+        "spec_version": "day-barrier-clear-recorder-v1",
+        "study_id": "day-barrier-clear-rearm-v1",
+        "parent_strategy_version": "0.7.5",
+        "execution_mode": "SHARED_STANDALONE_RESEARCH_SIDECAR",
+        "live_worker_mutation": False,
+        "score_mutation": False,
+        "ranking_mutation": False,
+        "eligibility_mutation": False,
+        "execution_mutation": False,
+        "derivatives_context_only": True,
+        "source_commit_sha": sha,
+        "captured_at": now,
+        "prospective_start_at": "2026-08-21T00:00:00+00:00",
+        "current_run": {
+            "eligible_parent_candidates": 0,
+            "inserted_new_parents": 0,
+            "resolved_cleared": 0,
+            "resolved_boundary_invalidations": 0,
+            "resolved_structure_invalidations": 0,
+            "forced_tracking_symbols": [],
+        },
+        "cumulative": {
+            "parent_events": 0,
+            "pending_parents": 0,
+            "cleared_parents": 0,
+            "boundary_invalidated_parents": 0,
+            "structure_invalidated_parents": 0,
+            "clear_rows": 0,
+            "side_parent_counts": {},
+            "symbols_observed": 0,
+            "symbol_list": [],
+        },
+    }
+
+
 def _prospective_payload(sha: str) -> dict[str, object]:
     return {
         "status": "COMPLETE",
@@ -37,6 +80,7 @@ def _prospective_payload(sha: str) -> dict[str, object]:
             "latest_gate_pass_counts": {},
             "latest_first_failed_gate_counts": {},
         },
+        "barrier_clear_rearm": _barrier_payload(sha),
     }
 
 
@@ -75,6 +119,7 @@ def test_stale_source_sha_fails_preflight_even_when_api_is_exact():
 
     assert result["ok"] is False
     assert "standalone source SHA mismatch" in result["errors"]
+    assert "barrier_clear_rearm source SHA mismatch" in result["errors"]
 
 
 def test_non_externalized_live_worker_fails_preflight():
