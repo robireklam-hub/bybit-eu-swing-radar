@@ -45,9 +45,33 @@ Capture at minimum:
 
 A barrier clear **does not re-authorize the original trade**. Any post-clear candidate must calculate a fresh entry, stop, targets, target path and net RR from information available after the clear. The original entry zone/stop/targets must never be inherited into a post-clear record.
 
+## Frozen DEVELOPMENT / untouched VALIDATION partition
+
+This partition is preregistered before the first exact-main prospective observer produced any terminal parent event. No outcome-bearing field may participate in sample selection or ordering.
+
+- terminal event states eligible for partitioning: `cleared`, `invalidated_boundary`, `invalidated_structure`;
+- deterministic ordering: `(resolved_at, event_id)` ascending;
+- DEVELOPMENT is exactly the **first 60 terminal parent events**;
+- no partial DEVELOPMENT cohort is frozen at 59 or fewer events;
+- DEVELOPMENT never expands beyond 60, even if its eventual result or group balance is unfavorable;
+- untouched VALIDATION is exactly the **next 40 terminal parent events** after the frozen DEVELOPMENT boundary;
+- no event may appear in both partitions;
+- stable SHA-256 fingerprints identify both frozen partitions.
+
+Before DEVELOPMENT outcome analysis may even be requested, its fixed 60 events must also contain at least:
+
+- 15 `cleared` events;
+- 15 non-clear terminal events (`invalidated_boundary` or `invalidated_structure`);
+- 10 long events;
+- 10 short events.
+
+If the fixed first 60 fail that balance contract, the study reports insufficient group balance. It does **not** collect extra DEVELOPMENT events until the sample becomes favorable. Validation remains untouched and cannot rescue or retune DEVELOPMENT.
+
 ## Label and promotion firewall
 
-Initial capture is label-blind: no forward return, MFE/MAE, PnL, TP/stop result, win/loss or other outcome field is admitted into the event record. Outcome visibility remains locked until a separately preregistered DEVELOPMENT gate. Any parameter choice must be made on DEVELOPMENT only; subsequent VALIDATION must remain untouched until the development rule is frozen.
+Initial capture and partitioning are label-blind: no forward return, MFE/MAE, PnL, TP/stop result, win/loss, realized/net-R or other outcome field is admitted into the event record or sample partition. Freezing the 60/40 identities does not itself open outcomes. A later explicit research-only step must verify that the frozen DEVELOPMENT gate is satisfied before DEVELOPMENT outcomes can be opened.
+
+Any parameter choice may be made on DEVELOPMENT only after that gate. Subsequent VALIDATION remains untouched until the complete development rule is frozen. No automatic promotion follows a favorable DEVELOPMENT or VALIDATION result.
 
 One BTC retrospective example from 2026-08-20 is motivation only, not evidence and not a parameter-selection sample. No live threshold, score, ranking, eligibility or execution rule may be changed from this study without the preregistered development and untouched validation sequence.
 
