@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from scripts.run_swing_liquidity_shadow_worker_lineage_guarded import (
+    _matching_observations,
+    _observation_label,
     collect_snapshot_with_worker_lineage,
 )
 
@@ -11,6 +15,7 @@ API_SHA = "a" * 40
 WORKER_SHA = API_SHA
 CHECKED_AT = "2026-08-22T00:00:00+00:00"
 NEWER_CHECKED_AT = "2026-08-22T00:05:00+00:00"
+OLDER_CHECKED_AT = "2026-08-21T23:55:00+00:00"
 
 
 def _snapshot() -> dict:
@@ -59,6 +64,7 @@ def test_worker_lineage_guard_accepts_exact_api_worker_and_scan_identity():
         "https://api.bybit.eu",
         collect=lambda *_: _snapshot(),
         fetch=_fetch_factory(),
+        poll_interval_seconds=999.0,
     )
     assert result["source_commit_sha"] == API_SHA
     assert result["swing_worker_source_commit_sha"] == WORKER_SHA
@@ -75,6 +81,7 @@ def test_worker_lineage_guard_accepts_scan_rotation_after_collection():
         "https://api.bybit.eu",
         collect=lambda *_: _snapshot(),
         fetch=_fetch_factory(post_status=_status(NEWER_CHECKED_AT)),
+        poll_interval_seconds=999.0,
     )
     assert result["swing_worker_checked_at"] == CHECKED_AT
     assert result["swing_worker_lineage_observation"] == "pre_collection"
@@ -86,10 +93,59 @@ def test_worker_lineage_guard_accepts_scan_first_observed_after_collection():
         "secret",
         "https://api.bybit.eu",
         collect=lambda *_: _snapshot(),
-        fetch=_fetch_factory(pre_status=_status("2026-08-21T23:55:00+00:00")),
+        fetch=_fetch_factory(pre_status=_status(OLDER_CHECKED_AT)),
+        poll_interval_seconds=999.0,
     )
     assert result["swing_worker_checked_at"] == CHECKED_AT
     assert result["swing_worker_lineage_observation"] == "post_collection"
+
+
+def test_worker_lineage_guard_accepts_identity_seen_only_during_collection():
+    during_seen = threading.Event()
+    main_status_calls = 0
+
+    def fetch(url: str, api_key: str | None, timeout: float) -> dict:
+        nonlocal main_status_calls
+        assert timeout == 20.0
+        if url.endswith("/version"):
+            assert api_key is None
+            return {"commit_sha": API_SHA}
+        if url.endswith("/v1/data-status"):
+            assert api_key == "secret"
+            if threading.current_thread().name == "swing-lineage-status-poller":
+                during_seen.set()
+                return _status(CHECKED_AT)
+            main_status_calls += 1
+            return _status(OLDER_CHECKED_AT if main_status_calls == 1 else NEWER_CHECKED_AT)
+        raise AssertionError(url)
+
+    def collect(*_: str) -> dict:
+        assert during_seen.wait(timeout=1.0)
+        return _snapshot()
+
+    result = collect_snapshot_with_worker_lineage(
+        "https://example.test",
+        "secret",
+        "https://api.bybit.eu",
+        collect=collect,
+        fetch=fetch,
+        poll_interval_seconds=0.01,
+    )
+    assert result["swing_worker_lineage_observation"] == "during_collection"
+    assert result["swing_worker_source_commit_sha"] == WORKER_SHA
+
+
+def test_matching_observations_accepts_intermediate_identity_when_endpoints_differ():
+    matches = _matching_observations(
+        [
+            ("pre_collection", _status(OLDER_CHECKED_AT)),
+            ("during_collection", _status(CHECKED_AT)),
+            ("post_collection", _status(NEWER_CHECKED_AT)),
+        ],
+        CHECKED_AT,
+    )
+    assert matches == [("during_collection", CHECKED_AT, WORKER_SHA)]
+    assert _observation_label([item[0] for item in matches]) == "during_collection"
 
 
 def test_worker_lineage_guard_rejects_api_observed_worker_commit_mismatch():
@@ -103,20 +159,22 @@ def test_worker_lineage_guard_rejects_api_observed_worker_commit_mismatch():
                 pre_status=_status(CHECKED_AT, "b" * 40),
                 post_status=_status(NEWER_CHECKED_AT, "b" * 40),
             ),
+            poll_interval_seconds=999.0,
         )
 
 
-def test_worker_lineage_guard_rejects_scan_not_observed_in_bracketing_statuses():
-    with pytest.raises(RuntimeError, match="not observed in the bracketing worker-status snapshots"):
+def test_worker_lineage_guard_rejects_scan_not_observed_in_bounded_statuses():
+    with pytest.raises(RuntimeError, match="not observed in the bounded worker-status observations"):
         collect_snapshot_with_worker_lineage(
             "https://example.test",
             "secret",
             "https://api.bybit.eu",
             collect=lambda *_: _snapshot(),
             fetch=_fetch_factory(
-                pre_status=_status("2026-08-21T23:55:00+00:00"),
+                pre_status=_status(OLDER_CHECKED_AT),
                 post_status=_status(NEWER_CHECKED_AT),
             ),
+            poll_interval_seconds=999.0,
         )
 
 
@@ -131,4 +189,5 @@ def test_worker_lineage_guard_rejects_invalid_commit_identity(api_sha: str, work
             "https://api.bybit.eu",
             collect=lambda *_: _snapshot(),
             fetch=_fetch_factory(api_sha=api_sha, pre_status=pre_status, post_status=post_status),
+            poll_interval_seconds=999.0,
         )
