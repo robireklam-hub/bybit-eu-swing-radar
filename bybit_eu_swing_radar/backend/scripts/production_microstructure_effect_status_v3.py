@@ -24,6 +24,7 @@ EXPECTED = {
 }
 ALLOWED = {"WAITING_FOR_DATA_QUALITY", "WAITING_FOR_SAMPLE", "WAITING_FOR_CLOSED_OUTCOMES", "COMPLETE"}
 WANTED_SYMBOLS = {"BTCUSDC", "ETHUSDC", "SOLUSDC"}
+BOUNDARY_ORDER = ["opened_at", "signal_id"]
 
 
 def fetch_json(url: str, api_key: str, timeout: float = 15.0) -> dict[str, Any]:
@@ -48,6 +49,13 @@ def _validate_frozen_cohort(payload: dict[str, Any]) -> tuple[bool, str]:
         return False, "cohort_symbol_minimum_invalid"
     if sum(per_symbol.values()) != 60:
         return False, "cohort_symbol_partition_mismatch"
+    if not isinstance(gate.get("cohort_last_opened_at"), str) or not gate.get("cohort_last_opened_at"):
+        return False, "cohort_boundary_timestamp_missing"
+    boundary_signal_id = gate.get("cohort_last_signal_id")
+    if not isinstance(boundary_signal_id, int) or isinstance(boundary_signal_id, bool) or boundary_signal_id <= 0:
+        return False, "cohort_boundary_signal_id_missing"
+    if gate.get("cohort_boundary_order") != BOUNDARY_ORDER:
+        return False, "cohort_boundary_order_mutated"
     closed = payload.get("closed_outcomes")
     missing = payload.get("missing_outcomes", 0 if payload.get("status") == "COMPLETE" else None)
     if not isinstance(closed, int) or not isinstance(missing, int) or closed < 0 or missing < 0:

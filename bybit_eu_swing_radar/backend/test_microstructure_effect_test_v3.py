@@ -43,6 +43,34 @@ def test_earliest_ready_prefix_is_frozen_at_60():
     assert len(cohort) == 60
     counts = {symbol: sum(row["symbol"] == symbol for row in cohort) for symbol in SYMBOLS}
     assert all(counts[symbol] >= 10 for symbol in SYMBOLS)
+    assert gate["cohort_last_opened_at"] == cohort[-1]["opened_at"].isoformat()
+    assert gate["cohort_last_signal_id"] == cohort[-1]["signal_id"]
+    assert gate["cohort_boundary_order"] == ["opened_at", "signal_id"]
+
+
+def test_frozen_boundary_uses_signal_id_to_disambiguate_equal_opened_at():
+    rows = _rows((20, 20, 20))
+    boundary_time = rows[-1]["opened_at"]
+    rows[-2]["opened_at"] = boundary_time
+    rows[-1]["signal_id"] = 10_002
+    rows[-2]["signal_id"] = 10_001
+    cohort, gate = effect_test_v3.select_earliest_ready_cohort(reversed(rows), SYMBOLS)
+    assert len(cohort) == 60
+    assert cohort[-2]["opened_at"] == cohort[-1]["opened_at"] == boundary_time
+    assert cohort[-2]["signal_id"] == 10_001
+    assert cohort[-1]["signal_id"] == 10_002
+    assert gate["cohort_last_opened_at"] == boundary_time.isoformat()
+    assert gate["cohort_last_signal_id"] == 10_002
+    assert gate["cohort_boundary_order"] == ["opened_at", "signal_id"]
+
+
+def test_not_ready_boundary_is_explicitly_empty():
+    cohort, gate = effect_test_v3.select_earliest_ready_cohort(_rows((19, 20, 20)), SYMBOLS)
+    assert cohort == []
+    assert gate["cohort_frozen"] is False
+    assert gate["cohort_last_opened_at"] is None
+    assert gate["cohort_last_signal_id"] is None
+    assert gate["cohort_boundary_order"] == ["opened_at", "signal_id"]
 
 
 def test_strategy_contamination_fails_closed():
