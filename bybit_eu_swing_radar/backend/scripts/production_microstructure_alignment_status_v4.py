@@ -17,6 +17,7 @@ EXPECTED_STRATEGY_MERGE_SHA = "2201a7d5b4e5e54ee65a17ebc51a11ac3d90e281"
 EXPECTED_VERIFIED_BY_UTC = "2026-08-21T13:52:43+00:00"
 EXPECTED_COHORT_START_AT = "2026-08-21T13:53:00+00:00"
 EXPECTED_COHORT_START_RULE = "strictly_after_exact_production_verification"
+EXPECTED_SYMBOLS = ("BTCUSDC", "ETHUSDC", "SOLUSDC")
 
 
 def fetch_json(url: str, api_key: str, timeout: float = 15.0) -> dict[str, Any]:
@@ -34,6 +35,25 @@ def fetch_json(url: str, api_key: str, timeout: float = 15.0) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("response JSON is not an object")
     return payload
+
+
+def _validate_symbol_partition(
+    per_symbol: Any,
+    fields: tuple[str, ...],
+) -> tuple[bool, str, dict[str, int]]:
+    if not isinstance(per_symbol, dict) or set(per_symbol) != set(EXPECTED_SYMBOLS):
+        return False, "symbol_partition_mutated", {}
+    totals = {field: 0 for field in fields}
+    for symbol in EXPECTED_SYMBOLS:
+        item = per_symbol.get(symbol)
+        if not isinstance(item, dict):
+            return False, "symbol_partition_item_invalid", {}
+        for field in fields:
+            value = item.get(field)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                return False, f"symbol_partition_{field}_invalid", {}
+            totals[field] += value
+    return True, "ok", totals
 
 
 def validate_alignment_status(payload: dict[str, Any]) -> tuple[bool, str]:
@@ -99,6 +119,25 @@ def validate_alignment_status(payload: dict[str, Any]) -> tuple[bool, str]:
         return False, "sample_contract_incomplete"
     if sample.get("minimum_total") != 60 or sample.get("minimum_per_symbol") != 10:
         return False, "sample_gate_mutated"
+    total_signals = sample.get("total_signals")
+    if not isinstance(total_signals, int) or isinstance(total_signals, bool) or total_signals < 0:
+        return False, "sample_total_invalid"
+    sample_per_symbol = sample.get("per_symbol")
+    if not isinstance(sample_per_symbol, dict) or set(sample_per_symbol) != set(EXPECTED_SYMBOLS):
+        return False, "sample_symbol_partition_mutated"
+    sample_sum = 0
+    for symbol in EXPECTED_SYMBOLS:
+        value = sample_per_symbol.get(symbol)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return False, "sample_symbol_count_invalid"
+        sample_sum += value
+    if sample_sum != total_signals:
+        return False, "sample_symbol_partition_inconsistent"
+    expected_sample_ready = total_signals >= 60 and all(
+        sample_per_symbol[symbol] >= 10 for symbol in EXPECTED_SYMBOLS
+    )
+    if sample.get("ready_for_preregistered_effect_test") is not expected_sample_ready:
+        return False, "sample_readiness_inconsistent"
 
     coverage = payload.get("alignment_coverage")
     if not isinstance(coverage, dict):
@@ -118,11 +157,34 @@ def validate_alignment_status(payload: dict[str, Any]) -> tuple[bool, str]:
         coverage.get("aligned_signal_count"),
         coverage.get("unaligned_signal_count"),
     )
-    if not all(isinstance(value, int) and value >= 0 for value in values):
+    if not all(
+        isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        for value in values
+    ):
         return False, "alignment_coverage_counts_invalid"
     journal_count, aligned_count, unaligned_count = values
     if journal_count != aligned_count + unaligned_count:
         return False, "alignment_coverage_counts_inconsistent"
+
+    partition_ok, partition_reason, partition_totals = _validate_symbol_partition(
+        coverage.get("per_symbol"),
+        ("journal_signals", "aligned_signals", "unaligned_signals"),
+    )
+    if not partition_ok:
+        return False, partition_reason
+    for symbol in EXPECTED_SYMBOLS:
+        item = coverage["per_symbol"][symbol]
+        if item["journal_signals"] != item["aligned_signals"] + item["unaligned_signals"]:
+            return False, "symbol_alignment_counts_inconsistent"
+    expected_totals = {
+        "journal_signals": journal_count,
+        "aligned_signals": aligned_count,
+        "unaligned_signals": unaligned_count,
+    }
+    if partition_totals != expected_totals:
+        return False, "symbol_partition_totals_inconsistent"
+    if aligned_count != total_signals:
+        return False, "sample_alignment_total_inconsistent"
 
     status = coverage.get("status")
     reason = coverage.get("reason")
@@ -136,6 +198,16 @@ def validate_alignment_status(payload: dict[str, Any]) -> tuple[bool, str]:
             return False, "coverage_failure_did_not_close_effect_gate"
     elif status != "ALIGNED" or reason != "all_forward_signals_aligned":
         return False, "aligned_state_invalid"
+
+    expected_ready = (
+        payload.get("data_quality_ready") is True
+        and status == "ALIGNED"
+        and expected_sample_ready
+    )
+    if payload.get("alignment_coverage_ready") is not (status == "ALIGNED"):
+        return False, "alignment_coverage_ready_inconsistent"
+    if payload.get("ready_for_preregistered_effect_test") is not expected_ready:
+        return False, "effect_readiness_inconsistent"
     return True, "ok"
 
 
