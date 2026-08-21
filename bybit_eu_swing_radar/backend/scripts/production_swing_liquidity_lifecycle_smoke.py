@@ -42,6 +42,42 @@ def _valid_sha256(value: Any) -> bool:
     return len(text) == 64 and all(ch in "0123456789abcdef" for ch in text)
 
 
+def validate_persistence_identity(snapshot: dict[str, Any], result: dict[str, Any]) -> list[str]:
+    """Verify that persistence metadata belongs to the exact collected snapshot."""
+    errors: list[str] = []
+    if not isinstance(result, dict):
+        return ["persistence_response_not_object"]
+
+    if result.get("captured_at") != snapshot.get("captured_at"):
+        errors.append("captured_at_mismatch")
+
+    expected_candidate_count = int(snapshot.get("candidate_count") or 0)
+    try:
+        persisted_candidate_count = int(result.get("candidate_count"))
+    except (TypeError, ValueError):
+        persisted_candidate_count = -1
+    if persisted_candidate_count != expected_candidate_count:
+        errors.append("candidate_count_mismatch")
+
+    expected_orderbook_count = len(snapshot.get("orderbooks") or {})
+    try:
+        persisted_orderbook_count = int(result.get("orderbook_count"))
+    except (TypeError, ValueError):
+        persisted_orderbook_count = -1
+    if persisted_orderbook_count != expected_orderbook_count:
+        errors.append("orderbook_count_mismatch")
+
+    expected_orderbook_error_count = len(snapshot.get("orderbook_errors") or {})
+    try:
+        persisted_orderbook_error_count = int(result.get("orderbook_error_count"))
+    except (TypeError, ValueError):
+        persisted_orderbook_error_count = -1
+    if persisted_orderbook_error_count != expected_orderbook_error_count:
+        errors.append("orderbook_error_count_mismatch")
+
+    return errors
+
+
 def validate_lifecycle_persistence(result: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     if result.get("research_only") is not True:
@@ -133,6 +169,7 @@ def run_check(
 ) -> int:
     snapshot = collect(base_url, api_key)
     result = persist(base_url, api_key, snapshot)
+    identity_errors = validate_persistence_identity(snapshot, result)
     lifecycle = result.get("lifecycle_adoption") if isinstance(result, dict) else None
     safe = {
         "study": result.get("study") if isinstance(result, dict) else None,
@@ -141,15 +178,20 @@ def run_check(
         "candidate_count": result.get("candidate_count") if isinstance(result, dict) else None,
         "orderbook_count": result.get("orderbook_count") if isinstance(result, dict) else None,
         "orderbook_error_count": result.get("orderbook_error_count") if isinstance(result, dict) else None,
+        "persistence_identity_verified": not identity_errors,
         "lifecycle_adoption": lifecycle,
     }
     print("SWING_LIQUIDITY_LIFECYCLE_SMOKE=" + json.dumps(safe, sort_keys=True, default=str))
+    if identity_errors:
+        for error in identity_errors:
+            print(f"FAIL persistence_identity_{error}")
+        return 1
     errors = validate_lifecycle_persistence(result)
     if errors:
         for error in errors:
             print(f"FAIL {error}")
         return 1
-    print("SWING LIQUIDITY PROSPECTIVE LIFECYCLE VERIFIED THROUGH LINEAGE GATE.")
+    print("SWING LIQUIDITY PROSPECTIVE LIFECYCLE AND PERSISTENCE IDENTITY VERIFIED THROUGH LINEAGE GATE.")
     return 0
 
 
