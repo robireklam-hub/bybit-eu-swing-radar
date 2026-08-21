@@ -1,0 +1,63 @@
+name: NEVER MERGE verify 3cfecf production
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: never-merge-verify-3cfecf-production
+  cancel-in-progress: true
+
+jobs:
+  verify-production:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 3cfecf67f2d6a88bb6a4dc21fdd647ce4c88b6a7
+
+    steps:
+      - name: Check out exact main under verification
+        uses: actions/checkout@v7
+        with:
+          ref: 3cfecf67f2d6a88bb6a4dc21fdd647ce4c88b6a7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Wait for exact production API SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 120); do
+            body=$(curl -fsS -H "x-api-key: ${PRODUCTION_RADAR_API_KEY}" "${PRODUCTION_RADAR_API_BASE_URL}/version" || true)
+            echo "attempt=${i} version=${body}"
+            if printf '%s' "$body" | grep -q "$EXPECTED_SHA"; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Exact production API SHA did not become available" >&2
+          exit 1
+
+      - name: Verify actual compact top/watch Coinalyze semantics
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_coinalyze_smoke.py
+
+      - name: Verify label-blind swing liquidity events
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_event_smoke.py
+
+      - name: Verify swing liquidity maturity
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_maturity_status.py
+
+      - name: Verify prospective swing liquidity lifecycle through lineage gate
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_lifecycle_smoke.py
