@@ -57,3 +57,7 @@ jobs:
       - name: Check preregistered v0.7.3 effect status
         working-directory: bybit_eu_swing_radar/backend
         run: python scripts/production_microstructure_effect_status.py
+
+      - name: Check preregistered v0.7.5 effect status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_effect_status_v3.py
