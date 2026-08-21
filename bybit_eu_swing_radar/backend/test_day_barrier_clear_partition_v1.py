@@ -45,8 +45,10 @@ def test_first_60_terminal_events_freeze_development_without_opening_outcomes():
 
 
 def test_next_40_are_untouched_validation_and_development_never_expands():
-    first = freeze_partition(_events(60, clears=30, longs=30))
-    full = freeze_partition(_events(100, clears=50, longs=50))
+    base = _events(60, clears=30, longs=30)
+    first = freeze_partition(base)
+    later = _events(100, clears=50, longs=50)[60:]
+    full = freeze_partition(base + later)
     assert full["development_event_ids"] == first["development_event_ids"]
     assert full["development_partition_fingerprint"] == first["development_partition_fingerprint"]
     assert full["validation_partition_ready"] is True
