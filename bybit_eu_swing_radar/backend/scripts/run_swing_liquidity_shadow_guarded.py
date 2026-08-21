@@ -18,43 +18,10 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from research.swing_liquidity_shadow import collect_snapshot, persist_snapshot
-from scripts.production_swing_liquidity_lifecycle_smoke import validate_lifecycle_persistence
-
-
-def validate_persistence_identity(snapshot: dict[str, Any], result: dict[str, Any]) -> list[str]:
-    """Verify that the persistence response belongs to the exact collected snapshot."""
-    errors: list[str] = []
-    if not isinstance(result, dict):
-        return ["persistence_response_not_object"]
-
-    if result.get("captured_at") != snapshot.get("captured_at"):
-        errors.append("captured_at_mismatch")
-
-    expected_candidate_count = int(snapshot.get("candidate_count") or 0)
-    try:
-        persisted_candidate_count = int(result.get("candidate_count"))
-    except (TypeError, ValueError):
-        persisted_candidate_count = -1
-    if persisted_candidate_count != expected_candidate_count:
-        errors.append("candidate_count_mismatch")
-
-    expected_orderbook_count = len(snapshot.get("orderbooks") or {})
-    try:
-        persisted_orderbook_count = int(result.get("orderbook_count"))
-    except (TypeError, ValueError):
-        persisted_orderbook_count = -1
-    if persisted_orderbook_count != expected_orderbook_count:
-        errors.append("orderbook_count_mismatch")
-
-    expected_orderbook_error_count = len(snapshot.get("orderbook_errors") or {})
-    try:
-        persisted_orderbook_error_count = int(result.get("orderbook_error_count"))
-    except (TypeError, ValueError):
-        persisted_orderbook_error_count = -1
-    if persisted_orderbook_error_count != expected_orderbook_error_count:
-        errors.append("orderbook_error_count_mismatch")
-
-    return errors
+from scripts.production_swing_liquidity_lifecycle_smoke import (
+    validate_lifecycle_persistence,
+    validate_persistence_identity,
+)
 
 
 def run_capture(
