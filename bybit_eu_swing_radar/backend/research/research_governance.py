@@ -28,7 +28,31 @@ _TRIALS: dict[str, dict[str, Any]] = {
         "primary_notional_usdc": 500.0,
         "event_identity": "symbol_side_first_qualifying_4h_trigger_bar",
         "preregistration": "backend/research/SWING_LIQUIDITY_VALIDATION_V1.md",
-    }
+    },
+    "day-barrier-clear-rearm-v1": {
+        "trial_id": "day-barrier-clear-rearm-v1",
+        "research_family": "day-barrier-clear-rearm",
+        "revision": 1,
+        "preregistered": True,
+        "frozen": True,
+        "parent_strategy_version": "0.7.5",
+        "quote_asset": "USDC",
+        "long_execution": "USDC_SPOT",
+        "short_execution": "VERIFIED_BORROWABLE_USDC_SPOT_MARGIN_ONLY",
+        "perpetual_execution": False,
+        "derivatives_context_only": True,
+        "missing_derivatives_hard_gate": False,
+        "minimum_setup_score": 70.0,
+        "minimum_expansion_score": 55.0,
+        "minimum_side_direction_score": 35.0,
+        "minimum_quality_score": 65.0,
+        "minimum_rr_without_barrier": 1.8,
+        "barrier_clear_confirmation": "CLOSED_5M_BEYOND_FROZEN_BARRIER_WHILE_ORIGINAL_BOUNDARY_HELD",
+        "fresh_geometry_required": True,
+        "outcome_visibility": "LOCKED_UNTIL_PREREGISTERED_DEVELOPMENT_GATE",
+        "validation_policy": "DEVELOPMENT_RULE_FROZEN_BEFORE_UNTOUCHED_VALIDATION",
+        "preregistration": "backend/research/DAY_BARRIER_CLEAR_REARM_V1.md",
+    },
 }
 
 
