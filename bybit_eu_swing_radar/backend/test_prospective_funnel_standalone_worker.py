@@ -113,6 +113,31 @@ def test_persist_standalone_capture_writes_only_dedicated_research_status(monkey
             "outcome_visibility": "LOCKED_UNTIL_PREREGISTERED_DEVELOPMENT_GATE",
         }
 
+    async def fake_partition(conn):
+        assert conn is connection
+        return {
+            "study": "day-barrier-clear-rearm-v1",
+            "partition_spec_version": "day-barrier-clear-partition-v1",
+            "research_only": True,
+            "label_blind_partition": True,
+            "outcome_fields_used": False,
+            "development_target": 60,
+            "validation_target": 40,
+            "terminal_event_count": 0,
+            "development_partition_ready": False,
+            "development_analysis_eligible": False,
+            "development_event_ids": [],
+            "development_partition_fingerprint": None,
+            "validation_partition_ready": False,
+            "validation_event_ids": [],
+            "validation_partition_fingerprint": None,
+            "outcome_visible": False,
+            "threshold_search_allowed": False,
+            "promotion_allowed": False,
+            "live_strategy_mutation": False,
+            "execution_authorized": False,
+        }
+
     async def fake_upsert(conn, key, payload):
         assert conn is connection
         calls["cache"].append((key, payload))
@@ -125,6 +150,7 @@ def test_persist_standalone_capture_writes_only_dedicated_research_status(monkey
     monkeypatch.setattr(worker, "persist_v073_prospective_funnel", fake_funnel)
     monkeypatch.setattr(worker, "persist_parent_batch", fake_parent)
     monkeypatch.setattr(worker, "persist_pending_resolutions", fake_observer)
+    monkeypatch.setattr(worker, "load_partition_status", fake_partition)
     monkeypatch.setattr(worker.live, "upsert_cache", fake_upsert)
 
     result = asyncio.run(
@@ -142,6 +168,8 @@ def test_persist_standalone_capture_writes_only_dedicated_research_status(monkey
     assert result["authoritative_live_strict_setups"] == 1
     assert result["barrier_clear_rearm"]["parent_strategy_version"] == "0.7.5"
     assert result["barrier_clear_rearm"]["observer"]["execution_authorized"] is False
+    assert result["barrier_clear_rearm"]["observer"]["partition"]["terminal_event_count"] == 0
+    assert result["barrier_clear_rearm"]["observer"]["partition"]["outcome_visible"] is False
     assert calls["closed"] is True
     keys = [key for key, _ in calls["cache"]]
     assert keys == [
