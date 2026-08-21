@@ -1,0 +1,44 @@
+name: Policy catalyst v1 forward capture
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/policy-catalyst-feed.yml"
+      - "bybit_eu_swing_radar/backend/research/policy_catalyst_sources_v1.py"
+      - "bybit_eu_swing_radar/backend/research/policy_catalyst_feed_v1.py"
+      - "bybit_eu_swing_radar/backend/app/research_policy_catalyst_api.py"
+      - "bybit_eu_swing_radar/backend/app/market_context_alerts.py"
+      - "bybit_eu_swing_radar/backend/app/main.py"
+      - "bybit_eu_swing_radar/backend/scripts/production_policy_catalyst_smoke.py"
+  schedule:
+    - cron: "4,14,24,34,44,54 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: policy-catalyst-v1-forward-capture
+  cancel-in-progress: false
+
+jobs:
+  capture-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: ${{ github.sha }}
+    steps:
+      - name: Check out exact commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Capture and verify policy catalyst v1
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_policy_catalyst_smoke.py

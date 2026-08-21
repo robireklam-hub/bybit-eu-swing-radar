@@ -22,9 +22,12 @@ from fastapi import FastAPI
 
 GEO_SPEC_VERSION = "geopolitical-event-shadow-v2"
 MACRO_SPEC_VERSION = "btc-macro-cycle-etf-shadow-v1"
+POLICY_SPEC_VERSION = "policy-catalyst-feed-v1"
 ALERT_VERSION = "market-context-alert-v1"
 GEO_MAX_AGE_SECONDS = 3 * 60 * 60
 GEO_BASELINE_MIN_SNAPSHOTS = 24
+POLICY_MAX_AGE_SECONDS = 30 * 60
+POLICY_ACTIVE_FIRST_SEEN_SECONDS = 6 * 60 * 60
 CACHE_TTL_SECONDS = 60.0
 
 # These are operational visibility thresholds over an already normalized relative
@@ -249,6 +252,89 @@ def build_macro_liquidity_context(snapshot: Mapping[str, Any] | None) -> dict[st
     }
 
 
+def build_policy_catalyst_context(
+    latest_capture: Mapping[str, Any] | None,
+    recent_events: Sequence[Mapping[str, Any]],
+    *,
+    now: datetime | None = None,
+    latest_captured_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Expose fresh primary-source policy events without inferring trade direction."""
+    current_time = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    if not latest_capture:
+        return {
+            "state": "UNAVAILABLE",
+            "data_quality": "UNAVAILABLE",
+            "source_age_seconds": None,
+            "recent_events": [],
+            "mandatory_warning": False,
+            "context_only": True,
+            "hard_gate": False,
+            "causal_attribution": "UNCONFIRMED_CONTEXT_ONLY",
+            "note": "No persisted primary-source policy catalyst capture is available.",
+        }
+
+    captured_at = latest_captured_at or _as_utc(latest_capture.get("captured_at"))
+    age_seconds = (
+        max((current_time - captured_at).total_seconds(), 0.0)
+        if captured_at is not None
+        else None
+    )
+    active_after = current_time - timedelta(seconds=POLICY_ACTIVE_FIRST_SEEN_SECONDS)
+    visible_events: list[dict[str, Any]] = []
+    for raw in recent_events:
+        row = dict(raw)
+        first_seen = _as_utc(row.get("first_seen_at"))
+        published_at = _as_utc(row.get("published_at"))
+        if first_seen is None or first_seen < active_after or first_seen > current_time + timedelta(minutes=5):
+            continue
+        # Bootstrap guard: old provider content discovered by the first capture must
+        # not become an ACTIVE catalyst merely because first_seen_at is new.
+        if published_at is not None and published_at < active_after:
+            continue
+        visible_events.append(
+            {
+                "provider": row.get("provider"),
+                "provider_code": row.get("provider_code"),
+                "authority_tier": row.get("authority_tier"),
+                "headline": row.get("headline"),
+                "url": row.get("url") or row.get("source_url"),
+                "primary_event_class": row.get("primary_event_class"),
+                "event_classes": row.get("event_classes") or [],
+                "published_at": row.get("published_at"),
+                "first_seen_at": first_seen.isoformat(),
+            }
+        )
+    visible_events.sort(key=lambda row: str(row.get("first_seen_at") or ""), reverse=True)
+    if age_seconds is None or age_seconds > POLICY_MAX_AGE_SECONDS:
+        state = "STALE"
+    elif visible_events:
+        state = "ACTIVE"
+    else:
+        state = "NORMAL"
+    return {
+        "state": state,
+        "data_quality": latest_capture.get("data_quality") or "UNKNOWN",
+        "captured_at": captured_at.isoformat() if captured_at else None,
+        "source_age_seconds": round(age_seconds, 3) if age_seconds is not None else None,
+        "active_window_hours": POLICY_ACTIVE_FIRST_SEEN_SECONDS // 3600,
+        "recent_events": visible_events[:5],
+        "mandatory_warning": state == "ACTIVE",
+        "context_only": True,
+        "hard_gate": False,
+        "score_mutation": False,
+        "ranking_mutation": False,
+        "eligibility_mutation": False,
+        "execution_mutation": False,
+        "causal_attribution": "UNCONFIRMED_CONTEXT_ONLY",
+        "note": {
+            "ACTIVE": "Fresh high-authority policy/liquidity catalyst context is available; temporal coincidence is not causal proof.",
+            "NORMAL": "Primary policy sources are fresh and no newly first-seen relevant catalyst is active in the configured window.",
+            "STALE": "Primary policy source capture is stale; real-time policy attribution is incomplete.",
+        }[state],
+    }
+
+
 def _walk_metrics(value: Any, collected: dict[str, list[float]]) -> None:
     normalized = _jsonable(value)
     if isinstance(normalized, Mapping):
@@ -308,12 +394,16 @@ async def _load_external_context_uncached() -> dict[str, Any]:
         return {
             "geopolitical": build_geopolitical_context(None, []),
             "macro_liquidity": build_macro_liquidity_context(None),
+            "policy_catalyst": build_policy_catalyst_context(None, []),
             "external_context_error": "DATABASE_URL_NOT_CONFIGURED",
         }
 
     connection = None
     geo_rows = []
     macro_payload = None
+    policy_capture_payload = None
+    policy_capture_at = None
+    policy_events: list[dict[str, Any]] = []
     errors: list[str] = []
     try:
         connection = await asyncpg.connect(database_url, timeout=3)
@@ -345,6 +435,46 @@ async def _load_external_context_uncached() -> dict[str, Any]:
                 macro_payload = _decode_json(macro_row["payload"])
         except asyncpg.UndefinedTableError:
             errors.append("MACRO_LIQUIDITY_TABLE_UNAVAILABLE")
+        try:
+            policy_capture = await connection.fetchrow(
+                """
+                SELECT captured_at,payload
+                FROM research_policy_catalyst_captures
+                WHERE spec_version=$1
+                ORDER BY captured_at DESC
+                LIMIT 1
+                """,
+                POLICY_SPEC_VERSION,
+            )
+            if policy_capture is not None:
+                policy_capture_at = _as_utc(policy_capture["captured_at"])
+                policy_capture_payload = _decode_json(policy_capture["payload"])
+            rows = await connection.fetch(
+                """
+                SELECT provider_code,primary_event_class,published_at,first_seen_at,headline,source_url,payload
+                FROM research_policy_catalyst_events
+                WHERE spec_version=$1
+                  AND first_seen_at >= NOW() - INTERVAL '24 hours'
+                ORDER BY first_seen_at DESC
+                LIMIT 25
+                """,
+                POLICY_SPEC_VERSION,
+            )
+            for row in rows:
+                payload = _decode_json(row["payload"])
+                payload.update(
+                    {
+                        "provider_code": row["provider_code"],
+                        "primary_event_class": row["primary_event_class"],
+                        "published_at": _as_utc(row["published_at"]).isoformat() if _as_utc(row["published_at"]) else None,
+                        "first_seen_at": _as_utc(row["first_seen_at"]).isoformat() if _as_utc(row["first_seen_at"]) else None,
+                        "headline": row["headline"],
+                        "source_url": row["source_url"],
+                    }
+                )
+                policy_events.append(payload)
+        except asyncpg.UndefinedTableError:
+            errors.append("POLICY_CATALYST_TABLE_UNAVAILABLE")
     except Exception as exc:
         errors.append(f"DATABASE_CONTEXT_ERROR:{type(exc).__name__}")
     finally:
@@ -375,6 +505,11 @@ async def _load_external_context_uncached() -> dict[str, Any]:
             latest_timestamp=latest_timestamp,
         ),
         "macro_liquidity": build_macro_liquidity_context(macro_payload),
+        "policy_catalyst": build_policy_catalyst_context(
+            policy_capture_payload,
+            policy_events,
+            latest_captured_at=policy_capture_at,
+        ),
         "external_context_error": ";".join(errors) if errors else None,
     }
 
@@ -421,9 +556,28 @@ async def get_market_context_alerts(market_payload: Any) -> dict[str, Any]:
     external = await _external_context()
     geo = external["geopolitical"]
     macro = external["macro_liquidity"]
+    policy = external["policy_catalyst"]
     impulse = build_market_impulse_context(market_payload)
     overall = _overall_state(str(geo.get("state")), str(impulse.get("state")))
-    mandatory = overall in {"HIGH", "ELEVATED"}
+    impulse_state = str(impulse.get("state") or "UNKNOWN")
+    policy_state = str(policy.get("state") or "UNAVAILABLE")
+    policy_gap_during_impulse = (
+        impulse_state in {"HIGH", "ELEVATED"}
+        and policy_state in {"UNAVAILABLE", "STALE"}
+    )
+    mandatory = (
+        overall in {"HIGH", "ELEVATED"}
+        or policy_state == "ACTIVE"
+        or policy_gap_during_impulse
+    )
+    if policy_state == "ACTIVE" and impulse_state in {"HIGH", "ELEVATED"}:
+        headline = "Friss elsődleges policy/liquidity katalizátor és rövidtávú volumenimpulzus időben egybeesik; okság nincs bizonyítva."
+    elif policy_state == "ACTIVE":
+        headline = "Friss elsődleges policy/liquidity katalizátor látható; ez kontextus, nem önálló trade-jel."
+    elif policy_gap_during_impulse:
+        headline = "Piaci volumenimpulzus látható, de a valós idejű policy/liquidity attribúció nem teljes és friss forráscapture nélkül nem ellenőrizhető."
+    else:
+        headline = _headline(geo, impulse, overall)
     return {
         "version": ALERT_VERSION,
         "context_only": True,
@@ -433,16 +587,19 @@ async def get_market_context_alerts(market_payload: Any) -> dict[str, Any]:
         "execution_mutation": False,
         "warning_level": overall,
         "mandatory_user_warning": mandatory,
-        "headline": _headline(geo, impulse, overall),
+        "headline": headline,
         "market_impulse": impulse,
         "geopolitical": geo,
         "macro_liquidity": macro,
+        "policy_catalyst": policy,
         "causal_attribution": "UNCONFIRMED_UNLESS_INDEPENDENTLY_CORROBORATED",
         "external_context_error": external.get("external_context_error"),
         "reporting_policy": {
             "must_surface_elevated_or_high": True,
             "must_not_be_suppressed_by_trade_score": True,
             "if_large_move_and_external_context_missing": "explicitly report attribution as not checkable",
+            "must_surface_fresh_primary_policy_events": True,
+            "must_surface_policy_gap_during_elevated_impulse": True,
             "language_rule": "distinguish observed volume/flow impulse from claimed macro liquidity injection",
         },
     }

@@ -478,6 +478,12 @@ from app.research_geopolitical_event_v2_api import attach_geopolitical_event_v2_
 
 attach_geopolitical_event_v2_research(app, require_api_key)
 
+# Research-only primary-source policy/liquidity catalyst feed. It records
+# published/first-seen provenance and remains context-only with no live mutation.
+from app.research_policy_catalyst_api import attach_policy_catalyst_research
+
+attach_policy_catalyst_research(app, require_api_key)
+
 # Research-only standalone v0.7.3 prospective gate-funnel status. Capture runs
 # in its own Railway service and cannot mutate the live day-worker path.
 from app.research_prospective_funnel_api import attach_prospective_funnel_research
