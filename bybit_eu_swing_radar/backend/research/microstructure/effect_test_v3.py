@@ -44,7 +44,12 @@ def _validate_preregistration() -> None:
 
 
 def select_earliest_ready_cohort(features: Iterable[Mapping[str, Any]], symbols: Iterable[str]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Freeze the earliest chronological outcome-blind prefix satisfying 60/10."""
+    """Freeze the earliest chronological outcome-blind prefix satisfying 60/10.
+
+    The immutable DEVELOPMENT boundary is the exact ``(opened_at, signal_id)``
+    tuple of the final frozen observation. A timestamp alone is insufficient
+    because multiple journal signals can share the same opened_at value.
+    """
     _validate_preregistration()
     wanted = tuple(dict.fromkeys(str(symbol).upper() for symbol in symbols))
     ordered = sorted((dict(row) for row in features), key=lambda row: (_dt(row), int(row["signal_id"])))
@@ -54,8 +59,23 @@ def select_earliest_ready_cohort(features: Iterable[Mapping[str, Any]], symbols:
         prefix = ordered[:index]
         gate = alignment_v3.sample_readiness(prefix, wanted)
         if gate["ready_for_preregistered_effect_test"]:
-            return prefix, {**gate, "cohort_frozen": True, "cohort_size": len(prefix), "cohort_last_opened_at": _dt(prefix[-1]).isoformat()}
-    return [], {**alignment_v3.sample_readiness(ordered, wanted), "cohort_frozen": False, "cohort_size": 0, "cohort_last_opened_at": None}
+            boundary = prefix[-1]
+            return prefix, {
+                **gate,
+                "cohort_frozen": True,
+                "cohort_size": len(prefix),
+                "cohort_last_opened_at": _dt(boundary).isoformat(),
+                "cohort_last_signal_id": int(boundary["signal_id"]),
+                "cohort_boundary_order": ["opened_at", "signal_id"],
+            }
+    return [], {
+        **alignment_v3.sample_readiness(ordered, wanted),
+        "cohort_frozen": False,
+        "cohort_size": 0,
+        "cohort_last_opened_at": None,
+        "cohort_last_signal_id": None,
+        "cohort_boundary_order": ["opened_at", "signal_id"],
+    }
 
 
 async def load_closed_outcomes(database_url: str, cohort: Iterable[Mapping[str, Any]], symbols: Iterable[str]) -> list[dict[str, Any]]:
