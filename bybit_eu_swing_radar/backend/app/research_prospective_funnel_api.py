@@ -10,6 +10,9 @@ from app.research_microstructure_alignment_v2_api import (
 from app.research_microstructure_alignment_v3_api import (
     attach_microstructure_alignment_v3_research,
 )
+from app.research_microstructure_effect_v3_api import (
+    attach_microstructure_effect_v3_research,
+)
 
 CACHE_KEY = "day_trade_prospective_funnel_status"
 
@@ -20,6 +23,10 @@ def attach_prospective_funnel_research(app, require_api_key) -> None:
     # and have no live strategy/scoring/eligibility/execution path.
     attach_microstructure_alignment_v2_research(app, require_api_key)
     attach_microstructure_alignment_v3_research(app, require_api_key)
+    # V3 effect analysis was separately preregistered before this outcome-bearing
+    # route existed. Its implementation remains fail-closed until the frozen v3
+    # sample/coverage gates are satisfied.
+    attach_microstructure_effect_v3_research(app, require_api_key)
 
     repo = RadarRepository()
 
