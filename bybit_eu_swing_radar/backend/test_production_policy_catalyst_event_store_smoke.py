@@ -31,6 +31,7 @@ def test_validate_status_requires_timestamped_events_to_have_v1_marker():
     assert reason == "ok"
     assert summary["latest_v1_persisted_event_count"] == 1
     assert summary["recent_24h_v1_persisted_event_count"] == 1
+    assert summary["verification_state"] == "VERIFIED_EVENT_OBSERVED"
 
 
 def test_validate_status_fails_if_timestamped_event_was_not_dual_written():
@@ -47,6 +48,20 @@ def test_validate_status_can_prove_v1_from_recent_rows_when_latest_capture_has_n
     assert reason == "ok"
     assert summary["latest_v1_persisted_event_count"] == 0
     assert summary["recent_24h_v1_persisted_event_count"] == 1
+    assert summary["verification_state"] == "VERIFIED_EVENT_OBSERVED"
+
+
+def test_validate_status_is_pending_not_failed_when_no_timestamped_event_exists():
+    status = _status()
+    status["latest_capture"]["events"] = []
+    status["recent_24h_events"] = []
+    ok, reason, summary = validate_status(status, SHA)
+    assert ok is True
+    assert reason == "ok"
+    assert summary["latest_timestamped_event_count"] == 0
+    assert summary["latest_v1_persisted_event_count"] == 0
+    assert summary["recent_24h_v1_persisted_event_count"] == 0
+    assert summary["verification_state"] == "PENDING_NO_TIMESTAMPED_EVENT"
 
 
 def test_run_smoke_is_read_only_and_checks_exact_sha():
