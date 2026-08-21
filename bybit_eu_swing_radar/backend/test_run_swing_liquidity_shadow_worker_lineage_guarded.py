@@ -10,6 +10,7 @@ from scripts.run_swing_liquidity_shadow_worker_lineage_guarded import (
 API_SHA = "a" * 40
 WORKER_SHA = API_SHA
 CHECKED_AT = "2026-08-22T00:00:00+00:00"
+OLDER_CHECKED_AT = "2026-08-21T23:55:00+00:00"
 NEWER_CHECKED_AT = "2026-08-22T00:05:00+00:00"
 
 
@@ -86,10 +87,54 @@ def test_worker_lineage_guard_accepts_scan_first_observed_after_collection():
         "secret",
         "https://api.bybit.eu",
         collect=lambda *_: _snapshot(),
-        fetch=_fetch_factory(pre_status=_status("2026-08-21T23:55:00+00:00")),
+        fetch=_fetch_factory(pre_status=_status(OLDER_CHECKED_AT)),
     )
     assert result["swing_worker_checked_at"] == CHECKED_AT
     assert result["swing_worker_lineage_observation"] == "post_collection"
+
+
+def test_worker_lineage_guard_accepts_scan_bounded_between_same_commit_observations():
+    result = collect_snapshot_with_worker_lineage(
+        "https://example.test",
+        "secret",
+        "https://api.bybit.eu",
+        collect=lambda *_: _snapshot(),
+        fetch=_fetch_factory(
+            pre_status=_status(OLDER_CHECKED_AT),
+            post_status=_status(NEWER_CHECKED_AT),
+        ),
+    )
+    assert result["swing_worker_source_commit_sha"] == WORKER_SHA
+    assert result["swing_worker_checked_at"] == CHECKED_AT
+    assert result["swing_worker_lineage_observation"] == "bounded_rotation"
+
+
+def test_worker_lineage_guard_rejects_commit_change_across_bounded_rotation():
+    with pytest.raises(RuntimeError, match="worker commit changed across collection window"):
+        collect_snapshot_with_worker_lineage(
+            "https://example.test",
+            "secret",
+            "https://api.bybit.eu",
+            collect=lambda *_: _snapshot(),
+            fetch=_fetch_factory(
+                pre_status=_status(OLDER_CHECKED_AT, WORKER_SHA),
+                post_status=_status(NEWER_CHECKED_AT, "b" * 40),
+            ),
+        )
+
+
+def test_worker_lineage_guard_rejects_scan_outside_bounded_window():
+    with pytest.raises(RuntimeError, match="outside the bracketing worker-status window"):
+        collect_snapshot_with_worker_lineage(
+            "https://example.test",
+            "secret",
+            "https://api.bybit.eu",
+            collect=lambda *_: _snapshot(),
+            fetch=_fetch_factory(
+                pre_status=_status("2026-08-22T00:01:00+00:00"),
+                post_status=_status(NEWER_CHECKED_AT),
+            ),
+        )
 
 
 def test_worker_lineage_guard_rejects_api_observed_worker_commit_mismatch():
@@ -106,20 +151,6 @@ def test_worker_lineage_guard_rejects_api_observed_worker_commit_mismatch():
         )
 
 
-def test_worker_lineage_guard_rejects_scan_not_observed_in_bracketing_statuses():
-    with pytest.raises(RuntimeError, match="not observed in the bracketing worker-status snapshots"):
-        collect_snapshot_with_worker_lineage(
-            "https://example.test",
-            "secret",
-            "https://api.bybit.eu",
-            collect=lambda *_: _snapshot(),
-            fetch=_fetch_factory(
-                pre_status=_status("2026-08-21T23:55:00+00:00"),
-                post_status=_status(NEWER_CHECKED_AT),
-            ),
-        )
-
-
 @pytest.mark.parametrize("api_sha,worker_sha", [("bad", WORKER_SHA), (API_SHA, "bad")])
 def test_worker_lineage_guard_rejects_invalid_commit_identity(api_sha: str, worker_sha: str):
     pre_status = _status(CHECKED_AT, worker_sha)
@@ -131,4 +162,15 @@ def test_worker_lineage_guard_rejects_invalid_commit_identity(api_sha: str, work
             "https://api.bybit.eu",
             collect=lambda *_: _snapshot(),
             fetch=_fetch_factory(api_sha=api_sha, pre_status=pre_status, post_status=post_status),
+        )
+
+
+def test_worker_lineage_guard_rejects_naive_status_timestamp():
+    with pytest.raises(RuntimeError, match="timezone missing"):
+        collect_snapshot_with_worker_lineage(
+            "https://example.test",
+            "secret",
+            "https://api.bybit.eu",
+            collect=lambda *_: _snapshot(),
+            fetch=_fetch_factory(pre_status=_status("2026-08-22T00:00:00")),
         )
