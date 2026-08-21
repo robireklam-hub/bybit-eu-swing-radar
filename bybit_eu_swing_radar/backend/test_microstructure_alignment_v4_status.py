@@ -132,3 +132,43 @@ def test_v4_production_validator_fails_closed_on_activation_evidence_drift():
         ok, reason = validate_alignment_status(payload)
         assert ok is False, field
         assert reason == f"production_activation_evidence_{field}_mutated"
+
+
+def test_v4_production_validator_fails_closed_on_sample_partition_drift():
+    payload = _production_payload()
+    payload["sample"]["per_symbol"]["XRPUSDC"] = payload["sample"]["per_symbol"].pop("SOLUSDC")
+    assert validate_alignment_status(payload) == (False, "sample_symbol_partition_mutated")
+
+    payload = _production_payload()
+    payload["sample"]["per_symbol"]["BTCUSDC"] += 1
+    assert validate_alignment_status(payload) == (False, "sample_symbol_partition_inconsistent")
+
+    payload = _production_payload()
+    payload["sample"]["ready_for_preregistered_effect_test"] = False
+    assert validate_alignment_status(payload) == (False, "sample_readiness_inconsistent")
+
+
+def test_v4_production_validator_fails_closed_on_alignment_partition_drift():
+    payload = _production_payload()
+    payload["alignment_coverage"]["per_symbol"]["XRPUSDC"] = payload["alignment_coverage"]["per_symbol"].pop("SOLUSDC")
+    assert validate_alignment_status(payload) == (False, "symbol_partition_mutated")
+
+    payload = _production_payload()
+    payload["alignment_coverage"]["per_symbol"]["BTCUSDC"]["journal_signals"] += 1
+    assert validate_alignment_status(payload) == (False, "symbol_alignment_counts_inconsistent")
+
+    payload = _production_payload()
+    payload["alignment_coverage"]["journal_signal_count"] += 1
+    payload["alignment_coverage"]["unaligned_signal_count"] += 1
+    assert validate_alignment_status(payload) == (False, "symbol_partition_totals_inconsistent")
+
+    payload = _production_payload()
+    payload["alignment_coverage_ready"] = False
+    assert validate_alignment_status(payload) == (False, "alignment_coverage_ready_inconsistent")
+
+
+def test_v4_production_validator_fails_closed_if_sample_and_alignment_totals_diverge():
+    payload = _production_payload()
+    payload["sample"]["total_signals"] = 61
+    payload["sample"]["per_symbol"]["BTCUSDC"] = 21
+    assert validate_alignment_status(payload) == (False, "sample_alignment_total_inconsistent")
