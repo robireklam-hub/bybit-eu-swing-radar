@@ -5,18 +5,20 @@ Research only. The durable capture table records the production API commit SHA a
 ``source_commit_sha``. During rolling deploys the API and swing worker can briefly
 serve different commits, which would mislabel forward research lineage.
 
-The scan cache can also rotate while order books are being collected. To avoid a
-false failure from that normal race, this wrapper brackets collection with worker
-status observations and accepts the snapshot only when its exact ``data_as_of``
-identity was observed either immediately before or immediately after collection,
-and that observed worker commit equals the API commit. No live score, eligibility,
-threshold, or execution state is changed.
+The scan cache can rotate while order books are being collected. A pre/post-only
+status bracket is not sufficient because the collected scan can exist strictly
+between those two observations. This wrapper therefore samples worker status at a
+small bounded cadence while collection is in flight and accepts the snapshot only
+when its exact ``data_as_of`` identity was actually observed, and the observed
+worker commit equals the API commit. No live score, eligibility, threshold, or
+execution state is changed.
 """
 from __future__ import annotations
 
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Callable
 from urllib.request import Request, urlopen
@@ -29,8 +31,11 @@ from research.swing_liquidity_shadow import collect_snapshot  # noqa: E402
 from scripts.run_swing_liquidity_shadow_guarded import run_capture  # noqa: E402
 
 
+STATUS_POLL_INTERVAL_SECONDS = 0.5
+
+
 def _get_json(url: str, api_key: str | None = None, timeout: float = 20.0) -> dict[str, Any]:
-    headers = {"Accept": "application/json", "User-Agent": "swing-liquidity-worker-lineage/2"}
+    headers = {"Accept": "application/json", "User-Agent": "swing-liquidity-worker-lineage/3"}
     if api_key:
         headers["X-Radar-Key"] = api_key
     request = Request(url, headers=headers)
@@ -63,6 +68,28 @@ def _matching_worker_observation(
     return phase, checked_at, worker_sha
 
 
+def _matching_observations(
+    observations: list[tuple[str, dict[str, Any]]],
+    scan_data_as_of: str,
+) -> list[tuple[str, str, str]]:
+    return [
+        match
+        for phase, status in observations
+        if (match := _matching_worker_observation(status, scan_data_as_of, phase)) is not None
+    ]
+
+
+def _observation_label(phases: list[str]) -> str:
+    unique = set(phases)
+    if unique == {"pre_collection", "post_collection"}:
+        return "both"
+    if "during_collection" in unique:
+        return "during_collection"
+    if len(unique) == 1:
+        return phases[0]
+    return "bracketed"
+
+
 def collect_snapshot_with_worker_lineage(
     base_url: str,
     api_key: str,
@@ -70,12 +97,36 @@ def collect_snapshot_with_worker_lineage(
     *,
     collect: Callable[[str, str, str], dict[str, Any]] = collect_snapshot,
     fetch: Callable[[str, str | None, float], dict[str, Any]] = _get_json,
+    poll_interval_seconds: float = STATUS_POLL_INTERVAL_SECONDS,
 ) -> dict[str, Any]:
     status_url = f"{base_url.rstrip('/')}/v1/data-status"
-    pre_status = fetch(status_url, api_key, 20.0)
-    snapshot = collect(base_url, api_key, bybit_base_url)
+    observations: list[tuple[str, dict[str, Any]]] = [
+        ("pre_collection", fetch(status_url, api_key, 20.0))
+    ]
+    observation_lock = threading.Lock()
+    stop_polling = threading.Event()
+
+    def poll_worker_status() -> None:
+        while not stop_polling.wait(max(0.01, poll_interval_seconds)):
+            try:
+                status = fetch(status_url, api_key, 20.0)
+            except Exception:
+                continue
+            with observation_lock:
+                observations.append(("during_collection", status))
+
+    poller = threading.Thread(target=poll_worker_status, name="swing-lineage-status-poller", daemon=True)
+    poller.start()
+    try:
+        snapshot = collect(base_url, api_key, bybit_base_url)
+    finally:
+        stop_polling.set()
+        poller.join(timeout=max(1.0, poll_interval_seconds * 4.0))
+
     version = fetch(f"{base_url.rstrip('/')}/version", None, 20.0)
-    post_status = fetch(status_url, api_key, 20.0)
+    with observation_lock:
+        observations.append(("post_collection", fetch(status_url, api_key, 20.0)))
+        frozen_observations = list(observations)
 
     api_sha = str(version.get("commit_sha") or "").strip().lower()
     if not _valid_commit_sha(api_sha):
@@ -85,18 +136,11 @@ def collect_snapshot_with_worker_lineage(
     if not scan_data_as_of:
         raise RuntimeError("swing liquidity lineage unavailable: collected scan timestamp missing")
 
-    matches = [
-        observation
-        for observation in (
-            _matching_worker_observation(pre_status, scan_data_as_of, "pre_collection"),
-            _matching_worker_observation(post_status, scan_data_as_of, "post_collection"),
-        )
-        if observation is not None
-    ]
+    matches = _matching_observations(frozen_observations, scan_data_as_of)
     if not matches:
         raise RuntimeError(
             "swing liquidity lineage mismatch: collected scan identity was not observed in "
-            "the bracketing worker-status snapshots"
+            "the bounded worker-status observations"
         )
 
     matched_worker_shas = {item[2] for item in matches}
@@ -111,11 +155,10 @@ def collect_snapshot_with_worker_lineage(
 
     phases = [item[0] for item in matches]
     worker_checked_at = scan_data_as_of
-    observation = "both" if len(phases) == 2 else phases[0]
     snapshot["source_commit_sha"] = api_sha
     snapshot["swing_worker_source_commit_sha"] = worker_sha
     snapshot["swing_worker_checked_at"] = worker_checked_at
-    snapshot["swing_worker_lineage_observation"] = observation
+    snapshot["swing_worker_lineage_observation"] = _observation_label(phases)
     snapshot["source_commit_semantics"] = "api_and_swing_worker_exact_commit_parity"
     for candidate in snapshot.get("candidates") or []:
         if isinstance(candidate, dict):
