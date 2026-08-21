@@ -108,6 +108,7 @@ def test_v075_immediate_next_closed_5m_bar_cannot_erase_valid_breakout(monkeypat
         _with_follow_through(_analysis()),
         "long",
         datetime(2026, 8, 20, tzinfo=timezone.utc),
+        strategy_version="0.7.5",
     )
     assert c is not None
     assert (c["category"], c["state"], c["decision"]) == ("STRICT", "TRIGGERED", "TRADE")
@@ -138,6 +139,7 @@ def test_v075_follow_through_invalidates_only_if_original_boundary_is_lost(monke
         _with_follow_through(_analysis(), close=99.8, high=101.0, low=99.5),
         "long",
         datetime(2026, 8, 20, tzinfo=timezone.utc),
+        strategy_version="0.7.5",
     )
     assert c is not None
     assert c["trigger"]["triggered"] is False

@@ -70,4 +70,4 @@ async def test_missing_journal_relation_runs_bounded_schema_install():
 
 def test_facade_preserves_existing_journal_writer_implementation():
     assert journal.persist_day_journal is journal_core.persist_day_journal
-    assert journal.STRATEGY_VERSION == journal_core.STRATEGY_VERSION == "0.7.5"
+    assert journal.STRATEGY_VERSION == journal_core.STRATEGY_VERSION == "0.7.6"

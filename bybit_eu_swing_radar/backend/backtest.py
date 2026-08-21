@@ -621,7 +621,12 @@ def replay_symbol(
                 and not current_shortable_proxy
             ):
                 continue
-            candidate = build_day_candidate(analysis, side, _dt_from_ms(evaluation_time_ms))
+            candidate = build_day_candidate(
+                analysis,
+                side,
+                _dt_from_ms(evaluation_time_ms),
+                strategy_version=STRATEGY_VERSION,
+            )
             if candidate is None:
                 continue
             signal_class = _signal_class(candidate)

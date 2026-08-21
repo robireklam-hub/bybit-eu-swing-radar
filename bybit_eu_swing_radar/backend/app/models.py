@@ -205,6 +205,14 @@ class DayTradeCandidate(BaseModel):
     watch_bucket: str | None = None
     decision: Literal["TRADE", "WAIT", "NO_TRADE"]
     setup_type: str
+    setup_state: str | None = None
+    entry_state: str | None = None
+    execution_valid: bool | None = None
+    rr_valid: bool | None = None
+    reference_entry: float | None = None
+    breakout_context: dict[str, Any] | None = None
+    hard_stop: dict[str, Any] | None = None
+    structure_invalidation: dict[str, Any] | None = None
     last_price: float
     tradeable: bool
     shortable: bool = False
@@ -280,6 +288,12 @@ class DayTradeAuditTrigger(BaseModel):
     requires_close: bool
     volume_confirmation: str
     triggered: bool
+    route: str | None = None
+    model: str | None = None
+    event_bar_time: str | None = None
+    age_bars: int | None = None
+    validity_bars: int | None = None
+    boundary_held: bool | None = None
 
 
 class DayTradeBarrierSource(BaseModel):
@@ -305,6 +319,13 @@ class DayTradeAuditSide(BaseModel):
     state: DayTradeState
     decision: Literal["TRADE", "WAIT", "NO_TRADE"]
     watch_bucket: str | None = None
+    setup_state: str | None = None
+    entry_state: str | None = None
+    execution_valid: bool | None = None
+    rr_valid: bool | None = None
+    reference_entry: float | None = None
+    hard_stop: dict[str, Any] | None = None
+    structure_invalidation: dict[str, Any] | None = None
     tradeable: bool
     shortable: bool
     execution_status: str
