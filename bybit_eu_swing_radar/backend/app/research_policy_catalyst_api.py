@@ -10,7 +10,11 @@ import asyncpg
 import httpx
 from fastapi import Depends, FastAPI, HTTPException
 
-from research.policy_catalyst_event_store_v1 import EVENT_SCHEMA_SQL, normalize_policy_event
+from research.policy_catalyst_event_store_v1 import (
+    EVENT_SCHEMA_SQL,
+    SPEC_VERSION as EVENT_STORE_SPEC_VERSION,
+    normalize_policy_event,
+)
 from research.policy_catalyst_feed_v1 import (
     DEFAULT_EVENT_LOOKBACK_HOURS,
     SPEC_VERSION,
@@ -21,6 +25,7 @@ from research.policy_catalyst_feed_v1 import (
     parse_rss_or_atom,
     spec,
 )
+from research.policy_catalyst_observability_v1 import build_source_observability
 from research.policy_catalyst_sources_v1 import enabled_source_registry
 from research.policy_catalyst_transport_v1 import (
     MAX_DETAIL_RESPONSE_BYTES,
@@ -365,6 +370,7 @@ async def status_payload() -> dict[str, Any]:
     connection = await asyncpg.connect(_database_url(), timeout=30)
     try:
         await connection.execute(SCHEMA_SQL)
+        await connection.execute(EVENT_SCHEMA_SQL)
         latest = await connection.fetchrow(
             """
             SELECT captured_at,source_commit_sha,data_quality,payload
@@ -389,6 +395,18 @@ async def status_payload() -> dict[str, Any]:
         event_count = await connection.fetchval(
             "SELECT COUNT(*)::int FROM research_policy_catalyst_events WHERE spec_version=$1",
             SPEC_VERSION,
+        )
+        event_store_rows = await connection.fetch(
+            """
+            SELECT provider_code,COUNT(*)::int AS event_count,
+                   MAX(first_seen_at) AS latest_first_seen_at,
+                   MAX(last_seen_at) AS latest_last_seen_at
+            FROM policy_catalyst_event_v1
+            WHERE spec_version=$1
+            GROUP BY provider_code
+            ORDER BY provider_code
+            """,
+            EVENT_STORE_SPEC_VERSION,
         )
     finally:
         await connection.close()
@@ -418,6 +436,12 @@ async def status_payload() -> dict[str, Any]:
             }
         )
         recent_events.append(payload)
+    source_observability = build_source_observability(
+        latest_capture=latest_payload,
+        event_store_rows=[dict(row) for row in event_store_rows],
+        as_of=now,
+        capture_fresh_seconds=CAPTURE_FRESH_SECONDS,
+    )
     return {
         "research_only": True,
         "label_free": True,
@@ -431,6 +455,7 @@ async def status_payload() -> dict[str, Any]:
         "latest_capture": latest_payload,
         "event_count": int(event_count or 0),
         "recent_24h_events": recent_events,
+        "source_observability_v1": source_observability,
         "causal_attribution": "UNCONFIRMED_CONTEXT_ONLY",
     }
 

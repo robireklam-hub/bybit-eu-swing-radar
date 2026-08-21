@@ -28,12 +28,14 @@ def test_policy_persistence_contract_has_first_seen_and_separate_captures():
 
 
 @pytest.mark.asyncio
-async def test_status_lookback_uses_database_clock_without_untyped_interval_parameter(monkeypatch):
+async def test_status_lookback_uses_database_clock_and_exposes_v1_source_observability(monkeypatch):
     class FakeConnection:
         def __init__(self):
             self.fetch_calls = []
+            self.execute_calls = []
 
-        async def execute(self, *_args):
+        async def execute(self, query, *_args):
+            self.execute_calls.append(query)
             return None
 
         async def fetchrow(self, *_args):
@@ -60,11 +62,19 @@ async def test_status_lookback_uses_database_clock_without_untyped_interval_para
     result = await policy_api.status_payload()
 
     assert result["freshness"] == "UNAVAILABLE"
-    assert len(connection.fetch_calls) == 1
-    query, args = connection.fetch_calls[0]
-    assert "first_seen_at >= NOW() - INTERVAL '24 hours'" in query
-    assert args == (policy_api.SPEC_VERSION,)
-    assert "$2 - INTERVAL" not in query
+    assert result["source_observability_v1"]["context_only"] is True
+    assert result["source_observability_v1"]["hard_gate"] is False
+    assert result["source_observability_v1"]["live_strategy_mutated"] is False
+    assert len(connection.fetch_calls) == 2
+    recent_query, recent_args = connection.fetch_calls[0]
+    assert "first_seen_at >= NOW() - INTERVAL '24 hours'" in recent_query
+    assert recent_args == (policy_api.SPEC_VERSION,)
+    assert "$2 - INTERVAL" not in recent_query
+    store_query, store_args = connection.fetch_calls[1]
+    assert "FROM policy_catalyst_event_v1" in store_query
+    assert "GROUP BY provider_code" in store_query
+    assert store_args == (policy_api.EVENT_STORE_SPEC_VERSION,)
+    assert any("policy_catalyst_event_v1" in query for query in connection.execute_calls)
 
 
 @pytest.mark.asyncio
