@@ -6,12 +6,16 @@ eligibility, scoring, ranking, shortability, or execution.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from research.research_governance import PIT_VERSION
 from research.research_lifecycle_ledger import canonical_fingerprint
 
 DATA_QUALITY_SPEC_VERSION = "swing-liquidity-data-quality-v1"
+# Frozen before production activation, at PR #360 creation. Captures inserted before
+# this boundary are never eligible evidence for this newly introduced gate.
+DATA_QUALITY_FORWARD_START_UTC = datetime(2026, 8, 21, 3, 55, 25, tzinfo=timezone.utc)
 MIN_CONSECUTIVE_CAPTURES = 3
 MAX_ORDERBOOK_ERRORS_PER_CAPTURE = 0
 REQUIRE_FULL_ORDERBOOK_COVERAGE = True
@@ -25,6 +29,8 @@ def spec() -> dict[str, Any]:
         "label_blind": True,
         "outcome_fields_used": False,
         "threshold_search_allowed": False,
+        "forward_start_utc": DATA_QUALITY_FORWARD_START_UTC.isoformat(),
+        "historical_backfill_allowed": False,
         "min_consecutive_post_pit_captures": MIN_CONSECUTIVE_CAPTURES,
         "required_provenance_version": PIT_VERSION,
         "max_orderbook_errors_per_capture": MAX_ORDERBOOK_ERRORS_PER_CAPTURE,
@@ -69,10 +75,14 @@ def evaluate_capture_rows(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
             failures.append(f"capture_{index}:orderbook_coverage_incomplete")
         if not row.get("feature_available_at"):
             failures.append(f"capture_{index}:feature_available_at_missing")
+        inserted_at = row.get("inserted_at")
+        if isinstance(inserted_at, datetime):
+            if inserted_at.tzinfo is None or inserted_at.astimezone(timezone.utc) < DATA_QUALITY_FORWARD_START_UTC:
+                failures.append(f"capture_{index}:predates_data_quality_forward_start")
         evidence.append(
             {
                 "captured_at": str(row.get("captured_at")),
-                "inserted_at": str(row.get("inserted_at")),
+                "inserted_at": str(inserted_at),
                 "candidate_count": candidate_count,
                 "orderbook_count": orderbook_count,
                 "orderbook_error_count": orderbook_error_count,
@@ -106,6 +116,7 @@ def evaluate_capture_rows(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
     summary["evidence_window_fingerprint"] = canonical_fingerprint(
         {
             "spec_version": DATA_QUALITY_SPEC_VERSION,
+            "forward_start_utc": DATA_QUALITY_FORWARD_START_UTC.isoformat(),
             "evidence_fingerprints": evidence_fingerprints,
         }
     )
