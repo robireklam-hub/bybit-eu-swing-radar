@@ -7,11 +7,13 @@ on:
       - ".github/workflows/policy-catalyst-feed.yml"
       - "bybit_eu_swing_radar/backend/research/policy_catalyst_sources_v1.py"
       - "bybit_eu_swing_radar/backend/research/policy_catalyst_feed_v1.py"
+      - "bybit_eu_swing_radar/backend/research/policy_catalyst_observability_v1.py"
       - "bybit_eu_swing_radar/backend/app/research_policy_catalyst_api.py"
       - "bybit_eu_swing_radar/backend/app/market_context_alerts.py"
       - "bybit_eu_swing_radar/backend/app/main.py"
       - "bybit_eu_swing_radar/backend/scripts/production_policy_catalyst_smoke.py"
       - "bybit_eu_swing_radar/backend/scripts/production_policy_catalyst_event_store_smoke.py"
+      - "bybit_eu_swing_radar/backend/scripts/production_policy_catalyst_source_observability_smoke.py"
   schedule:
     - cron: "4,14,24,34,44,54 * * * *"
   workflow_dispatch:
@@ -46,3 +48,6 @@ jobs:
       - name: Verify policy catalyst event-store v1
         working-directory: bybit_eu_swing_radar/backend
         run: python scripts/production_policy_catalyst_event_store_smoke.py
+      - name: Verify policy catalyst source observability v1
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_policy_catalyst_source_observability_smoke.py
