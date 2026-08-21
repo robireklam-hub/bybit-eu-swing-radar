@@ -57,9 +57,11 @@ def test_unregistered_source_or_event_class_fails_closed():
         normalize_policy_event(bad_class, observed_at="2026-08-18T14:03:00Z")
 
 
-def test_first_seen_cannot_precede_source_publish_time():
-    with pytest.raises(ValueError, match="cannot precede"):
-        normalize_policy_event(_sec_event(), observed_at="2026-08-18T13:59:59Z")
+def test_provider_clock_ahead_is_preserved_as_provenance_not_dropped():
+    event = normalize_policy_event(_sec_event(), observed_at="2026-08-18T13:59:00Z")
+    assert event["first_seen_at"] == "2026-08-18T13:59:00+00:00"
+    assert event["provenance"]["source_clock_ahead_seconds"] == 60.0
+    assert event["hard_gate"] is False
 
 
 def test_freshness_is_visible_context_not_trade_gate():
