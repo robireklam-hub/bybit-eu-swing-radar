@@ -16,6 +16,7 @@ _BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BACKEND_ROOT))
 
+from research.swing_liquidity_cohort_partition import build_label_blind_cohort_partition
 from research.swing_liquidity_event_contract import maturity_at
 
 
@@ -49,6 +50,8 @@ def summarize_maturity_payload(payload: dict[str, Any]) -> dict[str, Any]:
     preregistered 10-day event contract. The payload's ``matures_at`` value is
     therefore evidence to verify, not an authoritative input. Event identities
     must also be unique so duplicate forward events cannot inflate readiness.
+    Once 60 events mature, the exact first-60 DEVELOPMENT identity set is
+    deterministically fingerprinted before any outcome analysis is permitted.
     """
     if payload.get("research_only") is not True:
         raise ValueError("research_only_not_true")
@@ -110,6 +113,13 @@ def summarize_maturity_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if declared_matured != matured:
         raise ValueError(f"matured_event_count_mismatch:{declared_matured}/{matured}")
 
+    cohort_partition = build_label_blind_cohort_partition(events, checked_at=checked_at)
+    if cohort_partition["matured_event_count"] != matured:
+        raise ValueError(
+            "cohort_partition_maturity_mismatch:"
+            f"{cohort_partition['matured_event_count']}/{matured}"
+        )
+
     next_maturity = min(pending_times) if pending_times else None
     within_24h = sum(1 for value in pending_times if value <= checked_at + timedelta(hours=24))
     within_72h = sum(1 for value in pending_times if value <= checked_at + timedelta(hours=72))
@@ -129,9 +139,16 @@ def summarize_maturity_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "development_target_matured_events": 60,
         "validation_target_matured_events": 40,
         "development_maturity_count_ready": matured >= 60,
+        "development_partition_ready": cohort_partition["development_partition_ready"],
+        "development_partition_event_count": cohort_partition["development_event_count"],
+        "development_partition_fingerprint": cohort_partition["partition_fingerprint"],
+        "development_boundary_trigger_close_at": cohort_partition["development_boundary_trigger_close_at"],
+        "validation_observed_event_count": cohort_partition["validation_observed_event_count"],
+        "cohort_partition_spec_version": cohort_partition["partition_spec_version"],
+        "cohort_partition_verified_label_blind": True,
         "maturity_contract_verified": True,
         "event_identity_uniqueness_verified": True,
-        "note": "Maturity timing is recomputed from trigger_close_at under the frozen 10-day contract; no outcome access or live promotion is authorized.",
+        "note": "Maturity timing and the DEVELOPMENT/VALIDATION identity boundary are recomputed from label-blind trigger metadata only; no outcome access, threshold search, or live promotion is authorized.",
     }
 
 
