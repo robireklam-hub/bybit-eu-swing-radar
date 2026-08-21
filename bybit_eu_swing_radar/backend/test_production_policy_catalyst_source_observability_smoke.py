@@ -1,3 +1,8 @@
+import os
+from pathlib import Path
+import subprocess
+import sys
+
 from scripts.production_policy_catalyst_source_observability_smoke import run_smoke, validate_status
 
 
@@ -146,3 +151,29 @@ def test_run_smoke_is_read_only_and_checks_exact_sha():
         "https://example.test/version",
         "https://example.test/v1/research/policy-catalyst/status",
     ]
+
+
+def test_standalone_script_bootstraps_backend_root_without_pythonpath(tmp_path):
+    script = Path(__file__).resolve().parent / "scripts" / "production_policy_catalyst_source_observability_smoke.py"
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {
+            "PYTHONPATH",
+            "PRODUCTION_RADAR_API_BASE_URL",
+            "PRODUCTION_RADAR_API_KEY",
+            "EXPECTED_SHA",
+        }
+    }
+    completed = subprocess.run(
+        [sys.executable, str(script)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert completed.returncode == 1
+    assert "required policy-catalyst source-observability smoke configuration is missing" in completed.stdout
+    assert "ModuleNotFoundError" not in completed.stderr
