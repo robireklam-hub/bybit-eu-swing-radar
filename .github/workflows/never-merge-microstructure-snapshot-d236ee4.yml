@@ -1,4 +1,4 @@
-name: NEVER MERGE microstructure snapshot d236ee4 0803
+name: NEVER MERGE microstructure snapshot 5c51f6d5 0846
 
 on:
   pull_request:
@@ -14,7 +14,7 @@ jobs:
     env:
       PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
       PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
-      EXPECTED_SHA: d236ee482a174ffb42d973e8f3b2a41bea15e110
+      EXPECTED_SHA: 5c51f6d5c4e5e349fb6f124d2d709abc12fb8aa5
       MICROSTRUCTURE_REQUIRE_EXACT_RECORDER_SHA: "false"
     steps:
       - uses: actions/checkout@v7
