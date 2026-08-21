@@ -8,9 +8,13 @@ import sys
 import time
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from research.policy_catalyst_sources_v1 import enabled_source_registry
+
 EXPECTED_SPEC = "policy-catalyst-feed-v1"
+EXPECTED_TRANSPORT_SPEC = "policy-catalyst-transport-v1"
 MAX_POLLS = 45
 POLL_INTERVAL_SECONDS = 5
 
@@ -43,6 +47,41 @@ def _call(
     method: str = "GET",
 ) -> dict[str, Any]:
     return fetch(f"{base_url.rstrip('/')}{path}", api_key, timeout, method)
+
+
+def _allowed_source_hosts() -> dict[str, str]:
+    return {
+        str(source["provider_code"]): str(source["allowed_host"]).lower()
+        for source in enabled_source_registry()
+    }
+
+
+def _validate_transport_source(source: dict[str, Any], allowed_hosts: dict[str, str]) -> str | None:
+    if source.get("status") != "OK":
+        return None
+    provider_code = str(source.get("provider_code") or "")
+    allowed_host = allowed_hosts.get(provider_code)
+    if not allowed_host:
+        return "ok_source_not_in_frozen_registry"
+    if source.get("transport_spec_version") != EXPECTED_TRANSPORT_SPEC:
+        return "transport_spec_version_missing_or_invalid"
+    if source.get("official_response_origin_verified") is not True:
+        return "official_response_origin_not_verified"
+    if source.get("streaming_byte_cap_enforced") is not True:
+        return "streaming_byte_cap_not_verified"
+
+    final_url = str(source.get("final_url") or "")
+    parsed = urlparse(final_url)
+    if parsed.scheme.lower() != "https" or (parsed.hostname or "").lower() != allowed_host:
+        return "final_source_url_outside_frozen_official_https_host"
+
+    byte_bound = source.get("response_byte_bound")
+    response_bytes = source.get("response_bytes")
+    if not isinstance(byte_bound, int) or byte_bound <= 0:
+        return "response_byte_bound_invalid"
+    if not isinstance(response_bytes, int) or response_bytes < 0 or response_bytes > byte_bound:
+        return "response_bytes_outside_frozen_bound"
+    return None
 
 
 def validate_capture(payload: dict[str, Any], expected_sha: str) -> tuple[bool, str]:
@@ -78,9 +117,13 @@ def validate_capture(payload: dict[str, Any], expected_sha: str) -> tuple[bool, 
     source_results = payload.get("source_results") or []
     if len(source_results) != attempted:
         return False, "source_result_count_mismatch"
+    allowed_hosts = _allowed_source_hosts()
     for source in source_results:
         if source.get("status") not in {"OK", "ERROR"}:
             return False, "source_failure_not_explicit"
+        transport_failure = _validate_transport_source(source, allowed_hosts)
+        if transport_failure:
+            return False, transport_failure
 
     for event in payload.get("events") or []:
         if event.get("context_only") is not True or event.get("hard_gate") is not False:
@@ -181,10 +224,24 @@ def run_smoke(
         print("FAIL phase=market-context reason=policy_mutation_contract_invalid")
         return 1
 
+    safe_sources = [
+        {
+            "provider_code": row.get("provider_code"),
+            "status": row.get("status"),
+            "transport_spec_version": row.get("transport_spec_version"),
+            "official_response_origin_verified": row.get("official_response_origin_verified"),
+            "streaming_byte_cap_enforced": row.get("streaming_byte_cap_enforced"),
+            "response_bytes": row.get("response_bytes"),
+            "response_byte_bound": row.get("response_byte_bound"),
+            "final_url": row.get("final_url"),
+        }
+        for row in capture.get("source_results") or []
+    ]
     safe = {
         "source_commit_sha": capture.get("source_commit_sha"),
         "data_quality": capture.get("data_quality"),
         "coverage": capture.get("coverage"),
+        "source_transport": safe_sources,
         "freshness": status.get("freshness"),
         "recent_24h_event_count": len(status.get("recent_24h_events") or []),
         "market_policy_state": policy.get("state"),
