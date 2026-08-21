@@ -48,7 +48,6 @@ _COMMON_KEYWORDS: dict[str, tuple[str, ...]] = {
         "tokenization",
         "tokenized",
         "genius act",
-        "market structure",
     ),
     "TREASURY_DEBT_MANAGEMENT": (
         "buyback",
@@ -377,7 +376,12 @@ def build_snapshot(
     )
     source_rows = [dict(row) for row in source_results]
     failed = [row for row in source_rows if row.get("status") != "OK"]
-    data_quality = "COMPLETE" if source_rows and not failed else "PARTIAL" if ordered else "DEGRADED"
+    ok_count = sum(1 for row in source_rows if row.get("status") == "OK")
+    data_quality = (
+        "COMPLETE" if source_rows and not failed
+        else "PARTIAL" if ok_count > 0
+        else "DEGRADED"
+    )
     return {
         "spec": spec(),
         "spec_version": SPEC_VERSION,

@@ -285,7 +285,12 @@ def build_policy_catalyst_context(
     for raw in recent_events:
         row = dict(raw)
         first_seen = _as_utc(row.get("first_seen_at"))
+        published_at = _as_utc(row.get("published_at"))
         if first_seen is None or first_seen < active_after or first_seen > current_time + timedelta(minutes=5):
+            continue
+        # Bootstrap guard: old provider content discovered by the first capture must
+        # not become an ACTIVE catalyst merely because first_seen_at is new.
+        if published_at is not None and published_at < active_after:
             continue
         visible_events.append(
             {
