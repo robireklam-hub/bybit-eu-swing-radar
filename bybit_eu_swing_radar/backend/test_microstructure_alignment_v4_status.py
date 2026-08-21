@@ -113,3 +113,22 @@ def test_v4_production_validator_fails_closed_if_any_research_gate_opens():
         ok, reason = validate_alignment_status(payload)
         assert ok is False, field
         assert reason != "ok"
+
+
+def test_v4_production_validator_fails_closed_on_activation_evidence_drift():
+    payload = _production_payload()
+    payload["spec"]["cohort_start_at"] = "2026-08-21T13:54:00+00:00"
+    assert validate_alignment_status(payload) == (False, "cohort_start_at_mutated")
+
+    mutations = (
+        ("strategy_merge_sha", "0" * 40),
+        ("exact_production_verifier_pr", 400),
+        ("verified_by_utc", "2026-08-21T13:52:44+00:00"),
+        ("cohort_start_rule", "after_exact_production_verification"),
+    )
+    for field, bad_value in mutations:
+        payload = _production_payload()
+        payload["spec"]["production_activation_evidence"][field] = bad_value
+        ok, reason = validate_alignment_status(payload)
+        assert ok is False, field
+        assert reason == f"production_activation_evidence_{field}_mutated"
