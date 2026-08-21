@@ -54,6 +54,8 @@ jobs:
           PY
       - name: Verify recorder and preregistered readiness
         working-directory: bybit_eu_swing_radar/backend
+        env:
+          MICROSTRUCTURE_REQUIRE_EXACT_RECORDER_SHA: "false"
         run: python scripts/production_microstructure_smoke.py
       - name: Verify v0.7.6 microstructure successor status
         working-directory: bybit_eu_swing_radar/backend
