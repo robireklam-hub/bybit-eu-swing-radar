@@ -72,8 +72,8 @@ def test_agent_keeps_swing_trigger_and_adds_separate_day_v076_rules():
     assert "hard_stop.requires_candle_close=false" in text
     assert "state=TRIGGERED" in text
     assert "decision=TRADE" in text
-    assert "közvetlenül követő lezárt 5m gyertyán is aktív marad" in text
-    assert "következő 5m gyertya puszta lezárása nem lehet hard-veto" in text
+    assert "nem jár le fixen két lezárt 5m gyertya után" in text
+    assert "minden későbbi lezárt 5m gyertyán tart" in text
 
 
 def test_backend_spec_keeps_historical_v074_and_adds_v075_persistence_annex():
@@ -83,4 +83,3 @@ def test_backend_spec_keeps_historical_v074_and_adds_v075_persistence_annex():
     assert "## 15. Day-trade v0.7.5 breakout-aktiváció" in text
     assert "A 4H `timeframe_conflict` diagnosztikai/context mező marad, de nem hard-veto" in text
     assert "Journal és historical replay `strategy_version=0.7.5`" in text
-    assert "közvetlenül követő egy lezárt 5m gyertyán aktív marad" in text
