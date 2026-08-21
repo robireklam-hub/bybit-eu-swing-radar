@@ -3,13 +3,20 @@
 The canonical market-context payload remains ``market_context_alerts``. This
 module mirrors mandatory ELEVATED/HIGH warnings into already-established text
 fields such as ``why_now``, ``risks`` and ``notes`` so an older Action schema
-cannot silently discard the warning. It mutates only a copied HTTP response;
-strategy scores, gates, cached records and execution state are untouched.
+cannot silently discard the warning. It also attaches the non-executing day-trade
+barrier-clear watch before legacy mirroring, so a strong setup blocked only by a
+nearby structural barrier is reported as a conditional watch rather than silently
+collapsing to plain NO_TRADE.
+
+All transformations operate on copied HTTP responses only; strategy scores, gates,
+cached records and execution state are untouched.
 """
 from __future__ import annotations
 
 from copy import deepcopy
 from typing import Any, Mapping
+
+from app.day_barrier_clear_watch import enrich_barrier_clear_watch
 
 _CANDIDATE_COLLECTION_KEYS = (
     "strict_longs",
@@ -92,7 +99,8 @@ def install_market_context_compatibility_bridge(market_context_module: Any) -> N
         enriched = await original(result)
         if not isinstance(enriched, Mapping):
             return enriched
-        return mirror_mandatory_warning(enriched)
+        barrier_enriched = enrich_barrier_clear_watch(enriched)
+        return mirror_mandatory_warning(barrier_enriched)
 
     market_context_module.enrich_market_response = compatible_enricher
     market_context_module._legacy_field_bridge_installed = True
