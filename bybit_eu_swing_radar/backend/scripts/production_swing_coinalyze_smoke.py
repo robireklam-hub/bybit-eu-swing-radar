@@ -96,6 +96,7 @@ def evaluate(top: dict[str, Any], status: dict[str, Any], expected_sha: str) -> 
         failures.append("swing worker source_commit_sha mismatch")
 
     priority = worker.get("coinalyze_priority_symbols")
+    all_targeted = worker.get("coinalyze_targeted_symbol_list")
     targeted = worker.get("coinalyze_priority_targeted_symbols")
     enriched = worker.get("coinalyze_priority_enriched_symbols")
     complete = worker.get("coinalyze_priority_complete_symbols")
@@ -103,15 +104,24 @@ def evaluate(top: dict[str, Any], status: dict[str, Any], expected_sha: str) -> 
     missing = worker.get("coinalyze_priority_missing_symbols")
     if not all(
         isinstance(value, list)
-        for value in (priority, targeted, enriched, complete, partial, missing)
+        for value in (priority, all_targeted, targeted, enriched, complete, partial, missing)
     ):
         failures.append("explicit Coinalyze priority coverage lists missing")
         return failures
 
     compact_symbols = candidate_symbols(top)
-    if set(priority) != set(compact_symbols):
+    if priority != compact_symbols:
         failures.append(
-            f"compact priority mismatch: compact={compact_symbols} priority={priority}"
+            f"compact priority order mismatch: compact={compact_symbols} priority={priority}"
+        )
+    if len(set(priority)) != len(priority):
+        failures.append("duplicate symbol in compact Coinalyze priority list")
+    if len(set(all_targeted)) != len(all_targeted):
+        failures.append("duplicate symbol in full Coinalyze target list")
+    if all_targeted[:len(priority)] != priority:
+        failures.append(
+            "compact priority candidates are not the first Coinalyze targets: "
+            f"target_prefix={all_targeted[:len(priority)]} priority={priority}"
         )
     if set(targeted) != set(priority):
         failures.append(
@@ -213,9 +223,15 @@ def run_smoke(base_url: str, api_key: str, expected_sha: str, *, timeout: float 
         if not last_failures:
             worker = status["worker"]
             supported, unsupported = market_support_partition(top)
+            priority_symbols = worker.get("coinalyze_priority_symbols") or []
+            all_targeted = worker.get("coinalyze_targeted_symbol_list") or []
             safe = {
                 "source_commit_sha": worker.get("source_commit_sha"),
-                "priority_symbols": worker.get("coinalyze_priority_symbols"),
+                "priority_symbols": priority_symbols,
+                "all_targeted_symbols": all_targeted,
+                "priority_target_prefix_symbols": all_targeted[:len(priority_symbols)],
+                "priority_order_matches_compact": priority_symbols == candidate_symbols(top),
+                "priority_target_prefix_matches": all_targeted[:len(priority_symbols)] == priority_symbols,
                 "priority_targeted_symbols": worker.get("coinalyze_priority_targeted_symbols"),
                 "priority_enriched_symbols": worker.get("coinalyze_priority_enriched_symbols"),
                 "priority_complete_symbols": worker.get("coinalyze_priority_complete_symbols"),
