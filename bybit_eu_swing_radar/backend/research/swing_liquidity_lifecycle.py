@@ -27,6 +27,8 @@ ADOPTION_EVENT_ID = "swing-liquidity-lifecycle-adoption-v1-trial-registered"
 PIT_AUDIT_EVENT_ID = "swing-liquidity-lifecycle-v1-pit-audit-recorded"
 DATA_QUALITY_EVENT_ID = "swing-liquidity-lifecycle-v1-data-quality-gate-recorded"
 LINEAGE_EVENT_ID = "swing-liquidity-lifecycle-v1-lineage-recorded"
+DEVELOPMENT_TARGET_MATURED_EVENTS = 60
+VALIDATION_TARGET_MATURED_EVENTS = 40
 
 
 def _base_result(**overrides: Any) -> dict[str, Any]:
@@ -258,4 +260,19 @@ async def record_lifecycle_on_capture_persistence(
         )
         return _base_result(inserted=bool(event.get("inserted")), event_type=event.get("event_type"), event_fingerprint=event.get("event_fingerprint"), recorded_at=event.get("recorded_at"), lineage=lineage, reason="prospective_lineage_gate")
 
-    return _base_result(event_type=current_event_type, reason="lifecycle_already_beyond_lineage_adoption")
+    if current_event_type == "LINEAGE_RECORDED":
+        return _base_result(
+            event_type="LINEAGE_RECORDED",
+            reason="waiting_for_development_maturity_gate",
+            development={
+                "required_matured_event_count": DEVELOPMENT_TARGET_MATURED_EVENTS,
+                "validation_target_matured_event_count": VALIDATION_TARGET_MATURED_EVENTS,
+                "maturity_source": "label_blind_forward_event_status",
+                "development_evidence_recorded": False,
+                "outcome_visible": False,
+                "threshold_search_allowed": False,
+                "promotion_allowed": False,
+            },
+        )
+
+    return _base_result(event_type=current_event_type, reason="lifecycle_already_beyond_development_gate")

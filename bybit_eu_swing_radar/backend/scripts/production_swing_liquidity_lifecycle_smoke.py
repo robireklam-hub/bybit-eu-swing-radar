@@ -3,9 +3,9 @@
 
 Research only. Creates one genuine label-blind forward capture through the existing
 collector/persistence path, then fails closed unless the durable trial lifecycle is
-at PIT_AUDIT_RECORDED, DATA_QUALITY_GATE_RECORDED, or the prospectively evidenced
-LINEAGE_RECORDED state. It never opens outcomes, changes live thresholds, or
-authorizes execution.
+at PIT_AUDIT_RECORDED, DATA_QUALITY_GATE_RECORDED, LINEAGE_RECORDED, or explicitly
+waiting behind the frozen DEVELOPMENT maturity gate. It never opens outcomes,
+changes live thresholds, or authorizes execution.
 """
 from __future__ import annotations
 
@@ -19,6 +19,10 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
+from research.swing_liquidity_lifecycle import (
+    DEVELOPMENT_TARGET_MATURED_EVENTS,
+    VALIDATION_TARGET_MATURED_EVENTS,
+)
 from research.swing_liquidity_shadow import collect_snapshot, persist_snapshot
 
 EXPECTED_STUDY = "swing-liquidity-validation-v1"
@@ -32,7 +36,7 @@ ALLOWED_REASONS = frozenset(
         "waiting_for_fresh_post_data_quality_lineage_capture",
         "lineage_gate_not_satisfied",
         "prospective_lineage_gate",
-        "lifecycle_already_beyond_lineage_adoption",
+        "waiting_for_development_maturity_gate",
     )
 )
 
@@ -153,9 +157,27 @@ def validate_lifecycle_persistence(result: dict[str, Any]) -> list[str]:
                 errors.append("invalid_lineage_evidence_fingerprint")
             if not _valid_sha256(lineage.get("lineage_fingerprint")):
                 errors.append("invalid_lineage_fingerprint")
-    elif reason == "lifecycle_already_beyond_lineage_adoption":
+    elif reason == "waiting_for_development_maturity_gate":
         if event_type != "LINEAGE_RECORDED" or lifecycle.get("inserted") is not False:
-            errors.append("recorded_lineage_state_invalid")
+            errors.append("waiting_development_state_invalid")
+        development = lifecycle.get("development")
+        if not isinstance(development, dict):
+            errors.append("missing_development_gate_metadata")
+        else:
+            if development.get("required_matured_event_count") != DEVELOPMENT_TARGET_MATURED_EVENTS:
+                errors.append("development_target_mismatch")
+            if development.get("validation_target_matured_event_count") != VALIDATION_TARGET_MATURED_EVENTS:
+                errors.append("validation_target_mismatch")
+            if development.get("maturity_source") != "label_blind_forward_event_status":
+                errors.append("development_maturity_source_invalid")
+            for field, expected in (
+                ("development_evidence_recorded", False),
+                ("outcome_visible", False),
+                ("threshold_search_allowed", False),
+                ("promotion_allowed", False),
+            ):
+                if development.get(field) is not expected:
+                    errors.append(f"development_{field}_invalid")
 
     return errors
 
@@ -191,7 +213,7 @@ def run_check(
         for error in errors:
             print(f"FAIL {error}")
         return 1
-    print("SWING LIQUIDITY PROSPECTIVE LIFECYCLE AND PERSISTENCE IDENTITY VERIFIED THROUGH LINEAGE GATE.")
+    print("SWING LIQUIDITY PROSPECTIVE LIFECYCLE VERIFIED CLOSED THROUGH DEVELOPMENT MATURITY GATE.")
     return 0
 
 

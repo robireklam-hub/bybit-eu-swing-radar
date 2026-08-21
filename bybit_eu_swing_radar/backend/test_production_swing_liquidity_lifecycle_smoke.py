@@ -45,6 +45,18 @@ def _result(**lifecycle_overrides):
     }
 
 
+def _development_gate():
+    return {
+        "required_matured_event_count": 60,
+        "validation_target_matured_event_count": 40,
+        "maturity_source": "label_blind_forward_event_status",
+        "development_evidence_recorded": False,
+        "outcome_visible": False,
+        "threshold_search_allowed": False,
+        "promotion_allowed": False,
+    }
+
+
 def test_validate_persistence_identity_accepts_exact_capture_response():
     assert validate_persistence_identity(_snapshot(), _result()) == []
 
@@ -92,8 +104,14 @@ def test_validate_accepts_fresh_lineage_transition_with_fingerprints():
     assert validate_lifecycle_persistence(payload) == []
 
 
-def test_validate_accepts_already_recorded_lineage_state():
-    payload = _result(inserted=False, event_type="LINEAGE_RECORDED", reason="lifecycle_already_beyond_lineage_adoption", data_quality=None)
+def test_validate_accepts_lineage_waiting_behind_closed_development_gate():
+    payload = _result(
+        inserted=False,
+        event_type="LINEAGE_RECORDED",
+        reason="waiting_for_development_maturity_gate",
+        data_quality=None,
+        development=_development_gate(),
+    )
     assert validate_lifecycle_persistence(payload) == []
 
 
