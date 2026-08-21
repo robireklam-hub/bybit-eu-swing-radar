@@ -15,6 +15,7 @@ from research.research_lifecycle_ledger import (
     record_trial_event,
 )
 from research.swing_liquidity_data_quality import (
+    DATA_QUALITY_FORWARD_START_UTC,
     DATA_QUALITY_SPEC_VERSION,
     MIN_CONSECUTIVE_CAPTURES,
     evaluate_capture_rows,
@@ -99,7 +100,7 @@ async def _load_post_pit_data_quality_rows(
     trial_id: str,
     trial_fp: str,
 ) -> list[dict[str, Any]]:
-    """Load only captures persisted after the immutable PIT audit milestone."""
+    """Load only captures after PIT and the frozen DQ preregistration boundary."""
     rows = await conn.fetch(
         """
         SELECT c.captured_at, c.inserted_at, c.feature_available_at,
@@ -113,6 +114,7 @@ async def _load_post_pit_data_quality_rows(
          AND e.entity_id=$1
          AND e.event_id=$3
         WHERE c.inserted_at > e.recorded_at
+          AND c.inserted_at >= $5
           AND c.trial_id=$1
           AND c.trial_fingerprint=$2
         ORDER BY c.inserted_at DESC, c.captured_at DESC
@@ -122,6 +124,7 @@ async def _load_post_pit_data_quality_rows(
         trial_fp,
         PIT_AUDIT_EVENT_ID,
         MIN_CONSECUTIVE_CAPTURES,
+        DATA_QUALITY_FORWARD_START_UTC,
     )
     normalized: list[dict[str, Any]] = []
     for row in reversed(rows):
@@ -240,6 +243,7 @@ async def record_lifecycle_on_capture_persistence(
                 "evidence_refs": evidence_refs,
                 "data_quality_gate_passed": True,
                 "data_quality_spec_version": DATA_QUALITY_SPEC_VERSION,
+                "data_quality_forward_start_utc": DATA_QUALITY_FORWARD_START_UTC.isoformat(),
                 "consecutive_capture_count": quality["capture_count"],
                 "required_consecutive_capture_count": quality["required_capture_count"],
                 "evidence_window_fingerprint": quality["evidence_window_fingerprint"],
