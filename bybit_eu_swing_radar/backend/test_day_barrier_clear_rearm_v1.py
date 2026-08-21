@@ -4,6 +4,7 @@ from research.day_barrier_clear_rearm_v1 import (
     observe_closed_5m_barrier_clear,
     parent_event_eligibility,
 )
+from research.research_governance import trial_fingerprint, trial_manifest
 
 
 def _parent(**overrides):
@@ -38,6 +39,19 @@ def _parent(**overrides):
     }
     item.update(overrides)
     return item
+
+
+def test_trial_manifest_is_frozen_to_v075_and_spot_execution_invariants():
+    manifest = trial_manifest("day-barrier-clear-rearm-v1")
+    assert manifest["frozen"] is True
+    assert manifest["parent_strategy_version"] == "0.7.5"
+    assert manifest["quote_asset"] == "USDC"
+    assert manifest["long_execution"] == "USDC_SPOT"
+    assert manifest["short_execution"] == "VERIFIED_BORROWABLE_USDC_SPOT_MARGIN_ONLY"
+    assert manifest["perpetual_execution"] is False
+    assert manifest["derivatives_context_only"] is True
+    assert manifest["missing_derivatives_hard_gate"] is False
+    assert len(trial_fingerprint("day-barrier-clear-rearm-v1")) == 64
 
 
 def test_v075_barrier_blocked_parent_is_eligible_and_derivatives_are_not_a_gate():
