@@ -1,6 +1,19 @@
 from __future__ import annotations
 
-from scripts.production_swing_liquidity_lifecycle_smoke import run_check, validate_lifecycle_persistence
+from scripts.production_swing_liquidity_lifecycle_smoke import (
+    run_check,
+    validate_lifecycle_persistence,
+    validate_persistence_identity,
+)
+
+
+def _snapshot():
+    return {
+        "captured_at": "2026-08-21T05:00:00+00:00",
+        "candidate_count": 3,
+        "orderbooks": {"BTCUSDC": {}, "ETHUSDC": {}, "SOLUSDC": {}},
+        "orderbook_errors": {},
+    }
 
 
 def _result(**lifecycle_overrides):
@@ -30,6 +43,23 @@ def _result(**lifecycle_overrides):
         "orderbook_error_count": 0,
         "lifecycle_adoption": lifecycle,
     }
+
+
+def test_validate_persistence_identity_accepts_exact_capture_response():
+    assert validate_persistence_identity(_snapshot(), _result()) == []
+
+
+def test_validate_persistence_identity_rejects_each_mismatch():
+    cases = (
+        ("captured_at", "2026-08-21T05:00:01+00:00", "captured_at_mismatch"),
+        ("candidate_count", 2, "candidate_count_mismatch"),
+        ("orderbook_count", 2, "orderbook_count_mismatch"),
+        ("orderbook_error_count", 1, "orderbook_error_count_mismatch"),
+    )
+    for field, value, expected_error in cases:
+        payload = _result()
+        payload[field] = value
+        assert expected_error in validate_persistence_identity(_snapshot(), payload)
 
 
 def test_validate_accepts_waiting_post_pit_data_quality_state():
@@ -101,7 +131,7 @@ def test_run_check_is_deterministic_and_uses_fresh_capture_path():
 
     def collect(base_url, api_key):
         calls.append(("collect", base_url, api_key))
-        return {"captured_at": "2026-08-21T05:00:00+00:00", "candidate_count": 3}
+        return _snapshot()
 
     def persist(base_url, api_key, snapshot):
         calls.append(("persist", base_url, api_key, snapshot["captured_at"]))
@@ -112,3 +142,14 @@ def test_run_check_is_deterministic_and_uses_fresh_capture_path():
         ("collect", "https://example.invalid", "secret"),
         ("persist", "https://example.invalid", "secret", "2026-08-21T05:00:00+00:00"),
     ]
+
+
+def test_run_check_fails_closed_on_persistence_identity_mismatch():
+    result = _result()
+    result["candidate_count"] = 2
+    assert run_check(
+        "https://example.invalid",
+        "secret",
+        collect=lambda *_: _snapshot(),
+        persist=lambda *_: result,
+    ) == 1
