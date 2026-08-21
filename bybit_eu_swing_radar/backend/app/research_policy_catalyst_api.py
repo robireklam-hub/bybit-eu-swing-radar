@@ -10,6 +10,7 @@ import asyncpg
 import httpx
 from fastapi import Depends, FastAPI, HTTPException
 
+from research.policy_catalyst_event_store_v1 import EVENT_SCHEMA_SQL, normalize_policy_event
 from research.policy_catalyst_feed_v1 import (
     DEFAULT_EVENT_LOOKBACK_HOURS,
     SPEC_VERSION,
@@ -197,6 +198,61 @@ async def build_current_snapshot() -> dict[str, Any]:
     return snapshot
 
 
+async def _persist_event_store_v1(connection: Any, event: Mapping[str, Any], captured_at: datetime) -> dict[str, Any] | None:
+    """Prospectively dual-write timestamped events into the immutable v1 contract.
+
+    Legacy research rows remain untouched. Events without a provider publication
+    timestamp stay visible in the legacy capture but are not invented into the v1
+    store because source_published_at is part of the immutable v1 identity.
+    """
+    if _parse_iso(event.get("published_at")) is None:
+        return None
+    record = normalize_policy_event(
+        {
+            "url": event.get("url"),
+            "headline": event.get("headline"),
+            "source_published_at": event.get("published_at"),
+            "event_class": event.get("primary_event_class"),
+        },
+        observed_at=captured_at,
+    )
+    await connection.execute(
+        """
+        INSERT INTO policy_catalyst_event_v1 (
+            event_id,spec_version,provider_code,authority_tier,event_class,headline,
+            canonical_url,source_published_at,first_seen_at,last_seen_at,source_role,
+            provenance,context_only,hard_gate,score_mutation,ranking_mutation,
+            eligibility_mutation,execution_mutation,trade_direction,causal_attribution
+        ) VALUES (
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15,$16,$17,$18,$19,$20
+        )
+        ON CONFLICT (event_id) DO UPDATE SET
+            last_seen_at=EXCLUDED.last_seen_at
+        """,
+        record["event_id"],
+        record["spec_version"],
+        record["provider_code"],
+        record["authority_tier"],
+        record["event_class"],
+        record["headline"],
+        record["canonical_url"],
+        _parse_iso(record["source_published_at"]),
+        _parse_iso(record["first_seen_at"]),
+        _parse_iso(record["last_seen_at"]),
+        record["source_role"],
+        json.dumps(record["provenance"], separators=(",", ":")),
+        record["context_only"],
+        record["hard_gate"],
+        record["score_mutation"],
+        record["ranking_mutation"],
+        record["eligibility_mutation"],
+        record["execution_mutation"],
+        record["trade_direction"],
+        record["causal_attribution"],
+    )
+    return record
+
+
 async def persist_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     captured_at = _parse_iso(snapshot.get("captured_at"))
     if captured_at is None:
@@ -204,9 +260,24 @@ async def persist_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     connection = await asyncpg.connect(_database_url(), timeout=30)
     try:
         await connection.execute(SCHEMA_SQL)
+        await connection.execute(EVENT_SCHEMA_SQL)
         persisted_events: list[dict[str, Any]] = []
         for raw_event in snapshot.get("events") or []:
             event = dict(raw_event)
+            event_store_record = await _persist_event_store_v1(connection, event, captured_at)
+            event["event_store_v1"] = (
+                {
+                    "status": "PERSISTED",
+                    "event_id": event_store_record["event_id"],
+                    "spec_version": event_store_record["spec_version"],
+                }
+                if event_store_record is not None
+                else {
+                    "status": "UNAVAILABLE_MISSING_SOURCE_PUBLISHED_AT",
+                    "event_id": None,
+                    "spec_version": "policy-catalyst-event-store-v1",
+                }
+            )
             existing_first_seen = await connection.fetchval(
                 """
                 SELECT first_seen_at
