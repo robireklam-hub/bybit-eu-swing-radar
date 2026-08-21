@@ -43,7 +43,7 @@ def test_earliest_ready_prefix_is_frozen_at_60():
     assert len(cohort) == 60
     counts = {symbol: sum(row["symbol"] == symbol for row in cohort) for symbol in SYMBOLS}
     assert all(counts[symbol] >= 10 for symbol in SYMBOLS)
-    assert gate["cohort_last_opened_at"] == cohort[-1]["opened_at"]
+    assert gate["cohort_last_opened_at"] == cohort[-1]["opened_at"].isoformat()
     assert gate["cohort_last_signal_id"] == cohort[-1]["signal_id"]
     assert gate["cohort_boundary_order"] == ["opened_at", "signal_id"]
 
@@ -59,7 +59,7 @@ def test_frozen_boundary_uses_signal_id_to_disambiguate_equal_opened_at():
     assert cohort[-2]["opened_at"] == cohort[-1]["opened_at"] == boundary_time
     assert cohort[-2]["signal_id"] == 10_001
     assert cohort[-1]["signal_id"] == 10_002
-    assert gate["cohort_last_opened_at"] == boundary_time
+    assert gate["cohort_last_opened_at"] == boundary_time.isoformat()
     assert gate["cohort_last_signal_id"] == 10_002
     assert gate["cohort_boundary_order"] == ["opened_at", "signal_id"]
 
