@@ -14,7 +14,7 @@ turn intrabar/provisional acceptance into an executable TRADE decision.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
 
 def _iso_from_ms(value: int) -> str:
@@ -27,28 +27,47 @@ def active_structural_breakout_context(
     *,
     lookback_bars: int = 12,
 ) -> dict[str, Any] | None:
-    """Return the newest still-structurally-active 5m range breakout.
+    """Return the active origin of the current uninterrupted range breakout.
 
     Unlike the v0.7.5 trigger helper, this is *setup context*, not an execution
-    trigger. There is intentionally no fixed age/TTL in bars. The original
-    boundary must remain held on every subsequently closed 5m bar; once a close
-    loses it, that event is dead even if price later recovers.
+    trigger. There is intentionally no fixed age/TTL in bars.
+
+    The first genuine crossing in an uninterrupted breakout sequence owns the
+    setup origin. Later continuation bars may cross newer rolling 12-bar highs or
+    lows, but they must not ratchet the trigger/origin forward. The active event
+    dies as soon as any later closed 5m bar loses the original boundary. A later
+    genuine crossing may then start a new, independent setup.
     """
     if side not in {"long", "short"}:
         raise ValueError("side must be 'long' or 'short'")
     if lookback_bars < 2 or len(bars_5m) < lookback_bars + 1:
         return None
 
+    active: dict[str, Any] | None = None
     latest_index = len(bars_5m) - 1
-    for event_index in range(latest_index, lookback_bars - 1, -1):
-        prior = bars_5m[event_index - lookback_bars:event_index]
+
+    for index in range(lookback_bars, len(bars_5m)):
+        current_close = float(bars_5m[index].close)
+
+        if active is not None:
+            boundary = float(active["trigger_price"])
+            boundary_held = (
+                current_close > boundary if side == "long" else current_close < boundary
+            )
+            if boundary_held:
+                # Preserve the original event even if this continuation bar also
+                # crosses a newer rolling range boundary. No trigger ratcheting.
+                continue
+            active = None
+
+        prior = bars_5m[index - lookback_bars:index]
         boundary = (
             max(float(bar.high) for bar in prior)
             if side == "long"
             else min(float(bar.low) for bar in prior)
         )
-        previous_close = float(bars_5m[event_index - 1].close)
-        event_bar = bars_5m[event_index]
+        previous_close = float(bars_5m[index - 1].close)
+        event_bar = bars_5m[index]
         event_close = float(event_bar.close)
         crossed = (
             event_close > boundary and previous_close <= boundary
@@ -58,29 +77,28 @@ def active_structural_breakout_context(
         if not crossed:
             continue
 
-        subsequent = bars_5m[event_index + 1:]
-        held = all(
-            float(bar.close) > boundary if side == "long" else float(bar.close) < boundary
-            for bar in subsequent
-        )
-        if not held:
-            # The newest matching event has already lost its own structural
-            # boundary. Older same-side events must not be resurrected through it.
-            return None
-
-        return {
+        active = {
             "trigger_price": boundary,
+            "event_index": index,
             "event_bar_start_ms": int(event_bar.start_ms),
             "event_bar_time": _iso_from_ms(int(event_bar.start_ms)),
             "event_close": event_close,
-            "age_bars": latest_index - event_index,
-            "validity_bars": None,
-            "boundary_held": True,
-            "boundary_held_through_all_closed_bars": True,
             "trigger_window_start_ms": int(prior[0].start_ms),
-            "persistence_mode": "STRUCTURE_HELD_NO_FIXED_BAR_TTL",
         }
-    return None
+
+    if active is None:
+        return None
+
+    event_index = int(active.pop("event_index"))
+    return {
+        **active,
+        "age_bars": latest_index - event_index,
+        "validity_bars": None,
+        "boundary_held": True,
+        "boundary_held_through_all_closed_bars": True,
+        "persistence_mode": "STRUCTURE_HELD_NO_FIXED_BAR_TTL",
+        "origin_policy": "FIRST_CROSSING_IN_UNINTERRUPTED_SEQUENCE_NO_RATCHET",
+    }
 
 
 def technical_setup_valid(
