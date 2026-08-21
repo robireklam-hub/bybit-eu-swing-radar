@@ -3,8 +3,8 @@
 
 Research only. Creates one genuine label-blind forward capture through the existing
 collector/persistence path, then fails closed unless the durable trial lifecycle is
-exactly at PIT_AUDIT_RECORDED. It never opens outcomes, changes live thresholds,
-or authorizes execution.
+at PIT_AUDIT_RECORDED or the prospectively evidenced DATA_QUALITY_GATE_RECORDED.
+It never opens outcomes, changes live thresholds, or authorizes execution.
 """
 from __future__ import annotations
 
@@ -21,8 +21,21 @@ if str(BACKEND_ROOT) not in sys.path:
 from research.swing_liquidity_shadow import collect_snapshot, persist_snapshot
 
 EXPECTED_STUDY = "swing-liquidity-validation-v1"
-EXPECTED_EVENT_TYPE = "PIT_AUDIT_RECORDED"
-ALLOWED_REASONS = frozenset(("prospective_pit_audit", "lifecycle_already_beyond_pit_adoption"))
+ALLOWED_EVENT_TYPES = frozenset(("PIT_AUDIT_RECORDED", "DATA_QUALITY_GATE_RECORDED"))
+ALLOWED_REASONS = frozenset(
+    (
+        "prospective_pit_audit",
+        "insufficient_consecutive_post_pit_captures",
+        "data_quality_gate_not_satisfied",
+        "prospective_data_quality_gate",
+        "lifecycle_already_beyond_data_quality_adoption",
+    )
+)
+
+
+def _valid_sha256(value: Any) -> bool:
+    text = str(value or "").lower()
+    return len(text) == 64 and all(ch in "0123456789abcdef" for ch in text)
 
 
 def validate_lifecycle_persistence(result: dict[str, Any]) -> list[str]:
@@ -56,18 +69,37 @@ def validate_lifecycle_persistence(result: dict[str, Any]) -> list[str]:
         errors.append("production_eligibility_mutated_not_false")
     if lifecycle.get("execution_authorized") is not False:
         errors.append("execution_authorized_not_false")
-    if lifecycle.get("event_type") != EXPECTED_EVENT_TYPE:
-        errors.append(f"unexpected_current_lifecycle_event:{lifecycle.get('event_type')}")
-    if lifecycle.get("reason") not in ALLOWED_REASONS:
-        errors.append(f"unexpected_lifecycle_reason:{lifecycle.get('reason')}")
-    if lifecycle.get("reason") == "prospective_pit_audit":
-        if lifecycle.get("inserted") is not True:
-            errors.append("pit_audit_transition_not_inserted")
-        fingerprint = str(lifecycle.get("evidence_capture_fingerprint") or "")
-        if len(fingerprint) != 64 or any(ch not in "0123456789abcdef" for ch in fingerprint.lower()):
+
+    event_type = lifecycle.get("event_type")
+    reason = lifecycle.get("reason")
+    if event_type not in ALLOWED_EVENT_TYPES:
+        errors.append(f"unexpected_current_lifecycle_event:{event_type}")
+    if reason not in ALLOWED_REASONS:
+        errors.append(f"unexpected_lifecycle_reason:{reason}")
+
+    if reason == "prospective_pit_audit":
+        if event_type != "PIT_AUDIT_RECORDED" or lifecycle.get("inserted") is not True:
+            errors.append("pit_audit_transition_invalid")
+        if not _valid_sha256(lifecycle.get("evidence_capture_fingerprint")):
             errors.append("invalid_evidence_capture_fingerprint")
-    elif lifecycle.get("inserted") is not False:
-        errors.append("already_recorded_pit_should_not_reinsert")
+    elif reason in {"insufficient_consecutive_post_pit_captures", "data_quality_gate_not_satisfied"}:
+        if event_type != "PIT_AUDIT_RECORDED" or lifecycle.get("inserted") is not False:
+            errors.append("waiting_data_quality_state_invalid")
+        quality = lifecycle.get("data_quality")
+        if not isinstance(quality, dict) or quality.get("ready") is not False:
+            errors.append("waiting_data_quality_evidence_invalid")
+    elif reason == "prospective_data_quality_gate":
+        if event_type != "DATA_QUALITY_GATE_RECORDED" or lifecycle.get("inserted") is not True:
+            errors.append("data_quality_transition_invalid")
+        quality = lifecycle.get("data_quality")
+        if not isinstance(quality, dict) or quality.get("ready") is not True:
+            errors.append("data_quality_evidence_not_ready")
+        elif not _valid_sha256(quality.get("evidence_window_fingerprint")):
+            errors.append("invalid_data_quality_evidence_window_fingerprint")
+    elif reason == "lifecycle_already_beyond_data_quality_adoption":
+        if event_type != "DATA_QUALITY_GATE_RECORDED" or lifecycle.get("inserted") is not False:
+            errors.append("recorded_data_quality_state_invalid")
+
     return errors
 
 
@@ -96,7 +128,7 @@ def run_check(
         for error in errors:
             print(f"FAIL {error}")
         return 1
-    print("SWING LIQUIDITY PROSPECTIVE PIT LIFECYCLE VERIFIED.")
+    print("SWING LIQUIDITY PROSPECTIVE LIFECYCLE VERIFIED THROUGH DATA-QUALITY GATE.")
     return 0
 
 
