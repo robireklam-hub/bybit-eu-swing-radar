@@ -1,0 +1,28 @@
+name: NEVER MERGE policy catalyst exact production 5379700e
+
+on:
+  pull_request:
+    branches: [main]
+    paths: [".github/workflows/verify-policy-catalyst-5379700e.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 5379700e6fcc3d1d4128cdd1a9f8f456dcbc3cc4
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 5379700e6fcc3d1d4128cdd1a9f8f456dcbc3cc4
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Verify exact production policy catalyst feed
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_policy_catalyst_smoke.py
