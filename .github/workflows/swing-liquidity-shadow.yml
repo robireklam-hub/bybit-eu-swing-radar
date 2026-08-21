@@ -42,10 +42,10 @@ jobs:
         if: steps.due.outputs.capture_due != 'true'
         run: echo "Durable swing-liquidity capture is recent enough; skipping this trigger."
 
-      - name: Capture, persist, and verify lifecycle response
+      - name: Capture, persist, and verify worker lineage and lifecycle response
         if: steps.due.outputs.capture_due == 'true'
         working-directory: bybit_eu_swing_radar/backend
-        run: python scripts/run_swing_liquidity_shadow_guarded.py
+        run: python scripts/run_swing_liquidity_shadow_worker_lineage_guarded.py
 
       - name: Bind verifier to this exact capture
         if: steps.due.outputs.capture_due == 'true'
