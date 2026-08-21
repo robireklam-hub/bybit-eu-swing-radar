@@ -23,6 +23,25 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      - name: Diagnose policy status endpoint
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          from urllib.error import HTTPError
+          from urllib.request import Request, urlopen
+          base=os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key=os.environ['PRODUCTION_RADAR_API_KEY']
+          req=Request(base+'/v1/research/policy-catalyst/status',headers={'X-Radar-Key':key,'Accept':'application/json'})
+          try:
+              with urlopen(req,timeout=30) as r:
+                  print('STATUS_HTTP',r.status)
+                  print(r.read().decode('utf-8'))
+          except HTTPError as exc:
+              print('STATUS_HTTP',exc.code)
+              print(exc.read().decode('utf-8','replace'))
+              raise
+          PY
       - name: Verify exact production policy catalyst feed
         working-directory: bybit_eu_swing_radar/backend
         run: python scripts/production_policy_catalyst_smoke.py
