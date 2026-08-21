@@ -6,6 +6,7 @@ from fastapi import Depends, HTTPException
 from app.repository import RadarRepository
 from app.research_microstructure_alignment_v2_api import attach_microstructure_alignment_v2_research
 from app.research_microstructure_alignment_v3_api import attach_microstructure_alignment_v3_research
+from app.research_microstructure_alignment_v4_api import attach_microstructure_alignment_v4_research
 from app.research_microstructure_effect_v3_api import attach_microstructure_effect_v3_research
 
 CACHE_KEY = "day_trade_prospective_funnel_status"
@@ -13,9 +14,11 @@ CACHE_KEY = "day_trade_prospective_funnel_status"
 
 def attach_prospective_funnel_research(app, require_api_key) -> None:
     # Independently preregistered microstructure cohorts remain isolated and
-    # research-only. V3 effect labels are fail-closed behind its frozen gate.
+    # research-only. V3 effect labels are fail-closed behind its frozen gate;
+    # V4 remains label-blind until its own exact-cohort sample gate is ready.
     attach_microstructure_alignment_v2_research(app, require_api_key)
     attach_microstructure_alignment_v3_research(app, require_api_key)
+    attach_microstructure_alignment_v4_research(app, require_api_key)
     attach_microstructure_effect_v3_research(app, require_api_key)
 
     repo = RadarRepository()
