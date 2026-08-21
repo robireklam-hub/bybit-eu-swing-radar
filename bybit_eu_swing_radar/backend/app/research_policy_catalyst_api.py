@@ -22,6 +22,13 @@ from research.policy_catalyst_feed_v1 import (
     spec,
 )
 from research.policy_catalyst_sources_v1 import enabled_source_registry
+from research.policy_catalyst_transport_v1 import (
+    MAX_DETAIL_RESPONSE_BYTES,
+    MAX_SOURCE_RESPONSE_BYTES,
+    SPEC_VERSION as TRANSPORT_SPEC_VERSION,
+    bounded_response_text,
+    validate_response_origin,
+)
 
 MAX_HTML_DETAILS_PER_SOURCE = 12
 MAX_CAPTURE_EVENTS = 100
@@ -108,19 +115,21 @@ async def _fetch_source(
     started = datetime.now(timezone.utc)
     response = await client.get(fetch_url)
     response.raise_for_status()
+    validate_response_origin(response, source=source, requested_url=fetch_url)
+    response_text = bounded_response_text(response, max_bytes=MAX_SOURCE_RESPONSE_BYTES)
     events: list[dict[str, Any]] = []
     detail_errors = 0
 
     if parser_mode == "RSS":
         events = parse_rss_or_atom(
-            response.text,
+            response_text,
             provider_code=provider_code,
             captured_at=captured_at,
         )
         events = [event for event in events if _within_lookback(event, captured_at)]
     elif parser_mode == "HTML_INDEX":
         rows = parse_official_html_index(
-            response.text,
+            response_text,
             provider_code=provider_code,
             base_url=str(source["monitor_url"]),
             allowed_prefixes=list(source.get("allowed_path_prefixes") or []),
@@ -129,7 +138,9 @@ async def _fetch_source(
             try:
                 detail = await client.get(row["url"])
                 detail.raise_for_status()
-                published = extract_published_at_from_html(detail.text)
+                validate_response_origin(detail, source=source, requested_url=row["url"])
+                detail_text = bounded_response_text(detail, max_bytes=MAX_DETAIL_RESPONSE_BYTES)
+                published = extract_published_at_from_html(detail_text)
                 normalized = normalize_event(
                     provider_code=provider_code,
                     headline=row["headline"],
@@ -157,6 +168,9 @@ async def _fetch_source(
         "detail_errors": detail_errors,
         "captured_at": captured_at.isoformat(),
         "latency_seconds": round(elapsed, 3),
+        "transport_spec_version": TRANSPORT_SPEC_VERSION,
+        "official_response_origin_verified": True,
+        "response_byte_bound": MAX_SOURCE_RESPONSE_BYTES,
     }
 
 
@@ -187,6 +201,8 @@ async def build_current_snapshot() -> dict[str, Any]:
                         "error": type(exc).__name__,
                         "captured_at": now.isoformat(),
                         "event_count": 0,
+                        "transport_spec_version": TRANSPORT_SPEC_VERSION,
+                        "official_response_origin_verified": False,
                     }
                 )
     snapshot = build_snapshot(
