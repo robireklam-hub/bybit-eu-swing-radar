@@ -27,7 +27,10 @@ def test_effect_preregistration_inherits_frozen_v3_contract() -> None:
     }
     assert MIN_SIGNAL_SAMPLE_TOTAL == alignment_v3.MIN_SIGNAL_SAMPLE_TOTAL
     assert MIN_SIGNAL_SAMPLE_PER_SYMBOL == alignment_v3.MIN_SIGNAL_SAMPLE_PER_SYMBOL
-    assert spec["primary_outcome"] == PRIMARY_OUTCOME == "journal.net_r_after_costs"
+    assert spec["primary_outcome"] == PRIMARY_OUTCOME == "journal.net_r"
+    assert spec["primary_outcome_semantics"] == (
+        "cost-adjusted net R from day_trade_signal_journal.net_r"
+    )
     assert spec["hypotheses"] == [dict(item) for item in alignment_v3.HYPOTHESES]
     assert tuple(spec["analysis_methods"]) == ANALYSIS_METHODS
 
@@ -66,6 +69,19 @@ def test_effect_preregistration_fails_closed_on_hypothesis_or_method_drift() -> 
     spec = effect_analysis_spec()
     spec["analysis_methods"] = spec["analysis_methods"][:-1]
     assert validate_effect_preregistration(spec) == (False, "analysis_methods_mutated")
+
+
+def test_effect_preregistration_fails_closed_on_outcome_semantics_drift() -> None:
+    spec = effect_analysis_spec()
+    spec["primary_outcome"] = "journal.net_r_after_costs"
+    assert validate_effect_preregistration(spec) == (False, "unexpected_primary_outcome")
+
+    spec = effect_analysis_spec()
+    spec["primary_outcome_semantics"] = "synthetic alias"
+    assert validate_effect_preregistration(spec) == (
+        False,
+        "unexpected_primary_outcome_semantics",
+    )
 
 
 def test_effect_preregistration_keeps_all_four_preregistered_hypotheses() -> None:
