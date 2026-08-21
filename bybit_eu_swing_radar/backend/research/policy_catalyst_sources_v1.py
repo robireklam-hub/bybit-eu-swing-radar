@@ -166,7 +166,7 @@ _REGRESSION_FIXTURES: tuple[dict[str, Any], ...] = (
         "provider_code": "TREASURY",
         "published_date": "2026-08-19",
         "headline": "Treasury Announces Increased Sizes of Nominal Long-End Liquidity Support Buybacks Beginning September 9",
-        "url": "https://home.treasury.gov/news/press-releases/sb0247",
+        "url": "https://home.treasury.gov/news/press-releases/sb0607",
         "event_class": "TREASURY_DEBT_MANAGEMENT",
         "source_role": "PRIMARY_SOURCE_REGRESSION_FIXTURE",
         "trade_direction": None,
