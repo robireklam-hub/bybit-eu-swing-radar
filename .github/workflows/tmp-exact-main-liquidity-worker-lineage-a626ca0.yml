@@ -1,0 +1,88 @@
+name: NEVER MERGE exact-main liquidity worker lineage verifier
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/tmp-exact-main-liquidity-worker-lineage-a626ca0.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      BYBIT_EU_PUBLIC_BASE_URL: https://api.bybit.eu
+      EXPECTED_SHA: a626ca0d76f2dbf8d1f2d86cb69c364e9317e755
+    steps:
+      - name: Check out exact main
+        uses: actions/checkout@v7
+        with:
+          ref: a626ca0d76f2dbf8d1f2d86cb69c364e9317e755
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Wait for exact production API build
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.request
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          expected = os.environ['EXPECTED_SHA']
+          for attempt in range(80):
+              try:
+                  with urllib.request.urlopen(base + '/version', timeout=10) as response:
+                      payload = json.load(response)
+                  served = payload.get('commit_sha')
+                  print(f'API_SHA_ATTEMPT_{attempt + 1}={served}')
+                  if served == expected:
+                      raise SystemExit(0)
+              except Exception as exc:
+                  print(f'API_SHA_ATTEMPT_{attempt + 1}_ERROR={type(exc).__name__}:{exc}')
+              time.sleep(15)
+          raise SystemExit('exact production API SHA did not become ready')
+          PY
+
+      - name: Verify swing candidate Coinalyze semantics
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_coinalyze_smoke.py
+
+      - name: Verify swing liquidity event construction
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_event_smoke.py
+
+      - name: Verify swing liquidity maturity status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_maturity_status.py
+
+      - name: Verify non-persisting swing worker lineage parity on a fresh snapshot
+        working-directory: bybit_eu_swing_radar/backend
+        run: |
+          python - <<'PY'
+          import json, os
+          from scripts.run_swing_liquidity_shadow_worker_lineage_guarded import collect_snapshot_with_worker_lineage
+          snapshot = collect_snapshot_with_worker_lineage(
+              os.environ['PRODUCTION_RADAR_API_BASE_URL'],
+              os.environ['PRODUCTION_RADAR_API_KEY'],
+              os.environ['BYBIT_EU_PUBLIC_BASE_URL'],
+          )
+          safe = {
+              'scan_data_as_of': snapshot.get('scan_data_as_of'),
+              'source_commit_sha': snapshot.get('source_commit_sha'),
+              'swing_worker_source_commit_sha': snapshot.get('swing_worker_source_commit_sha'),
+              'swing_worker_checked_at': snapshot.get('swing_worker_checked_at'),
+              'source_commit_semantics': snapshot.get('source_commit_semantics'),
+              'candidate_count': snapshot.get('candidate_count'),
+              'orderbook_count': len(snapshot.get('orderbooks') or {}),
+              'orderbook_error_count': len(snapshot.get('orderbook_errors') or {}),
+          }
+          print('SWING_LIQUIDITY_WORKER_LINEAGE_VERIFIED=' + json.dumps(safe, sort_keys=True))
+          if safe['source_commit_sha'] != os.environ['EXPECTED_SHA']:
+              raise SystemExit('lineage guard did not bind to exact expected main SHA')
+          PY
