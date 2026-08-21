@@ -3,6 +3,8 @@ name: NEVER MERGE exact-main production verifier 5c51f6d5
 on:
   push:
     branches: [research/exact-main-verifier-5c51f6d5]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
