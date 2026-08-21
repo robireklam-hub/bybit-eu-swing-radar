@@ -47,6 +47,41 @@ def test_structural_breakout_context_has_no_fixed_two_bar_ttl():
     assert context["validity_bars"] is None
     assert context["boundary_held"] is True
     assert context["persistence_mode"] == "STRUCTURE_HELD_NO_FIXED_BAR_TTL"
+    assert context["origin_policy"] == "FIRST_CROSSING_IN_UNINTERRUPTED_SEQUENCE_NO_RATCHET"
+
+
+def test_continuation_cross_of_new_rolling_high_does_not_ratchet_origin():
+    rows = [Bar(i * 300_000, 98.0, 100.0, 97.0, 99.0) for i in range(12)]
+    rows[-1] = Bar(11 * 300_000, 98.0, 100.0, 97.0, 99.8)
+    # First breakout origin: prior high = 100.0. Its high becomes 100.4.
+    rows.append(Bar(12 * 300_000, 99.8, 100.4, 99.5, 100.2))
+    # This next bar also crosses the newer rolling high 100.4. It must remain
+    # continuation of the 100.0 origin, not become a new age=0 breakout.
+    rows.append(Bar(13 * 300_000, 100.2, 100.9, 100.1, 100.7))
+
+    context = active_structural_breakout_context(rows, "long")
+    assert context is not None
+    assert context["trigger_price"] == pytest.approx(100.0)
+    assert context["event_bar_start_ms"] == 12 * 300_000
+    assert context["age_bars"] == 1
+
+
+def test_new_breakout_can_start_only_after_old_boundary_was_lost():
+    rows = [Bar(i * 300_000, 98.0, 100.0, 97.0, 99.0) for i in range(12)]
+    rows[-1] = Bar(11 * 300_000, 98.0, 100.0, 97.0, 99.8)
+    rows.append(Bar(12 * 300_000, 99.8, 100.4, 99.5, 100.2))
+    # Original 100.0 boundary is lost; first sequence must die.
+    rows.append(Bar(13 * 300_000, 100.2, 100.3, 99.4, 99.7))
+    # Build enough later bars below a lower local ceiling, then cross it.
+    for i in range(14, 26):
+        rows.append(Bar(i * 300_000, 99.0, 99.8, 98.5, 99.2))
+    rows.append(Bar(26 * 300_000, 99.2, 100.2, 99.0, 100.0))
+
+    context = active_structural_breakout_context(rows, "long")
+    assert context is not None
+    assert context["event_bar_start_ms"] == 26 * 300_000
+    assert context["age_bars"] == 0
+    assert context["trigger_price"] == pytest.approx(99.8)
 
 
 def test_structural_breakout_dies_after_any_closed_boundary_loss():
