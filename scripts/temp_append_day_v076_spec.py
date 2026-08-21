@@ -29,5 +29,5 @@ A v0.7.5 történeti kohorsz változatlanul reprodukálható és `strategy_versi
 - A v0.7.3, v0.7.4 és v0.7.5 journal/backtest/research kohorszok immutábilisak; a v0.7.6 nem végez történeti backfillt vagy átértelmezést ezekbe.
 '''
 
-path.write_text(text.rstrip() + annex + "\n", encoding="utf-8")
+path.write_text(text.rstrip() + annex.rstrip() + "\n", encoding="utf-8")
 print("v0.7.6 backend spec annex appended")
