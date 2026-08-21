@@ -9,17 +9,36 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from research.microstructure.effect_analysis_v3 import (
+    PRIMARY_OUTCOME,
+    PRIMARY_OUTCOME_SEMANTICS,
+    SPEC_VERSION,
+)
+
 EXPECTED = {
     "H1_FLOW_BOOK_CONCORDANCE": ("flow_book_concordance_60s", "positive"),
     "H2_MICROPRICE_DISPLACEMENT": ("side_microprice_displacement_bps_15s", "positive"),
     "H3_BOOK_CHURN_PRESSURE": ("side_book_pressure_ratio_60s", "positive"),
     "H4_SPREAD_COST": ("spread_bps_mean_15s", "negative"),
 }
-ALLOWED = {"WAITING_FOR_DATA_QUALITY", "WAITING_FOR_SAMPLE", "WAITING_FOR_CLOSED_OUTCOMES", "COMPLETE"}
+ALLOWED = {
+    "WAITING_FOR_DATA_QUALITY",
+    "WAITING_FOR_SAMPLE",
+    "WAITING_FOR_CLOSED_OUTCOMES",
+    "COMPLETE",
+}
 
 
 def fetch_json(url: str, api_key: str, timeout: float = 15.0) -> dict[str, Any]:
-    request = Request(url, method="GET", headers={"Accept": "application/json", "User-Agent": "bybit-eu-microstructure-effect-v3/1", "X-Radar-Key": api_key})
+    request = Request(
+        url,
+        method="GET",
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "bybit-eu-microstructure-effect-v3/1",
+            "X-Radar-Key": api_key,
+        },
+    )
     with urlopen(request, timeout=timeout) as response:
         payload = json.load(response)
     if not isinstance(payload, dict):
@@ -28,25 +47,35 @@ def fetch_json(url: str, api_key: str, timeout: float = 15.0) -> dict[str, Any]:
 
 
 def validate_effect_status_v3(payload: dict[str, Any]) -> tuple[bool, str]:
-    for field, expected in (("research_only", True), ("live_strategy_mutated", False), ("promotion_allowed", False), ("threshold_search_allowed", False), ("model_search_allowed", False)):
+    for field, expected in (
+        ("research_only", True),
+        ("live_strategy_mutated", False),
+        ("promotion_allowed", False),
+        ("threshold_search_allowed", False),
+        ("model_search_allowed", False),
+    ):
         if payload.get(field) is not expected:
             return False, f"unexpected_{field}"
     if payload.get("error") or payload.get("error_type"):
         return False, "effect_query_error"
     spec = payload.get("effect_spec")
-    if not isinstance(spec, dict) or spec.get("spec_version") != "microstructure-forward-effect-analysis-v3":
+    if not isinstance(spec, dict) or spec.get("spec_version") != SPEC_VERSION:
         return False, "unexpected_effect_spec"
     if spec.get("preregistered_strategy_version") != "0.7.5":
         return False, "unexpected_strategy_version"
     if spec.get("minimum_signal_sample") != {"total": 60, "per_symbol": 10}:
         return False, "sample_gate_mutated"
-    if spec.get("primary_outcome") != "journal.net_r_after_costs":
+    if spec.get("primary_outcome") != PRIMARY_OUTCOME:
         return False, "primary_outcome_mutated"
+    if spec.get("primary_outcome_semantics") != PRIMARY_OUTCOME_SEMANTICS:
+        return False, "primary_outcome_semantics_mutated"
+
     status = payload.get("status")
     if status not in ALLOWED:
         return False, "unexpected_status"
-    if status in {"WAITING_FOR_DATA_QUALITY", "WAITING_FOR_SAMPLE"} and payload.get("outcome_visible") is not False:
-        return False, "outcome_visible_before_gate"
+    if status in {"WAITING_FOR_DATA_QUALITY", "WAITING_FOR_SAMPLE"}:
+        if payload.get("outcome_visible") is not False:
+            return False, "outcome_visible_before_gate"
     if status == "COMPLETE":
         if payload.get("outcome_visible") is not True:
             return False, "complete_outcome_not_visible"
@@ -68,7 +97,9 @@ def validate_effect_status_v3(payload: dict[str, Any]) -> tuple[bool, str]:
                 return False, "effect_not_descriptive"
         if seen != set(EXPECTED):
             return False, "hypotheses_incomplete"
-        if payload.get("promotion_decision") != "NO_PROMOTION_REQUIRES_SUBSEQUENT_UNTOUCHED_VALIDATION":
+        if payload.get("promotion_decision") != (
+            "NO_PROMOTION_REQUIRES_SUBSEQUENT_UNTOUCHED_VALIDATION"
+        ):
             return False, "promotion_decision_invalid"
     return True, "ok"
 
@@ -85,7 +116,10 @@ def main() -> int:
         if version.get("commit_sha") != expected_sha:
             print("FAIL phase=version reason=expected_commit_not_deployed")
             return 1
-        payload = fetch_json(f"{base_url}/v1/research/microstructure/effect-status-v3", api_key)
+        payload = fetch_json(
+            f"{base_url}/v1/research/microstructure/effect-status-v3",
+            api_key,
+        )
     except HTTPError as exc:
         print(f"FAIL phase=effect-v3 http_status={exc.code}")
         return 1
@@ -93,7 +127,21 @@ def main() -> int:
         print(f"FAIL phase=effect-v3 error_type={type(exc).__name__}")
         return 1
     ok, reason = validate_effect_status_v3(payload)
-    safe = {key: payload.get(key) for key in ("status", "ready_for_preregistered_effect_test", "sample", "cohort_gate", "closed_outcomes", "missing_outcomes", "results", "outcome_visible", "promotion_allowed", "promotion_decision")}
+    safe = {
+        key: payload.get(key)
+        for key in (
+            "status",
+            "ready_for_preregistered_effect_test",
+            "sample",
+            "cohort_gate",
+            "closed_outcomes",
+            "missing_outcomes",
+            "results",
+            "outcome_visible",
+            "promotion_allowed",
+            "promotion_decision",
+        )
+    }
     print("EFFECT_STATUS_V3=" + json.dumps(safe, sort_keys=True))
     if not ok:
         print(f"FAIL phase=effect-v3 reason={reason}")
