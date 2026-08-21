@@ -10,6 +10,7 @@ from scripts.production_v073_prospective_funnel_smoke import (
 SHA = "a" * 40
 NOW = datetime(2026, 8, 18, 14, 0, tzinfo=timezone.utc)
 LOCKED = "LOCKED_UNTIL_PREREGISTERED_DEVELOPMENT_GATE"
+CONTEXT = "day-barrier-clear-context-v1"
 
 
 def _payload() -> dict:
@@ -74,6 +75,7 @@ def _observer_payload() -> dict:
         "status": "COMPLETE",
         "study": "day-barrier-clear-rearm-v1",
         "observer_version": "day-barrier-clear-observer-v1",
+        "context_version": CONTEXT,
         "research_only": True,
         "label_free": True,
         "execution_authorized": False,
@@ -115,6 +117,7 @@ def test_zero_parent_and_zero_resolution_are_valid_prospective_states():
     assert parent["ok"] is True
     assert parent["total_frozen_parents"] == 0
     assert observer["ok"] is True
+    assert observer["context_version"] == CONTEXT
     assert observer["cumulative"]["cleared"] == 0
 
 
@@ -134,6 +137,14 @@ def test_barrier_contract_fails_closed_on_live_mutation_or_execution_authorizati
     assert observer["ok"] is False
     assert "observer.execution_authorized mismatch" in observer["errors"]
     assert "observer.score_mutation mismatch" in observer["errors"]
+
+
+def test_barrier_observer_requires_exact_context_version():
+    observer = _observer_payload()
+    observer.pop("context_version")
+    result = validate_barrier_observer_status(observer, SHA, now=NOW)
+    assert result["ok"] is False
+    assert "observer.context_version mismatch" in result["errors"]
 
 
 def test_barrier_status_requires_exact_sidecar_sha():
