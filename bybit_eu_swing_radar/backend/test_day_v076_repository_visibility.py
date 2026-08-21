@@ -1,3 +1,9 @@
+import os
+
+os.environ.setdefault("DATABASE_URL", "postgresql://test:test@localhost:5432/test")
+os.environ.setdefault("RADAR_API_KEY", "test-radar-key")
+os.environ.setdefault("COINALYZE_API_KEY", "test-coinalyze-key")
+
 from app.models import DayTradeCandidate, PriceZone
 from app.repository import _rankable_day_watch
 
