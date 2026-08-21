@@ -106,13 +106,13 @@ jobs:
               raise SystemExit(f"unexpected lifecycle adoption reason: {adoption.get('reason')}")
           if adoption.get("reason") == "prospective_trial_registration" and adoption.get("inserted") is not True:
               raise SystemExit("prospective lifecycle registration did not insert")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
+              env_file.write(f"EXPECTED_SWING_LIQUIDITY_CAPTURE_AT={snapshot['captured_at']}\n")
           print("SWING_LIQUIDITY_PROSPECTIVE_LIFECYCLE_ADOPTION_VERIFIED")
           PY
 
       - name: Verify exact durable forward capture state
         working-directory: bybit_eu_swing_radar/backend
-        env:
-          EXPECTED_SWING_LIQUIDITY_CAPTURE_AT: ${{ env.EXPECTED_SWING_LIQUIDITY_CAPTURE_AT }}
         run: python scripts/production_swing_liquidity_forward_status.py
 
       - name: Verify label-blind swing liquidity event construction
