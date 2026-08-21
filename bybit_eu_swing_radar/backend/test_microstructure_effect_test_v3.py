@@ -30,6 +30,13 @@ def _rows(counts):
     return rows
 
 
+def test_outcome_sql_uses_actual_cost_adjusted_journal_column():
+    normalized = " ".join(effect_test_v3.OUTCOME_SQL.split())
+    assert "SELECT id AS signal_id, symbol, opened_at, net_r" in normalized
+    assert "AND net_r IS NOT NULL" in normalized
+    assert "net_r_after_costs" not in effect_test_v3.OUTCOME_SQL
+
+
 def test_earliest_ready_prefix_is_frozen_at_60():
     cohort, gate = effect_test_v3.select_earliest_ready_cohort(_rows((30, 15, 25)), SYMBOLS)
     assert gate["cohort_frozen"] is True
@@ -48,10 +55,12 @@ def test_strategy_contamination_fails_closed():
 @pytest.mark.asyncio
 async def test_outcomes_are_not_queried_before_60_10(monkeypatch):
     called = False
+
     async def _connect(*args, **kwargs):
         nonlocal called
         called = True
         raise AssertionError("DB must remain unopened")
+
     monkeypatch.setattr(effect_test_v3.asyncpg, "connect", _connect)
     with pytest.raises(RuntimeError, match="below preregistered minimum"):
         await effect_test_v3.load_closed_outcomes("postgres://example", _rows((19, 20, 20)), SYMBOLS)

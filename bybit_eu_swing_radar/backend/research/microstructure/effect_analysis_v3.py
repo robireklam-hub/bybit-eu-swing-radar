@@ -15,7 +15,9 @@ from research.microstructure import alignment_v3
 SPEC_VERSION = "microstructure-forward-effect-analysis-v3"
 PARENT_ALIGNMENT_SPEC_VERSION = alignment_v3.SPEC_VERSION
 PREREGISTERED_STRATEGY_VERSION = alignment_v3.PREREGISTERED_STRATEGY_VERSION
-PRIMARY_OUTCOME = "journal.net_r_after_costs"
+# Production journal schema stores the configured-cost-adjusted outcome in net_r.
+PRIMARY_OUTCOME = "journal.net_r"
+PRIMARY_OUTCOME_SEMANTICS = "cost-adjusted net R from day_trade_signal_journal.net_r"
 MIN_SIGNAL_SAMPLE_TOTAL = alignment_v3.MIN_SIGNAL_SAMPLE_TOTAL
 MIN_SIGNAL_SAMPLE_PER_SYMBOL = alignment_v3.MIN_SIGNAL_SAMPLE_PER_SYMBOL
 
@@ -28,7 +30,8 @@ ANALYSIS_METHODS = (
         "id": "PRIMARY_SPEARMAN",
         "description": (
             "For each preregistered continuous feature, compute Spearman rank "
-            "correlation against net R after costs across the full v0.7.5 cohort."
+            "correlation against cost-adjusted journal net R across the full "
+            "v0.7.5 cohort."
         ),
         "two_sided": True,
         "directional_interpretation": True,
@@ -73,6 +76,7 @@ def effect_analysis_spec() -> dict[str, Any]:
             "per_symbol": MIN_SIGNAL_SAMPLE_PER_SYMBOL,
         },
         "primary_outcome": PRIMARY_OUTCOME,
+        "primary_outcome_semantics": PRIMARY_OUTCOME_SEMANTICS,
         "hypotheses": [dict(item) for item in HYPOTHESES],
         "analysis_methods": [dict(item) for item in ANALYSIS_METHODS],
         "threshold_search_allowed": False,
@@ -131,6 +135,8 @@ def validate_effect_preregistration(spec: dict[str, Any]) -> tuple[bool, str]:
         return False, "unexpected_strategy_version"
     if spec.get("primary_outcome") != PRIMARY_OUTCOME:
         return False, "unexpected_primary_outcome"
+    if spec.get("primary_outcome_semantics") != PRIMARY_OUTCOME_SEMANTICS:
+        return False, "unexpected_primary_outcome_semantics"
     if spec.get("minimum_signal_sample") != {
         "total": MIN_SIGNAL_SAMPLE_TOTAL,
         "per_symbol": MIN_SIGNAL_SAMPLE_PER_SYMBOL,
