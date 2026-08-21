@@ -4,22 +4,19 @@ from __future__ import annotations
 from fastapi import Depends, HTTPException
 
 from app.repository import RadarRepository
-from app.research_microstructure_alignment_v2_api import (
-    attach_microstructure_alignment_v2_research,
-)
-from app.research_microstructure_alignment_v3_api import (
-    attach_microstructure_alignment_v3_research,
-)
+from app.research_microstructure_alignment_v2_api import attach_microstructure_alignment_v2_research
+from app.research_microstructure_alignment_v3_api import attach_microstructure_alignment_v3_research
+from app.research_microstructure_effect_v3_api import attach_microstructure_effect_v3_research
 
 CACHE_KEY = "day_trade_prospective_funnel_status"
 
 
 def attach_prospective_funnel_research(app, require_api_key) -> None:
-    # Keep independently preregistered microstructure cohorts observable through
-    # the same research-only API composition point. These routes are read-only
-    # and have no live strategy/scoring/eligibility/execution path.
+    # Independently preregistered microstructure cohorts remain isolated and
+    # research-only. V3 effect labels are fail-closed behind its frozen gate.
     attach_microstructure_alignment_v2_research(app, require_api_key)
     attach_microstructure_alignment_v3_research(app, require_api_key)
+    attach_microstructure_effect_v3_research(app, require_api_key)
 
     repo = RadarRepository()
 
@@ -30,8 +27,5 @@ def attach_prospective_funnel_research(app, require_api_key) -> None:
     async def prospective_funnel_status():
         result = await repo.get_cache(CACHE_KEY)
         if result is None:
-            raise HTTPException(
-                status_code=503,
-                detail="No standalone prospective funnel capture yet.",
-            )
+            raise HTTPException(status_code=503, detail="No standalone prospective funnel capture yet.")
         return result
