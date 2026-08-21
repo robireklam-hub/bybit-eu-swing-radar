@@ -8,6 +8,9 @@ from pathlib import Path
 from scripts import preflight_v073_prospective_funnel as preflight
 
 
+LOCKED = "LOCKED_UNTIL_PREREGISTERED_DEVELOPMENT_GATE"
+
+
 def _prospective_payload(sha: str) -> dict[str, object]:
     return {
         "status": "COMPLETE",
@@ -23,20 +26,75 @@ def _prospective_payload(sha: str) -> dict[str, object]:
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "prospective_start_at": "2026-08-15T00:00:00+00:00",
         "current_run": {
-            "observed_snapshots": 30,
-            "inserted_snapshots": 30,
-            "long_snapshots": 15,
-            "short_snapshots": 15,
+            "observed_snapshots": 0,
+            "inserted_snapshots": 0,
+            "long_snapshots": 0,
+            "short_snapshots": 0,
         },
         "cumulative": {
-            "distinct_sweep_events": 10,
-            "total_snapshots": 100,
+            "distinct_sweep_events": 0,
+            "total_snapshots": 0,
             "exact_live_strict_trigger_events": 0,
-            "symbols_observed": 10,
+            "symbols_observed": 0,
             "side_event_counts": {},
             "latest_gate_pass_counts": {},
             "latest_first_failed_gate_counts": {},
         },
+    }
+
+
+def _parent_payload(sha: str) -> dict[str, object]:
+    now = datetime.now(timezone.utc).isoformat()
+    return {
+        "status": "COMPLETE",
+        "research_only": True,
+        "label_free": True,
+        "execution_authorized": False,
+        "live_strategy_mutation": False,
+        "parent_strategy_version": "0.7.5",
+        "source_commit_sha": sha,
+        "prospective_start_at": now,
+        "captured_at": now,
+        "admitted_this_run": 0,
+        "inserted_this_run": 0,
+        "total_frozen_parents": 0,
+        "outcome_visibility": LOCKED,
+        "execution_mode": "SHARED_STANDALONE_RESEARCH_SIDECAR",
+        "current_live_strategy_version": "0.7.6",
+        "live_worker_inline_recorder": False,
+        "live_worker_mutation": False,
+    }
+
+
+def _observer_payload(sha: str) -> dict[str, object]:
+    now = datetime.now(timezone.utc).isoformat()
+    return {
+        "status": "COMPLETE",
+        "observer_version": "day-barrier-clear-observer-v1",
+        "research_only": True,
+        "label_free": True,
+        "execution_authorized": False,
+        "live_strategy_mutation": False,
+        "score_mutation": False,
+        "ranking_mutation": False,
+        "eligibility_mutation": False,
+        "execution_mutation": False,
+        "parent_strategy_version": "0.7.5",
+        "source_commit_sha": sha,
+        "captured_at": now,
+        "resolved_this_run": {},
+        "pending_without_analysis_this_run": 0,
+        "cumulative": {
+            "pending": 0,
+            "cleared": 0,
+            "invalidated_boundary": 0,
+            "invalidated_structure": 0,
+        },
+        "outcome_visibility": LOCKED,
+        "execution_mode": "SHARED_STANDALONE_RESEARCH_SIDECAR",
+        "current_live_strategy_version": "0.7.6",
+        "live_worker_inline_recorder": False,
+        "live_worker_mutation": False,
     }
 
 
@@ -51,30 +109,29 @@ def _live_status() -> dict[str, object]:
     }
 
 
-def test_exact_main_fresh_capture_passes_preflight():
-    sha = "a" * 40
-    result = preflight.evaluate_preflight(
-        version={"commit_sha": sha},
-        live_status=_live_status(),
-        prospective_status=_prospective_payload(sha),
+def _evaluate(sha: str, *, version_sha: str | None = None, live=None, funnel_sha=None, parent_sha=None, observer_sha=None):
+    return preflight.evaluate_preflight(
+        version={"commit_sha": version_sha or sha},
+        live_status=live or _live_status(),
+        prospective_status=_prospective_payload(funnel_sha or sha),
+        barrier_parent_status=_parent_payload(parent_sha or sha),
+        barrier_observer_status=_observer_payload(observer_sha or sha),
         expected_sha=sha,
     )
 
+
+def test_exact_main_fresh_zero_sample_capture_passes_preflight():
+    sha = "a" * 40
+    result = _evaluate(sha)
     assert result["ok"] is True
     assert result["errors"] == []
 
 
-def test_stale_source_sha_fails_preflight_even_when_api_is_exact():
+def test_any_stale_source_sha_fails_preflight_even_when_api_is_exact():
     expected = "a" * 40
-    result = preflight.evaluate_preflight(
-        version={"commit_sha": expected},
-        live_status=_live_status(),
-        prospective_status=_prospective_payload("b" * 40),
-        expected_sha=expected,
-    )
-
-    assert result["ok"] is False
-    assert "standalone source SHA mismatch" in result["errors"]
+    assert "standalone source SHA mismatch" in _evaluate(expected, funnel_sha="b" * 40)["errors"]
+    assert "parent source SHA mismatch" in _evaluate(expected, parent_sha="b" * 40)["errors"]
+    assert "observer source SHA mismatch" in _evaluate(expected, observer_sha="b" * 40)["errors"]
 
 
 def test_non_externalized_live_worker_fails_preflight():
@@ -86,14 +143,7 @@ def test_non_externalized_live_worker_fails_preflight():
         "reason": "WRONG_OWNER",
         "execution_mode": "INLINE",
     }
-
-    result = preflight.evaluate_preflight(
-        version={"commit_sha": sha},
-        live_status=live,
-        prospective_status=_prospective_payload(sha),
-        expected_sha=sha,
-    )
-
+    result = _evaluate(sha, live=live)
     assert result["ok"] is False
     assert "prospective_funnel.status mismatch" in result["errors"]
     assert "prospective_funnel.enabled mismatch" in result["errors"]
@@ -101,13 +151,7 @@ def test_non_externalized_live_worker_fails_preflight():
 
 def test_api_sha_mismatch_fails_preflight():
     expected = "a" * 40
-    result = preflight.evaluate_preflight(
-        version={"commit_sha": "b" * 40},
-        live_status=_live_status(),
-        prospective_status=_prospective_payload(expected),
-        expected_sha=expected,
-    )
-
+    result = _evaluate(expected, version_sha="b" * 40)
     assert result["ok"] is False
     assert "production API SHA mismatch" in result["errors"]
 
@@ -124,6 +168,10 @@ def test_wait_for_preflight_allows_normal_auto_deploy_settling():
             return _live_status()
         if path == "/v1/day-trade/research/prospective-funnel/status":
             return _prospective_payload(expected)
+        if path == "/v1/day-trade/research/barrier-clear-rearm/parent-status":
+            return _parent_payload(expected)
+        if path == "/v1/day-trade/research/barrier-clear-rearm/observer-status":
+            return _observer_payload(expected)
         raise AssertionError(path)
 
     result = preflight.wait_for_preflight(
@@ -132,7 +180,6 @@ def test_wait_for_preflight_allows_normal_auto_deploy_settling():
         max_attempts=4,
         sleep_seconds=0,
     )
-
     assert result["ok"] is True
     assert calls["version"] == 3
 
@@ -141,7 +188,6 @@ def test_direct_script_import_path_works_outside_backend_cwd(tmp_path):
     backend_root = Path(__file__).resolve().parent
     script = backend_root / "scripts" / "preflight_v073_prospective_funnel.py"
     code = "import runpy; runpy.run_path(" + repr(str(script)) + ", run_name='preflight_import_check')"
-
     completed = subprocess.run(
         [sys.executable, "-c", code],
         cwd=tmp_path,
@@ -149,6 +195,5 @@ def test_direct_script_import_path_works_outside_backend_cwd(tmp_path):
         capture_output=True,
         check=False,
     )
-
     assert completed.returncode == 0, completed.stderr
     assert "ModuleNotFoundError" not in completed.stderr

@@ -1,4 +1,4 @@
-"""Production smoke for the standalone v0.7.3 prospective funnel recorder."""
+"""Production smoke for the shared standalone prospective research sidecar."""
 from __future__ import annotations
 
 import json
@@ -14,6 +14,7 @@ MAX_API_POLLS = 60
 MAX_CAPTURE_POLLS = 150
 MAX_CAPTURE_AGE_SECONDS = 900
 STATE_FILE = Path(".prospective_funnel_deployment.json")
+OUTCOME_VISIBILITY = "LOCKED_UNTIL_PREREGISTERED_DEVELOPMENT_GATE"
 
 
 def _parse_dt(value: Any) -> datetime | None:
@@ -25,10 +26,14 @@ def _parse_dt(value: Any) -> datetime | None:
         return None
 
 
+def _capture_age(payload: dict[str, Any], now: datetime) -> float | None:
+    captured_at = _parse_dt(payload.get("captured_at"))
+    return None if captured_at is None else max(0.0, (now - captured_at).total_seconds())
+
+
 def validate_standalone_status(payload: dict[str, Any], expected_sha: str, now: datetime | None = None) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
-    captured_at = _parse_dt(payload.get("captured_at"))
-    age = None if captured_at is None else max(0.0, (now - captured_at).total_seconds())
+    age = _capture_age(payload, now)
     errors: list[str] = []
     expected = {
         "status": "COMPLETE",
@@ -74,13 +79,109 @@ def validate_standalone_status(payload: dict[str, Any], expected_sha: str, now: 
     }
 
 
+def validate_barrier_parent_status(
+    payload: dict[str, Any], expected_sha: str, now: datetime | None = None
+) -> dict[str, Any]:
+    now = now or datetime.now(timezone.utc)
+    age = _capture_age(payload, now)
+    errors: list[str] = []
+    expected = {
+        "status": "COMPLETE",
+        "research_only": True,
+        "label_free": True,
+        "execution_authorized": False,
+        "live_strategy_mutation": False,
+        "parent_strategy_version": "0.7.5",
+        "execution_mode": "SHARED_STANDALONE_RESEARCH_SIDECAR",
+        "current_live_strategy_version": "0.7.6",
+        "live_worker_inline_recorder": False,
+        "live_worker_mutation": False,
+        "outcome_visibility": OUTCOME_VISIBILITY,
+    }
+    for key, value in expected.items():
+        if payload.get(key) != value:
+            errors.append(f"parent.{key} mismatch")
+    if payload.get("source_commit_sha") != expected_sha:
+        errors.append("parent source SHA mismatch")
+    if not payload.get("prospective_start_at"):
+        errors.append("parent prospective_start_at missing")
+    if age is None or age > MAX_CAPTURE_AGE_SECONDS:
+        errors.append("parent capture stale or missing")
+    for key in ("admitted_this_run", "inserted_this_run", "total_frozen_parents"):
+        value = payload.get(key)
+        if not isinstance(value, int) or value < 0:
+            errors.append(f"parent {key} invalid")
+    return {
+        "ok": not errors,
+        "errors": errors,
+        "source_commit_sha": payload.get("source_commit_sha"),
+        "captured_at": payload.get("captured_at"),
+        "age_seconds": age,
+        "prospective_start_at": payload.get("prospective_start_at"),
+        "admitted_this_run": payload.get("admitted_this_run"),
+        "inserted_this_run": payload.get("inserted_this_run"),
+        "total_frozen_parents": payload.get("total_frozen_parents"),
+        "forced_tracking_symbols": payload.get("forced_tracking_symbols") or [],
+    }
+
+
+def validate_barrier_observer_status(
+    payload: dict[str, Any], expected_sha: str, now: datetime | None = None
+) -> dict[str, Any]:
+    now = now or datetime.now(timezone.utc)
+    age = _capture_age(payload, now)
+    errors: list[str] = []
+    expected = {
+        "status": "COMPLETE",
+        "observer_version": "day-barrier-clear-observer-v1",
+        "research_only": True,
+        "label_free": True,
+        "execution_authorized": False,
+        "live_strategy_mutation": False,
+        "score_mutation": False,
+        "ranking_mutation": False,
+        "eligibility_mutation": False,
+        "execution_mutation": False,
+        "parent_strategy_version": "0.7.5",
+        "execution_mode": "SHARED_STANDALONE_RESEARCH_SIDECAR",
+        "current_live_strategy_version": "0.7.6",
+        "live_worker_inline_recorder": False,
+        "live_worker_mutation": False,
+        "outcome_visibility": OUTCOME_VISIBILITY,
+    }
+    for key, value in expected.items():
+        if payload.get(key) != value:
+            errors.append(f"observer.{key} mismatch")
+    if payload.get("source_commit_sha") != expected_sha:
+        errors.append("observer source SHA mismatch")
+    if age is None or age > MAX_CAPTURE_AGE_SECONDS:
+        errors.append("observer capture stale or missing")
+    resolved = payload.get("resolved_this_run")
+    cumulative = payload.get("cumulative") or {}
+    if not isinstance(resolved, dict):
+        errors.append("observer resolved_this_run missing")
+    if not {"pending", "cleared", "invalidated_boundary", "invalidated_structure"}.issubset(cumulative):
+        errors.append("observer cumulative fields missing")
+    return {
+        "ok": not errors,
+        "errors": errors,
+        "source_commit_sha": payload.get("source_commit_sha"),
+        "captured_at": payload.get("captured_at"),
+        "age_seconds": age,
+        "resolved_this_run": resolved or {},
+        "pending_without_analysis_this_run": payload.get("pending_without_analysis_this_run"),
+        "cumulative": cumulative,
+        "forced_tracking_symbols": payload.get("forced_tracking_symbols") or [],
+    }
+
+
 def main() -> int:
     base = os.environ["PRODUCTION_RADAR_API_BASE_URL"].rstrip("/")
     key = os.environ["PRODUCTION_RADAR_API_KEY"]
     expected_sha = os.environ["EXPECTED_API_SHA"]
 
     def get(path: str, *, auth: bool = True, timeout: int = 25) -> dict[str, Any]:
-        headers = {"Accept": "application/json", "User-Agent": "standalone-funnel-smoke/2"}
+        headers = {"Accept": "application/json", "User-Agent": "standalone-research-smoke/3"}
         if auth:
             headers["X-Radar-Key"] = key
         with urlopen(Request(base + path, headers=headers), timeout=timeout) as response:
@@ -103,7 +204,6 @@ def main() -> int:
             return 1
         time.sleep(POLL_SECONDS)
 
-    # The live worker must remain externalized; capture ownership is standalone.
     live = get("/v1/day-trade/status")
     marker = live.get("prospective_funnel") or {}
     if not (
@@ -118,14 +218,21 @@ def main() -> int:
     last: dict[str, Any] | None = None
     for attempt in range(MAX_CAPTURE_POLLS):
         try:
-            payload = get("/v1/day-trade/research/prospective-funnel/status")
-            evidence = validate_standalone_status(payload, expected_sha)
+            funnel_payload = get("/v1/day-trade/research/prospective-funnel/status")
+            parent_payload = get("/v1/day-trade/research/barrier-clear-rearm/parent-status")
+            observer_payload = get("/v1/day-trade/research/barrier-clear-rearm/observer-status")
+            evidence = {
+                "funnel": validate_standalone_status(funnel_payload, expected_sha),
+                "barrier_parent": validate_barrier_parent_status(parent_payload, expected_sha),
+                "barrier_observer": validate_barrier_observer_status(observer_payload, expected_sha),
+            }
+            evidence["ok"] = all(item["ok"] for item in evidence.values())
             last = evidence
             if attempt % 6 == 0:
                 print("STANDALONE_PROGRESS=" + json.dumps(evidence, sort_keys=True, default=str), flush=True)
             if evidence["ok"]:
-                print("STANDALONE_PROSPECTIVE_FUNNEL_EVIDENCE=" + json.dumps(evidence, sort_keys=True, default=str), flush=True)
-                print("V0.7.3 STANDALONE PROSPECTIVE FUNNEL PRODUCTION VERIFIED.", flush=True)
+                print("STANDALONE_PROSPECTIVE_RESEARCH_EVIDENCE=" + json.dumps(evidence, sort_keys=True, default=str), flush=True)
+                print("SHARED STANDALONE PROSPECTIVE RESEARCH PRODUCTION VERIFIED.", flush=True)
                 return 0
         except Exception as exc:
             if attempt % 6 == 0:
@@ -134,7 +241,7 @@ def main() -> int:
             time.sleep(POLL_SECONDS)
 
     state = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
-    print("FAIL no qualifying standalone prospective capture: " + json.dumps({"evidence": last, "deployment": state}, sort_keys=True, default=str), flush=True)
+    print("FAIL no qualifying standalone prospective research capture: " + json.dumps({"evidence": last, "deployment": state}, sort_keys=True, default=str), flush=True)
     return 1
 
 

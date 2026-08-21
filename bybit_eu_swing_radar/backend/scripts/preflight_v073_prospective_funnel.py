@@ -1,8 +1,8 @@
-"""Bounded read-only preflight for the standalone v0.7.3 prospective funnel.
+"""Bounded read-only preflight for the shared standalone prospective research sidecar.
 
 Trusted main CI uses this before requesting any explicit Railway deployment. The
 preflight gives normal auto-deploy + cron capture a short settling window and
-only falls back to provisioning when exact-main substantive evidence still does
+only falls back to provisioning when exact-main evidence for every recorder does
 not appear.
 """
 from __future__ import annotations
@@ -15,14 +15,15 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.request import Request, urlopen
 
-# Direct script execution sets sys.path[0] to backend/scripts. Bootstrap the
-# backend package root explicitly so this path behaves like module imports used
-# by unit tests.
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from scripts.production_v073_prospective_funnel_smoke import validate_standalone_status
+from scripts.production_v073_prospective_funnel_smoke import (
+    validate_barrier_observer_status,
+    validate_barrier_parent_status,
+    validate_standalone_status,
+)
 
 PREFLIGHT_POLL_SECONDS = 10
 PREFLIGHT_MAX_WAIT_SECONDS = 300
@@ -48,19 +49,26 @@ def evaluate_preflight(
     version: dict[str, Any],
     live_status: dict[str, Any],
     prospective_status: dict[str, Any],
+    barrier_parent_status: dict[str, Any],
+    barrier_observer_status: dict[str, Any],
     expected_sha: str,
 ) -> dict[str, Any]:
     errors: list[str] = []
     if version.get("commit_sha") != expected_sha:
         errors.append("production API SHA mismatch")
     errors.extend(validate_externalized_marker(live_status))
-    evidence = validate_standalone_status(prospective_status, expected_sha)
-    errors.extend(str(item) for item in evidence.get("errors") or [])
+    prospective = validate_standalone_status(prospective_status, expected_sha)
+    parent = validate_barrier_parent_status(barrier_parent_status, expected_sha)
+    observer = validate_barrier_observer_status(barrier_observer_status, expected_sha)
+    for evidence in (prospective, parent, observer):
+        errors.extend(str(item) for item in evidence.get("errors") or [])
     return {
         "ok": not errors,
         "errors": errors,
         "api_commit_sha": version.get("commit_sha"),
-        "prospective": evidence,
+        "prospective": prospective,
+        "barrier_parent": parent,
+        "barrier_observer": observer,
     }
 
 
@@ -79,6 +87,12 @@ def wait_for_preflight(
                 version=fetch("/version", False),
                 live_status=fetch("/v1/day-trade/status", True),
                 prospective_status=fetch("/v1/day-trade/research/prospective-funnel/status", True),
+                barrier_parent_status=fetch(
+                    "/v1/day-trade/research/barrier-clear-rearm/parent-status", True
+                ),
+                barrier_observer_status=fetch(
+                    "/v1/day-trade/research/barrier-clear-rearm/observer-status", True
+                ),
                 expected_sha=expected_sha,
             )
         except Exception as exc:
@@ -102,7 +116,7 @@ def main() -> int:
     expected_sha = os.environ["EXPECTED_API_SHA"]
 
     def get(path: str, auth: bool = True) -> dict[str, Any]:
-        headers = {"Accept": "application/json", "User-Agent": "standalone-funnel-preflight/2"}
+        headers = {"Accept": "application/json", "User-Agent": "standalone-research-preflight/3"}
         if auth:
             headers["X-Radar-Key"] = key
         with urlopen(Request(base + path, headers=headers), timeout=20) as response:
@@ -120,9 +134,9 @@ def main() -> int:
     )
     print("PROSPECTIVE_PREFLIGHT=" + json.dumps(result, sort_keys=True, default=str), flush=True)
     if result.get("ok"):
-        print("V0.7.3 PROSPECTIVE FUNNEL EXACT-MAIN PREFLIGHT VERIFIED.", flush=True)
+        print("SHARED PROSPECTIVE RESEARCH EXACT-MAIN PREFLIGHT VERIFIED.", flush=True)
         return 0
-    print("V0.7.3 PROSPECTIVE FUNNEL PREFLIGHT EXHAUSTED; FALLBACK REQUIRED.", flush=True)
+    print("SHARED PROSPECTIVE RESEARCH PREFLIGHT EXHAUSTED; FALLBACK REQUIRED.", flush=True)
     return 1
 
 

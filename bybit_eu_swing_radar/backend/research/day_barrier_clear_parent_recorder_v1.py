@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping
 
 from research.day_barrier_clear_rearm_v1 import STUDY_ID, parent_event_eligibility
@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS day_barrier_clear_rearm_v1_parent (
     parent_event_time TIMESTAMPTZ NOT NULL,
     trigger_route TEXT NOT NULL,
     trigger_price DOUBLE PRECISION,
+    trigger_boundary DOUBLE PRECISION,
+    boundary_kind TEXT,
     frozen_barrier_price DOUBLE PRECISION NOT NULL,
     setup_score DOUBLE PRECISION NOT NULL,
     expansion_score DOUBLE PRECISION NOT NULL,
@@ -97,13 +99,27 @@ def _event_time(candidate: Mapping[str, Any]) -> datetime | None:
     trigger = candidate.get("trigger") or {}
     if not isinstance(trigger, Mapping):
         return None
-    direct = _parse_time(trigger.get("event_bar_time"))
-    if direct is not None:
-        return direct
+    route = str(trigger.get("route") or "")
     sweep = trigger.get("sweep_confirmation") or {}
-    if isinstance(sweep, Mapping):
-        return _parse_time(sweep.get("sweep_time"))
-    return None
+    if route == "LIQUIDITY_SWEEP_RECLAIM" and isinstance(sweep, Mapping):
+        # The parent becomes observable only when the sweep confirmation closes.
+        for key in ("structure_shift_time_5m", "reclaim_time", "sweep_time"):
+            parsed = _parse_time(sweep.get(key))
+            if parsed is not None:
+                return parsed
+    return _parse_time(trigger.get("event_bar_time"))
+
+
+def _trigger_boundary(candidate: Mapping[str, Any]) -> tuple[float | None, str]:
+    trigger = candidate.get("trigger") or {}
+    if not isinstance(trigger, Mapping):
+        return None, "UNKNOWN"
+    route = str(trigger.get("route") or "")
+    if route == "LIQUIDITY_SWEEP_RECLAIM":
+        sweep = trigger.get("sweep_confirmation") or {}
+        value = _number(sweep.get("sweep_level")) if isinstance(sweep, Mapping) else None
+        return value, "SWEEP_RECLAIM_LEVEL"
+    return _number(trigger.get("price")), "RANGE_BREAKOUT_BOUNDARY"
 
 
 def _event_key(candidate: Mapping[str, Any], event_time: datetime, barrier: float) -> str:
@@ -145,7 +161,12 @@ def build_parent_record(
         return None
 
     event_time = _event_time(candidate)
-    if event_time is None or event_time < prospective_start_at or event_time > captured_at:
+    if event_time is None:
+        return None
+    event_close_at = event_time + timedelta(minutes=5)
+    # First-run boundary is point-in-time: a bar that started before the boundary
+    # but closed after it was not knowable at boundary time and is admissible.
+    if event_close_at < prospective_start_at or event_close_at > captured_at:
         return None
 
     metrics = candidate.get("metrics") or {}
@@ -154,7 +175,11 @@ def build_parent_record(
         return None
     barrier = _number(metrics.get("nearest_structural_barrier"))
     rr_without_barrier = _number(metrics.get("expected_rr_without_barrier"))
-    if barrier is None or barrier <= 0 or rr_without_barrier is None:
+    trigger_boundary, boundary_kind = _trigger_boundary(candidate)
+    if (
+        barrier is None or barrier <= 0 or rr_without_barrier is None
+        or trigger_boundary is None or trigger_boundary <= 0
+    ):
         return None
 
     manifest = trial_manifest(STUDY_ID)
@@ -175,6 +200,8 @@ def build_parent_record(
             "route": str(trigger.get("route") or "NONE"),
             "price": _number(trigger.get("price")),
             "event_bar_time": event_time.isoformat(),
+            "boundary": trigger_boundary,
+            "boundary_kind": boundary_kind,
             "boundary_held_at_capture": trigger.get("boundary_held"),
         },
         "frozen_barrier_price": barrier,
@@ -215,6 +242,8 @@ def build_parent_record(
         "parent_event_time": event_time,
         "trigger_route": payload["trigger"]["route"],
         "trigger_price": payload["trigger"]["price"],
+        "trigger_boundary": trigger_boundary,
+        "boundary_kind": boundary_kind,
         "frozen_barrier_price": barrier,
         "setup_score": float(candidate["setup_score"]),
         "expansion_score": float(candidate["expansion_score"]),
@@ -267,29 +296,28 @@ async def insert_parent_record(connection: Any, row: Mapping[str, Any]) -> bool:
         """
         INSERT INTO day_barrier_clear_rearm_v1_parent (
             event_key,study,parent_strategy_version,captured_at,source_commit_sha,
-            symbol,side,parent_event_time,trigger_route,trigger_price,frozen_barrier_price,
+            symbol,side,parent_event_time,trigger_route,trigger_price,trigger_boundary,boundary_kind,frozen_barrier_price,
             setup_score,expansion_score,side_direction_score,quality_score,rr_without_barrier,
             tradeable,shortable,spread_bps,volume_ratio_5m,volume_ratio_15m,structure_15m,
             structure_1h,derivatives_context,snapshot_payload,research_only,execution_authorized,
             outcome_visibility,trial_fingerprint
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
-            $20,$21,$22,$23,$24::jsonb,$25::jsonb,$26,$27,$28,$29
+            $20,$21,$22,$23,$24,$25,$26::jsonb,$27::jsonb,$28,$29,$30,$31
         )
         ON CONFLICT (event_key) DO NOTHING
         RETURNING 1
         """,
         row["event_key"], row["study"], row["parent_strategy_version"], row["captured_at"],
         row["source_commit_sha"], row["symbol"], row["side"], row["parent_event_time"],
-        row["trigger_route"], row["trigger_price"], row["frozen_barrier_price"],
-        row["setup_score"], row["expansion_score"], row["side_direction_score"],
-        row["quality_score"], row["rr_without_barrier"], row["tradeable"], row["shortable"],
-        row["spread_bps"], row["volume_ratio_5m"], row["volume_ratio_15m"],
-        row["structure_15m"], row["structure_1h"],
+        row["trigger_route"], row["trigger_price"], row["trigger_boundary"], row["boundary_kind"],
+        row["frozen_barrier_price"], row["setup_score"], row["expansion_score"],
+        row["side_direction_score"], row["quality_score"], row["rr_without_barrier"],
+        row["tradeable"], row["shortable"], row["spread_bps"], row["volume_ratio_5m"],
+        row["volume_ratio_15m"], row["structure_15m"], row["structure_1h"],
         json.dumps(row["derivatives_context"], ensure_ascii=True),
-        json.dumps(row["snapshot_payload"], ensure_ascii=True),
-        row["research_only"], row["execution_authorized"], row["outcome_visibility"],
-        row["trial_fingerprint"],
+        json.dumps(row["snapshot_payload"], ensure_ascii=True), row["research_only"],
+        row["execution_authorized"], row["outcome_visibility"], row["trial_fingerprint"],
     )
     return bool(inserted)
 
@@ -329,6 +357,7 @@ async def persist_parent_batch(
         "parent_strategy_version": "0.7.5",
         "prospective_start_at": prospective_start_at.isoformat(),
         "captured_at": _utc(captured_at).isoformat(),
+        "source_commit_sha": source_commit_sha,
         "admitted_this_run": admitted,
         "inserted_this_run": inserted,
         "total_frozen_parents": total,

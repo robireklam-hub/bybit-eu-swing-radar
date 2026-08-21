@@ -41,8 +41,12 @@ def _candidate(**overrides):
     return item
 
 
+def _captured():
+    return datetime(2026, 8, 21, 15, 12, tzinfo=timezone.utc)
+
+
 def test_parent_record_is_v075_label_blind_and_does_not_store_stale_geometry():
-    captured = datetime(2026, 8, 21, 15, 7, tzinfo=timezone.utc)
+    captured = _captured()
     row = build_parent_record(
         _candidate(
             entry_zone={"low": 1, "high": 2},
@@ -58,6 +62,8 @@ def test_parent_record_is_v075_label_blind_and_does_not_store_stale_geometry():
     assert row["parent_strategy_version"] == "0.7.5"
     assert row["symbol"] == "BTCUSDC"
     assert row["frozen_barrier_price"] == 69998.4
+    assert row["trigger_boundary"] == 69863.5
+    assert row["boundary_kind"] == "RANGE_BREAKOUT_BOUNDARY"
     assert row["research_only"] is True
     assert row["execution_authorized"] is False
     payload = row["snapshot_payload"]
@@ -71,19 +77,58 @@ def test_parent_record_is_v075_label_blind_and_does_not_store_stale_geometry():
     assert payload["fresh_geometry_required_after_clear"] is True
 
 
-def test_prospective_boundary_blocks_pre_start_parent_backfill():
-    captured = datetime(2026, 8, 21, 15, 20, tzinfo=timezone.utc)
-    row = build_parent_record(
+def test_prospective_boundary_uses_bar_close_not_bar_start():
+    captured = _captured()
+    # Event bar starts 15:05 and closes 15:10. It was not knowable at 15:09:59,
+    # so a recorder initialized just before close may admit it after close.
+    admitted = build_parent_record(
         _candidate(),
         captured_at=captured,
-        prospective_start_at=datetime(2026, 8, 21, 15, 10, tzinfo=timezone.utc),
+        prospective_start_at=datetime(2026, 8, 21, 15, 9, 59, tzinfo=timezone.utc),
         source_commit_sha=None,
     )
-    assert row is None
+    assert admitted is not None
+
+    blocked = build_parent_record(
+        _candidate(),
+        captured_at=captured,
+        prospective_start_at=datetime(2026, 8, 21, 15, 10, 1, tzinfo=timezone.utc),
+        source_commit_sha=None,
+    )
+    assert blocked is None
+
+
+def test_sweep_parent_freezes_reclaim_level_not_candidate_entry_as_boundary():
+    captured = _captured()
+    candidate = _candidate()
+    candidate["trigger"] = {
+        "triggered": True,
+        "route": "LIQUIDITY_SWEEP_RECLAIM",
+        "price": 69920.0,
+        "event_bar_time": None,
+        "sweep_confirmation": {
+            "sweep_level": 69850.0,
+            "sweep_time": "2026-08-21T15:00:00+00:00",
+            "reclaim_time": "2026-08-21T15:00:00+00:00",
+            "structure_shift_time_5m": "2026-08-21T15:05:00+00:00",
+            "candidate_entry": 69920.0,
+        },
+    }
+    row = build_parent_record(
+        candidate,
+        captured_at=captured,
+        prospective_start_at=captured - timedelta(minutes=5),
+        source_commit_sha="sha",
+    )
+    assert row is not None
+    assert row["trigger_price"] == 69920.0
+    assert row["trigger_boundary"] == 69850.0
+    assert row["boundary_kind"] == "SWEEP_RECLAIM_LEVEL"
+    assert row["parent_event_time"] == datetime(2026, 8, 21, 15, 5, tzinfo=timezone.utc)
 
 
 def test_event_key_is_deterministic_for_same_frozen_parent():
-    captured = datetime(2026, 8, 21, 15, 7, tzinfo=timezone.utc)
+    captured = _captured()
     kwargs = dict(
         captured_at=captured,
         prospective_start_at=captured - timedelta(minutes=5),
@@ -96,7 +141,7 @@ def test_event_key_is_deterministic_for_same_frozen_parent():
 
 
 def test_missing_derivatives_do_not_gate_parent_but_unborrowable_short_does():
-    captured = datetime(2026, 8, 21, 15, 7, tzinfo=timezone.utc)
+    captured = _captured()
     kwargs = dict(
         captured_at=captured,
         prospective_start_at=captured - timedelta(minutes=5),
@@ -110,7 +155,7 @@ def test_missing_derivatives_do_not_gate_parent_but_unborrowable_short_does():
 
 
 def test_wrong_strategy_or_non_usdc_parent_is_rejected():
-    captured = datetime(2026, 8, 21, 15, 7, tzinfo=timezone.utc)
+    captured = _captured()
     kwargs = dict(
         captured_at=captured,
         prospective_start_at=captured - timedelta(minutes=5),
