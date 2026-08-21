@@ -29,3 +29,17 @@ def attach_prospective_funnel_research(app, require_api_key) -> None:
         if result is None:
             raise HTTPException(status_code=503, detail="No standalone prospective funnel capture yet.")
         return result
+
+    @app.get(
+        "/v1/day-trade/research/barrier-clear-rearm/status",
+        dependencies=[Depends(require_api_key)],
+        include_in_schema=False,
+    )
+    async def barrier_clear_rearm_status():
+        result = await repo.get_cache(CACHE_KEY)
+        if result is None:
+            raise HTTPException(status_code=503, detail="No standalone prospective research capture yet.")
+        barrier = result.get("barrier_clear_rearm") if isinstance(result, dict) else None
+        if not isinstance(barrier, dict):
+            raise HTTPException(status_code=503, detail="No prospective barrier-clear recorder capture yet.")
+        return barrier
