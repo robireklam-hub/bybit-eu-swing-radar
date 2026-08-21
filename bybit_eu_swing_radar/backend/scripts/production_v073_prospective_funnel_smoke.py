@@ -15,6 +15,7 @@ MAX_CAPTURE_POLLS = 150
 MAX_CAPTURE_AGE_SECONDS = 900
 STATE_FILE = Path(".prospective_funnel_deployment.json")
 OUTCOME_VISIBILITY = "LOCKED_UNTIL_PREREGISTERED_DEVELOPMENT_GATE"
+BARRIER_CONTEXT_VERSION = "day-barrier-clear-context-v1"
 
 
 def _parse_dt(value: Any) -> datetime | None:
@@ -134,6 +135,7 @@ def validate_barrier_observer_status(
     expected = {
         "status": "COMPLETE",
         "observer_version": "day-barrier-clear-observer-v1",
+        "context_version": BARRIER_CONTEXT_VERSION,
         "research_only": True,
         "label_free": True,
         "execution_authorized": False,
@@ -165,6 +167,8 @@ def validate_barrier_observer_status(
     return {
         "ok": not errors,
         "errors": errors,
+        "observer_version": payload.get("observer_version"),
+        "context_version": payload.get("context_version"),
         "source_commit_sha": payload.get("source_commit_sha"),
         "captured_at": payload.get("captured_at"),
         "age_seconds": age,
@@ -181,7 +185,7 @@ def main() -> int:
     expected_sha = os.environ["EXPECTED_API_SHA"]
 
     def get(path: str, *, auth: bool = True, timeout: int = 25) -> dict[str, Any]:
-        headers = {"Accept": "application/json", "User-Agent": "standalone-research-smoke/3"}
+        headers = {"Accept": "application/json", "User-Agent": "standalone-research-smoke/4"}
         if auth:
             headers["X-Radar-Key"] = key
         with urlopen(Request(base + path, headers=headers), timeout=timeout) as response:
