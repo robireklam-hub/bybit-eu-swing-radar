@@ -23,9 +23,10 @@ def analysis(follow=False):
 
 def test_persistent_follow_through_reuses_original_breakout_signal_key(monkeypatch):
     monkeypatch.setattr(day_worker,"latest_bar_sweep_setup",lambda *a,**k:None)
+    monkeypatch.setattr(journal_core,"STRATEGY_VERSION","0.7.5")
     a0=analysis(False); a1=analysis(True)
-    c0=build_day_candidate(a0,"long",datetime(2026,8,20,tzinfo=timezone.utc))
-    c1=build_day_candidate(a1,"long",datetime(2026,8,20,tzinfo=timezone.utc))
+    c0=build_day_candidate(a0,"long",datetime(2026,8,20,tzinfo=timezone.utc),strategy_version="0.7.5")
+    c1=build_day_candidate(a1,"long",datetime(2026,8,20,tzinfo=timezone.utc),strategy_version="0.7.5")
     r0=journal_core.build_signal_record(c0,a0.bars_5m,{})
     r1=journal_core.build_signal_record(c1,a1.bars_5m,{})
     assert r0 is not None and r1 is not None

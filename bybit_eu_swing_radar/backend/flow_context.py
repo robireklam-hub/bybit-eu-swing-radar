@@ -118,7 +118,7 @@ def build_flow_payload(
     if not derivative_instrument or not derivative_ticker:
         return {
             "strategy_mode": "DAY_TRADE",
-            "strategy_version": "0.7.5",
+            "strategy_version": "0.7.6",
             "feature_version": "0.7.2.2",
             "symbol": spot_symbol,
             "data_as_of": now.isoformat(),
@@ -163,7 +163,7 @@ def build_flow_payload(
 
     return {
         "strategy_mode": "DAY_TRADE",
-        "strategy_version": "0.7.5",
+        "strategy_version": "0.7.6",
         "feature_version": "0.7.2.2",
         "symbol": spot_symbol,
         "data_as_of": now.isoformat(),

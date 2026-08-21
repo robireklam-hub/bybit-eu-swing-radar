@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: Bybit EU Trading Radar API
-  version: 0.7.5
-  description: Bybit EU Trading Radar with day-trade strategy v0.7.5, compact audit,
+  version: 0.7.6
+  description: Bybit EU Trading Radar with day-trade strategy v0.7.6, separated setup/entry state, compact audit,
     and context-only derivatives OI/funding Flow feature v0.7.2.2 plus explicit market-context warnings.
 servers:
 - url: https://bybit-eu-swing-radar-production.up.railway.app
@@ -608,7 +608,7 @@ paths:
       operationId: getDayTradeFlowContext
       summary: Return context-only OI/funding flow data for one cached day-trade symbol.
       description: Bybit global linear derivatives plus already-cached Coinalyze secondary
-        context. This endpoint does not change v0.7.5 STRICT gates or prove Bybit
+        context. This endpoint does not change v0.7.6 setup/entry gates or prove Bybit
         EU execution conditions.
       parameters:
       - in: path
@@ -1434,6 +1434,73 @@ components:
           - NO_TRADE
         setup_type:
           type: string
+        setup_state:
+          type:
+          - string
+          - 'null'
+          enum:
+          - VALID
+          - INVALID
+          - null
+          description: Technical directional setup validity; independent of current RR/barrier entry readiness.
+        entry_state:
+          type:
+          - string
+          - 'null'
+          enum:
+          - NO_SETUP
+          - EXECUTION_BLOCKED
+          - BLOCKED_BY_BARRIER
+          - RR_NOT_READY
+          - ENTRY_CONFIRMED
+          - ENTRY_PROVISIONAL
+          - ENTRY_TOO_EXTENDED
+          - WAIT_TRIGGER
+          - null
+        execution_valid:
+          type:
+          - boolean
+          - 'null'
+        rr_valid:
+          type:
+          - boolean
+          - 'null'
+        reference_entry:
+          type:
+          - number
+          - 'null'
+          description: Fresh current reference used for stop/target/RR geometry; not necessarily the original breakout boundary.
+        breakout_context:
+          type:
+          - object
+          - 'null'
+          additionalProperties: true
+        hard_stop:
+          type:
+          - object
+          - 'null'
+          properties:
+            price:
+              type: number
+            activation:
+              type: string
+            requires_candle_close:
+              type: boolean
+            condition:
+              type: string
+          additionalProperties: true
+        structure_invalidation:
+          type:
+          - object
+          - 'null'
+          properties:
+            timeframe:
+              type: string
+            condition:
+              type: string
+            requires_candle_close:
+              type: boolean
+          additionalProperties: true
         last_price:
           type: number
         tradeable:
@@ -1887,6 +1954,30 @@ components:
           type: string
         triggered:
           type: boolean
+        route:
+          type:
+          - string
+          - 'null'
+        model:
+          type:
+          - string
+          - 'null'
+        event_bar_time:
+          type:
+          - string
+          - 'null'
+        age_bars:
+          type:
+          - integer
+          - 'null'
+        validity_bars:
+          type:
+          - integer
+          - 'null'
+        boundary_held:
+          type:
+          - boolean
+          - 'null'
       additionalProperties: true
     DayTradeMetrics:
       type: object
@@ -1919,6 +2010,19 @@ components:
           type: number
         distance_to_trigger_atr_5m:
           type: number
+        setup_valid:
+          type: boolean
+        entry_state:
+          type: string
+        reference_entry:
+          type: number
+        breakout_origin_price:
+          type: number
+        entry_geometry_mode:
+          type: string
+          enum:
+          - FRESH_CURRENT_REFERENCE
+          - ORIGIN_TRIGGER_REFERENCE
         assumed_round_trip_cost_bps:
           type: number
         liquidity_reasons:
