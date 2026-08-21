@@ -1,12 +1,12 @@
 from datetime import datetime, timedelta, timezone
 
-import app.main
 import app.market_context_alerts as alerts
+from app.main import app as radar_app
 from app.research_policy_catalyst_api import SCHEMA_SQL
 
 
 def test_policy_catalyst_hidden_routes_are_registered_without_public_action_surface():
-    paths = {route.path: route for route in app.main.app.routes}
+    paths = {route.path: route for route in radar_app.routes}
     expected = {
         "/v1/research/policy-catalyst/spec",
         "/v1/research/policy-catalyst/capture",
