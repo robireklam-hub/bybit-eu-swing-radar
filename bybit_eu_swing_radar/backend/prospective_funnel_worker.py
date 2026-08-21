@@ -3,7 +3,7 @@
 This process is deliberately separate from the live day-radar worker. It
 reuses the live market-analysis helpers and runs multiple preregistered,
 label-free research recorders in one existing Railway cron sidecar. It writes
-only research tables plus a dedicated research status cache key.
+only research tables plus dedicated research status cache keys.
 """
 from __future__ import annotations
 
@@ -29,6 +29,8 @@ from research.day_barrier_clear_parent_recorder_v1 import (
 from research.prospective_funnel_v073 import persist_v073_prospective_funnel
 
 STATUS_CACHE_KEY = "day_trade_prospective_funnel_status"
+BARRIER_PARENT_STATUS_CACHE_KEY = "day_barrier_clear_rearm_parent_status"
+BARRIER_OBSERVER_STATUS_CACHE_KEY = "day_barrier_clear_rearm_observer_status"
 EXECUTION_MODE = "STANDALONE_RAILWAY_CRON"
 MAX_RUNTIME_SECONDS = min(max(int(os.getenv("PROSPECTIVE_FUNNEL_MAX_RUNTIME_SECONDS", "180")), 60), 240)
 
@@ -240,13 +242,27 @@ async def persist_standalone_capture(
                 observed_at=captured_at,
                 source_commit_sha=live.SOURCE_COMMIT_SHA,
             )
-            barrier_status = {
+            forced_symbols = sorted({str(item).upper() for item in required_barrier_symbols})
+            parent_cache_status = {
                 **parent_status,
                 "execution_mode": "SHARED_STANDALONE_RESEARCH_SIDECAR",
                 "current_live_strategy_version": live.DAY_STRATEGY_VERSION,
                 "v075_candidates_built": len(barrier_candidates),
-                "forced_tracking_symbols": sorted({str(item).upper() for item in required_barrier_symbols}),
-                "observer": observer_status,
+                "forced_tracking_symbols": forced_symbols,
+                "live_worker_inline_recorder": False,
+                "live_worker_mutation": False,
+            }
+            observer_cache_status = {
+                **observer_status,
+                "execution_mode": "SHARED_STANDALONE_RESEARCH_SIDECAR",
+                "current_live_strategy_version": live.DAY_STRATEGY_VERSION,
+                "forced_tracking_symbols": forced_symbols,
+                "live_worker_inline_recorder": False,
+                "live_worker_mutation": False,
+            }
+            barrier_status = {
+                **parent_cache_status,
+                "observer": observer_cache_status,
             }
             status = {
                 **status,
@@ -259,6 +275,8 @@ async def persist_standalone_capture(
                 "barrier_clear_rearm": barrier_status,
             }
             await live.upsert_cache(connection, STATUS_CACHE_KEY, status)
+            await live.upsert_cache(connection, BARRIER_PARENT_STATUS_CACHE_KEY, parent_cache_status)
+            await live.upsert_cache(connection, BARRIER_OBSERVER_STATUS_CACHE_KEY, observer_cache_status)
         return status
     finally:
         await connection.close()
