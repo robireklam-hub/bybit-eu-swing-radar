@@ -13,6 +13,10 @@ PREREGISTERED_STRATEGY_VERSION = "0.7.6"
 SPEC_VERSION = "microstructure-forward-alignment-v4"
 PARENT_SPEC_VERSION = "microstructure-forward-alignment-v3"
 EXACT_PRODUCTION_VERIFIER_PR = 399
+EXPECTED_STRATEGY_MERGE_SHA = "2201a7d5b4e5e54ee65a17ebc51a11ac3d90e281"
+EXPECTED_VERIFIED_BY_UTC = "2026-08-21T13:52:43+00:00"
+EXPECTED_COHORT_START_AT = "2026-08-21T13:53:00+00:00"
+EXPECTED_COHORT_START_RULE = "strictly_after_exact_production_verification"
 
 
 def fetch_json(url: str, api_key: str, timeout: float = 15.0) -> dict[str, Any]:
@@ -65,9 +69,20 @@ def validate_alignment_status(payload: dict[str, Any]) -> tuple[bool, str]:
         return False, "outcome_or_promotion_gate_open"
     if spec.get("threshold_search_allowed") is not False:
         return False, "threshold_search_gate_open"
+    if spec.get("cohort_start_at") != EXPECTED_COHORT_START_AT:
+        return False, "cohort_start_at_mutated"
     evidence = spec.get("production_activation_evidence")
-    if not isinstance(evidence, dict) or evidence.get("exact_production_verifier_pr") != EXACT_PRODUCTION_VERIFIER_PR:
+    if not isinstance(evidence, dict):
         return False, "production_activation_evidence_missing"
+    expected_evidence = {
+        "strategy_merge_sha": EXPECTED_STRATEGY_MERGE_SHA,
+        "exact_production_verifier_pr": EXACT_PRODUCTION_VERIFIER_PR,
+        "verified_by_utc": EXPECTED_VERIFIED_BY_UTC,
+        "cohort_start_rule": EXPECTED_COHORT_START_RULE,
+    }
+    for field, expected in expected_evidence.items():
+        if evidence.get(field) != expected:
+            return False, f"production_activation_evidence_{field}_mutated"
 
     sample = payload.get("sample")
     if not isinstance(sample, dict):
