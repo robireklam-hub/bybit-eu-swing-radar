@@ -19,7 +19,6 @@ async def test_duplicate_capture_retry_never_advances_lifecycle(monkeypatch):
     result = await lifecycle.record_lifecycle_on_capture_persistence(
         object(), inserted_capture=False, source_commit_sha="a" * 40
     )
-
     assert calls == []
     assert result["attempted"] is False
     assert result["inserted"] is False
@@ -67,10 +66,7 @@ async def test_first_new_capture_records_only_prospective_trial_registration(mon
     assert payload["prospective_adoption"] is True
     assert payload["historical_backfill"] is False
     assert payload["evidence_refs"] == [trial_fingerprint(lifecycle.STUDY)]
-    assert not any(
-        key in payload
-        for key in ("outcome", "returns", "net_r", "mfe_r", "mae_r", "oos_payload")
-    )
+    assert not any(key in payload for key in ("outcome", "returns", "net_r", "mfe_r", "mae_r", "oos_payload"))
     assert result["inserted"] is True
     assert result["event_type"] == "TRIAL_REGISTERED"
     assert result["historical_backfill"] is False
@@ -126,10 +122,7 @@ async def test_second_fresh_pit_capture_records_only_pit_audit(monkeypatch):
     assert payload["evidence_refs"] == [trial_fingerprint(lifecycle.STUDY), evidence_fp]
     assert payload["evidence_capture_fingerprint"] == evidence_fp
     assert payload["historical_backfill"] is False
-    assert not any(
-        key in payload
-        for key in ("outcome", "returns", "net_r", "mfe_r", "mae_r", "oos_payload")
-    )
+    assert not any(key in payload for key in ("outcome", "returns", "net_r", "mfe_r", "mae_r", "oos_payload"))
     assert result["inserted"] is True
     assert result["event_type"] == "PIT_AUDIT_RECORDED"
     assert result["reason"] == "prospective_pit_audit"
@@ -155,7 +148,6 @@ async def test_no_fresh_post_adoption_pit_capture_does_not_advance(monkeypatch):
     result = await lifecycle.record_lifecycle_on_capture_persistence(
         object(), inserted_capture=True, source_commit_sha="1" * 40
     )
-
     assert result["inserted"] is False
     assert result["event_type"] == "TRIAL_REGISTERED"
     assert result["reason"] == "waiting_for_fresh_post_adoption_pit_capture"
@@ -163,27 +155,50 @@ async def test_no_fresh_post_adoption_pit_capture_does_not_advance(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_existing_lifecycle_beyond_pit_is_not_reconstructed_or_advanced(monkeypatch):
+async def test_pit_state_does_not_advance_without_frozen_data_quality_evidence(monkeypatch):
     async def existing_status(conn, study, *, entity_type, entity_id):
         return {"event_count": 2, "current_event_type": "PIT_AUDIT_RECORDED"}
 
-    async def fail_record(*args, **kwargs):
-        raise AssertionError("helper must not advance beyond PIT audit")
+    async def only_two_rows(*args, **kwargs):
+        return [
+            {
+                "captured_at": "2026-08-21T02:00:00+00:00",
+                "inserted_at": "2026-08-21T02:00:05+00:00",
+                "feature_available_at": "2026-08-21T02:00:00+00:00",
+                "provenance_version": PIT_VERSION,
+                "candidate_count": 3,
+                "orderbook_count": 3,
+                "orderbook_error_count": 0,
+            },
+            {
+                "captured_at": "2026-08-21T03:00:00+00:00",
+                "inserted_at": "2026-08-21T03:00:05+00:00",
+                "feature_available_at": "2026-08-21T03:00:00+00:00",
+                "provenance_version": PIT_VERSION,
+                "candidate_count": 4,
+                "orderbook_count": 4,
+                "orderbook_error_count": 0,
+            },
+        ]
 
-    async def fail_load(*args, **kwargs):
+    async def fail_record(*args, **kwargs):
+        raise AssertionError("helper must not advance until the frozen data-quality gate passes")
+
+    async def fail_pit(*args, **kwargs):
         raise AssertionError("PIT evidence must not be re-read after PIT audit")
 
     monkeypatch.setattr(lifecycle, "lifecycle_status", existing_status)
+    monkeypatch.setattr(lifecycle, "_load_post_pit_data_quality_rows", only_two_rows)
     monkeypatch.setattr(lifecycle, "record_trial_event", fail_record)
-    monkeypatch.setattr(lifecycle, "_load_post_adoption_pit_evidence", fail_load)
+    monkeypatch.setattr(lifecycle, "_load_post_adoption_pit_evidence", fail_pit)
 
     result = await lifecycle.record_lifecycle_on_capture_persistence(
         object(), inserted_capture=True, source_commit_sha="2" * 40
     )
-
     assert result["attempted"] is True
     assert result["inserted"] is False
     assert result["event_type"] == "PIT_AUDIT_RECORDED"
-    assert result["reason"] == "lifecycle_already_beyond_pit_adoption"
+    assert result["reason"] == "insufficient_consecutive_post_pit_captures"
+    assert result["data_quality"]["ready"] is False
     assert result["prospective_adoption"] is True
     assert result["historical_backfill"] is False
