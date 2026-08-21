@@ -1,6 +1,8 @@
 name: NEVER MERGE exact-main production verifier d236ee48
 
 on:
+  push:
+    branches: [research/exact-main-verifier-d236ee48]
   pull_request:
     branches: [main]
   workflow_dispatch:
