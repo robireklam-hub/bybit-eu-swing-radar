@@ -1,0 +1,136 @@
+name: NEVER MERGE v0.7.6 exact-production verifier 2201a7d5
+
+on:
+  push:
+    branches: [ops/never-merge-v076-prod-2201a7d5]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 2201a7d5b4e5e54ee65a17ebc51a11ac3d90e281
+
+    steps:
+      - name: Check out exact main
+        uses: actions/checkout@v7
+        with:
+          ref: 2201a7d5b4e5e54ee65a17ebc51a11ac3d90e281
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Verify exact production API SHA
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.request
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          expected = os.environ['EXPECTED_SHA']
+          for attempt in range(120):
+              try:
+                  req = urllib.request.Request(base + '/version')
+                  with urllib.request.urlopen(req, timeout=15) as r:
+                      payload = json.load(r)
+                  actual = payload.get('source_commit_sha') or payload.get('commit_sha') or payload.get('git_sha')
+                  print(f'api_sha attempt={attempt+1} actual={actual} expected={expected}')
+                  if actual == expected:
+                      raise SystemExit(0)
+              except Exception as exc:
+                  print(f'api_sha attempt={attempt+1} error={type(exc).__name__}: {exc}')
+              time.sleep(5)
+          raise SystemExit('exact production API SHA did not converge')
+          PY
+
+      - name: Verify fresh BTCUSDC v0.7.6 day audit contract
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.error, urllib.request
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key = os.environ['PRODUCTION_RADAR_API_KEY']
+
+          def get(path):
+              req = urllib.request.Request(base + path)
+              req.add_header('X-Radar-Key', key)
+              with urllib.request.urlopen(req, timeout=20) as r:
+                  return json.load(r)
+
+          payload = None
+          for attempt in range(120):
+              try:
+                  candidate = get('/v1/day-trade/audit/BTCUSDC')
+                  version = candidate.get('strategy_version')
+                  long_side = candidate.get('long') or {}
+                  short_side = candidate.get('short') or {}
+                  fields_ready = all(
+                      side and side.get('setup_state') is not None and side.get('entry_state') is not None
+                      for side in (long_side, short_side)
+                  )
+                  print(
+                      'btc_audit attempt=%d version=%s long=%s/%s short=%s/%s fields_ready=%s' % (
+                          attempt + 1,
+                          version,
+                          long_side.get('setup_state'), long_side.get('entry_state'),
+                          short_side.get('setup_state'), short_side.get('entry_state'),
+                          fields_ready,
+                      )
+                  )
+                  if version == '0.7.6' and fields_ready:
+                      payload = candidate
+                      break
+              except Exception as exc:
+                  print(f'btc_audit attempt={attempt+1} error={type(exc).__name__}: {exc}')
+              time.sleep(5)
+
+          if payload is None:
+              raise SystemExit('fresh BTCUSDC v0.7.6 audit did not converge')
+
+          for label in ('long', 'short'):
+              side = payload[label]
+              assert side['setup_state'] in {'VALID', 'INVALID'}
+              assert side['entry_state'] in {
+                  'ENTRY_CONFIRMED', 'ENTRY_PROVISIONAL', 'ENTRY_TOO_EXTENDED',
+                  'BLOCKED_BY_BARRIER', 'RR_NOT_READY', 'WAIT_TRIGGER',
+                  'EXECUTION_BLOCKED', 'NO_SETUP'
+              }
+              hard_stop = side.get('hard_stop')
+              assert isinstance(hard_stop, dict), f'{label}: hard_stop missing'
+              assert hard_stop.get('requires_candle_close') is False, f'{label}: hard stop incorrectly waits for candle close'
+              if side['setup_state'] == 'VALID':
+                  assert side['entry_state'] != 'NO_SETUP', f'{label}: valid setup erased into NO_SETUP'
+              if side['entry_state'] == 'BLOCKED_BY_BARRIER':
+                  assert side['decision'] == 'WAIT', f'{label}: barrier-blocked valid setup should remain WAIT-visible'
+
+          print('BTCUSDC v0.7.6 contract verified')
+          print(json.dumps({
+              'strategy_version': payload['strategy_version'],
+              'data_as_of': payload['data_as_of'],
+              'long': {
+                  'setup_state': payload['long']['setup_state'],
+                  'entry_state': payload['long']['entry_state'],
+                  'decision': payload['long']['decision'],
+                  'setup_score': payload['long']['setup_score'],
+                  'expected_rr': payload['long']['expected_rr'],
+                  'barrier': payload['long'].get('nearest_structural_barrier'),
+                  'hard_stop': payload['long'].get('hard_stop'),
+              },
+              'short': {
+                  'setup_state': payload['short']['setup_state'],
+                  'entry_state': payload['short']['entry_state'],
+                  'decision': payload['short']['decision'],
+                  'setup_score': payload['short']['setup_score'],
+                  'expected_rr': payload['short']['expected_rr'],
+                  'barrier': payload['short'].get('nearest_structural_barrier'),
+                  'hard_stop': payload['short'].get('hard_stop'),
+              },
+          }, indent=2, sort_keys=True))
+          PY
