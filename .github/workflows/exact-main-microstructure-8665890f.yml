@@ -1,0 +1,84 @@
+name: NEVER MERGE exact-main microstructure verifier 8665890f
+
+on:
+  push:
+    branches: [automation/exact-main-microstructure-8665890f]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 8665890ffb9bc095f617038736f0e1f15f9095b5
+      MICROSTRUCTURE_REQUIRE_EXACT_RECORDER_SHA: "false"
+
+    steps:
+      - name: Check out exact production main
+        uses: actions/checkout@v7
+        with:
+          ref: 8665890ffb9bc095f617038736f0e1f15f9095b5
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Verify exact production API SHA
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.request
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          expected = os.environ['EXPECTED_SHA']
+          for attempt in range(120):
+              try:
+                  req = urllib.request.Request(base + '/version')
+                  key = os.environ.get('PRODUCTION_RADAR_API_KEY', '')
+                  if key:
+                      req.add_header('X-API-Key', key)
+                  with urllib.request.urlopen(req, timeout=15) as r:
+                      payload = json.load(r)
+                  actual = payload.get('source_commit_sha') or payload.get('commit_sha') or payload.get('git_sha')
+                  print(f'attempt={attempt+1} actual={actual} expected={expected}')
+                  if actual == expected:
+                      raise SystemExit(0)
+              except Exception as exc:
+                  print(f'attempt={attempt+1} error={type(exc).__name__}: {exc}')
+              time.sleep(5)
+          raise SystemExit('exact production API SHA did not converge')
+          PY
+
+      - name: Check recorder and preregistered readiness
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_smoke.py
+
+      - name: Check preregistered v0.7.3 alignment sample status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_alignment_status.py
+
+      - name: Check preregistered v0.7.4 alignment sample status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_alignment_status_v2.py
+
+      - name: Check preregistered v0.7.5 alignment sample status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_alignment_status_v3.py
+
+      - name: Guard successor effect gates before outcome access
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_successor_effect_gate_guard.py
+
+      - name: Check preregistered v0.7.3 effect status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_effect_status.py
+
+      - name: Check preregistered v0.7.5 effect status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_effect_status_v3.py
