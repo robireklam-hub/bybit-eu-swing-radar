@@ -76,10 +76,15 @@ def test_agent_keeps_swing_trigger_and_adds_separate_day_v076_rules():
     assert "minden későbbi lezárt 5m gyertyán tart" in text
 
 
-def test_backend_spec_keeps_historical_v074_and_adds_v075_persistence_annex():
+def test_backend_spec_keeps_history_and_adds_v076_setup_entry_annex():
     text = (ROOT / "BACKEND_SPEC_HU.md").read_text(encoding="utf-8")
     assert "A jelenlegi swing worker authoritative triggerje 4H lezárt gyertya" in text
     assert "## 14. Day-trade v0.7.4 kiegészítés" in text
     assert "## 15. Day-trade v0.7.5 breakout-aktiváció" in text
+    assert "## 16. Day-trade v0.7.6 setup/entry szétválasztás" in text
     assert "A 4H `timeframe_conflict` diagnosztikai/context mező marad, de nem hard-veto" in text
     assert "Journal és historical replay `strategy_version=0.7.5`" in text
+    assert "nem jár le fixen két 5m gyertya után" in text
+    assert "nem ratchetelheti" in text
+    assert "requires_candle_close=false" in text
+    assert "Structural barrier vagy gyenge pillanatnyi RR" in text
