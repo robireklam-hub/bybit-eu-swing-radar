@@ -86,3 +86,5 @@ jobs:
           if safe['source_commit_sha'] != os.environ['EXPECTED_SHA']:
               raise SystemExit('lineage guard did not bind to exact expected main SHA')
           PY
+
+# synchronization trigger after exact production deployment became available
