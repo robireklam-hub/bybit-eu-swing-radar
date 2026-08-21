@@ -20,7 +20,7 @@ from typing import Any
 import asyncpg
 
 
-STRATEGY_VERSION = "0.7.5"
+STRATEGY_VERSION = "0.7.6"
 
 
 def _env_bool(name: str, default: bool) -> bool:

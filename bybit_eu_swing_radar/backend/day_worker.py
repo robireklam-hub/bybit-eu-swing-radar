@@ -1,10 +1,10 @@
-"""Bybit EU Trading Radar — day-trade worker v0.7.5.
+"""Bybit EU Trading Radar — day-trade worker v0.7.6.
 
 Separate engine from the swing worker:
 - universe: active Bybit EU USDC spot pairs
 - context: 4H and 1H
 - setup: 15m
-- trigger: closed 5m candle
+- setup context: structure-persistent 5m breakout/sweep context; entry confirmation is separate
 - expected holding time: 30 minutes to 8 hours
 - long execution: USDC spot
 - short execution: USDC spot margin only when public borrowability is confirmed
@@ -31,6 +31,14 @@ import asyncpg
 import httpx
 
 from journal import persist_day_journal
+from day_v076 import (
+    active_structural_breakout_context,
+    classify_entry_state,
+    fresh_entry_zone,
+    hard_stop_contract,
+    setup_state_from_validity,
+    technical_setup_valid,
+)
 from sweep_research import SweepResearchConfig, latest_bar_sweep_setup
 
 from worker import (
@@ -79,10 +87,12 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 SOURCE_COMMIT_SHA = os.getenv("RAILWAY_GIT_COMMIT_SHA") or None
 LEGACY_DAY_STRATEGY_VERSION = "0.7.3"
 IMPULSE_DAY_STRATEGY_VERSION = "0.7.4"
-DAY_STRATEGY_VERSION = "0.7.5"
-# A breakout event stays executable on its own closed bar and the immediately
-# following closed 5m bar while the original boundary remains held.
+V075_DAY_STRATEGY_VERSION = "0.7.5"
+DAY_STRATEGY_VERSION = "0.7.6"
+# Historical v0.7.5 compatibility only. v0.7.6 setup context has no fixed
+# 5m-bar TTL; entry confirmation is classified separately.
 DAY_BREAKOUT_ACTIVE_BARS = 2
+DAY_MAX_PROVISIONAL_EXTENSION_ATR = env_float("DAY_MAX_PROVISIONAL_EXTENSION_ATR", 1.0)
 DAY_MIN_TURNOVER_USDC = env_float("DAY_MIN_TURNOVER_USDC", 250_000.0)
 DAY_MAX_SPREAD_BPS = env_float("DAY_MAX_SPREAD_BPS", 25.0)
 DAY_DISCOVERY_MAX_SPREAD_BPS = env_float("DAY_DISCOVERY_MAX_SPREAD_BPS", 150.0)
@@ -657,7 +667,7 @@ def compact_day_audit_side(candidate: dict[str, Any]) -> dict[str, Any]:
     while len(targets) < 3:
         targets.append(0.0)
     trigger = candidate.get("trigger") or {}
-    entry = float(trigger.get("price") or 0.0)
+    entry = float(candidate.get("reference_entry") or trigger.get("price") or 0.0)
     return {
         "symbol": candidate["symbol"],
         "side": candidate["side"],
@@ -665,6 +675,13 @@ def compact_day_audit_side(candidate: dict[str, Any]) -> dict[str, Any]:
         "state": candidate["state"],
         "decision": candidate["decision"],
         "watch_bucket": candidate.get("watch_bucket"),
+        "setup_state": candidate.get("setup_state"),
+        "entry_state": candidate.get("entry_state"),
+        "execution_valid": candidate.get("execution_valid"),
+        "rr_valid": candidate.get("rr_valid"),
+        "reference_entry": candidate.get("reference_entry"),
+        "hard_stop": candidate.get("hard_stop"),
+        "structure_invalidation": candidate.get("structure_invalidation"),
         "tradeable": bool(candidate.get("tradeable")),
         "shortable": bool(candidate.get("shortable")),
         "execution_status": candidate.get("execution_status", ""),
@@ -723,11 +740,16 @@ def watch_bucket(
 
 def watch_rank(item: dict[str, Any]) -> tuple:
     bucket_rank = {
+        "ENTRY_PROVISIONAL": 7,
+        "VALID_SETUP_WAIT": 6,
+        "ENTRY_TOO_EXTENDED": 5,
         "NEAR_STRICT": 4,
-        "LOW_CONVICTION": 3,
-        "TIMEFRAME_CONFLICT": 2,
-        "POOR_RR": 1,
-        "LIQUIDITY_OR_BORROW_BLOCKED": 0,
+        "BARRIER_BLOCKED_VALID_SETUP": 3,
+        "RR_BLOCKED_VALID_SETUP": 2,
+        "LOW_CONVICTION": 1,
+        "TIMEFRAME_CONFLICT": 1,
+        "POOR_RR": 0,
+        "LIQUIDITY_OR_BORROW_BLOCKED": -1,
     }
     executable_side = (
         item["tradeable"]
@@ -813,7 +835,7 @@ def resolve_day_trigger_policy(
             sweep_triggered,
             "LIQUIDITY_SWEEP_RECLAIM" if sweep_triggered else "NONE",
         )
-    if strategy_version in {IMPULSE_DAY_STRATEGY_VERSION, DAY_STRATEGY_VERSION}:
+    if strategy_version in {IMPULSE_DAY_STRATEGY_VERSION, V075_DAY_STRATEGY_VERSION, DAY_STRATEGY_VERSION}:
         if sweep_triggered:
             return True, "LIQUIDITY_SWEEP_RECLAIM"
         if range_breakout_triggered:
@@ -857,7 +879,16 @@ def build_day_candidate(
         else last.close < rolling_trigger_price and previous_close >= rolling_trigger_price
     )
     breakout_event = None
+    persistent_breakout_context = False
     if strategy_version == DAY_STRATEGY_VERSION:
+        breakout_event = active_structural_breakout_context(analysis.bars_5m, side)
+        persistent_breakout_context = breakout_event is not None
+        range_breakout_triggered = bool(
+            breakout_event is not None and int(breakout_event.get("age_bars", -1)) == 0
+        )
+    elif strategy_version == V075_DAY_STRATEGY_VERSION:
+        # Preserve v0.7.5 historical semantics exactly: breakout bar plus one
+        # immediate follow-through bar while the original boundary holds.
         breakout_event = recent_closed_5m_range_breakout(analysis.bars_5m, side)
         range_breakout_triggered = breakout_event is not None
     elif strategy_version == IMPULSE_DAY_STRATEGY_VERSION:
@@ -924,7 +955,9 @@ def build_day_candidate(
 
     if trigger_route == "LIQUIDITY_SWEEP_RECLAIM":
         setup_type = "LIQUIDITY_SWEEP_RECLAIM"
-    elif trigger_route == "CLOSED_5M_RANGE_BREAKOUT":
+    elif trigger_route == "CLOSED_5M_RANGE_BREAKOUT" or (
+        strategy_version == DAY_STRATEGY_VERSION and persistent_breakout_context
+    ):
         setup_type = "IMPULSE_BREAKOUT"
     elif vwap_reclaim and aligned_1h:
         setup_type = "VWAP_RECLAIM" if side == "long" else "VWAP_REJECTION"
@@ -936,40 +969,69 @@ def build_day_candidate(
         setup_type = "MOMENTUM_WATCH"
 
     recent = analysis.bars_5m[-9:]
+    fresh_breakout_geometry = bool(
+        strategy_version == DAY_STRATEGY_VERSION
+        and persistent_breakout_context
+        and sweep_trigger is None
+    )
+    reference_entry = current if fresh_breakout_geometry else trigger_price
     if side == "long":
         stop = min(
             min(bar.low for bar in recent),
-            trigger_price - 1.2 * analysis.atr_5m,
+            reference_entry - 1.2 * analysis.atr_5m,
         )
-        entry_low = trigger_price
-        entry_high = trigger_price + 0.15 * analysis.atr_5m
+        if fresh_breakout_geometry:
+            entry_low, entry_high = fresh_entry_zone(
+                current_price=current, atr_5m=analysis.atr_5m, side=side
+            )
+        else:
+            entry_low = trigger_price
+            entry_high = trigger_price + 0.15 * analysis.atr_5m
+        structure_invalidation = {
+            "timeframe": "15m",
+            "condition": "loss of higher-low structure",
+            "requires_candle_close": True,
+        }
         invalidation = (
-            f"Closed 5m candle below {round_to_tick(stop, analysis.instrument.tick_size)} "
-            "or loss of the 15m higher-low structure"
+            f"Hard stop {round_to_tick(stop, analysis.instrument.tick_size)} on intrabar touch/cross; "
+            "independent structural invalidation is loss of the 15m higher-low structure"
         )
     else:
         stop = max(
             max(bar.high for bar in recent),
-            trigger_price + 1.2 * analysis.atr_5m,
+            reference_entry + 1.2 * analysis.atr_5m,
         )
-        entry_low = trigger_price - 0.15 * analysis.atr_5m
-        entry_high = trigger_price
+        if fresh_breakout_geometry:
+            entry_low, entry_high = fresh_entry_zone(
+                current_price=current, atr_5m=analysis.atr_5m, side=side
+            )
+        else:
+            entry_low = trigger_price - 0.15 * analysis.atr_5m
+            entry_high = trigger_price
+        structure_invalidation = {
+            "timeframe": "15m",
+            "condition": "reclaim/loss of lower-high structure",
+            "requires_candle_close": True,
+        }
         invalidation = (
-            f"Closed 5m candle above {round_to_tick(stop, analysis.instrument.tick_size)} "
-            "or reclaim of the 15m lower-high structure"
+            f"Hard stop {round_to_tick(stop, analysis.instrument.tick_size)} on intrabar touch/cross; "
+            "independent structural invalidation is reclaim/loss of the 15m lower-high structure"
         )
 
     if sweep_trigger is not None:
         trigger_price = float(sweep_trigger["candidate_entry"])
+        reference_entry = trigger_price
         stop = float(sweep_trigger["candidate_invalidation"])
         entry_low = trigger_price
         entry_high = trigger_price
         distance_atr = abs(trigger_price - current) / max(analysis.atr_5m, 1e-12)
         invalidation = (
-            f"Sweep extreme {round_to_tick(stop, analysis.instrument.tick_size)} is invalidated"
+            f"Hard stop at sweep extreme {round_to_tick(stop, analysis.instrument.tick_size)} "
+            "on intrabar touch/cross"
         )
 
-    entry = trigger_price
+    entry = reference_entry
+    hard_stop = hard_stop_contract(stop_price=stop, side=side)
     risk = abs(entry - stop)
     if risk <= max(analysis.instrument.tick_size * 3.0, entry * 0.0002):
         return None
@@ -1036,30 +1098,68 @@ def build_day_candidate(
     strict_execution = analysis.instrument.tradeable and (
         side == "long" or analysis.shortable
     )
-    strict_scores = (
-        score >= DAY_MIN_SETUP_SCORE
-        and analysis.expansion_score >= DAY_MIN_EXPANSION_SCORE
-        and side_direction >= DAY_MIN_DIRECTION_SCORE
-        and analysis.quality_score >= DAY_MIN_QUALITY_SCORE
-        and expected_rr + 1e-9 >= DAY_MIN_RR
+    technical_setup = technical_setup_valid(
+        setup_score=score,
+        expansion_score=analysis.expansion_score,
+        side_direction_score=side_direction,
+        quality_score=analysis.quality_score,
+        minimum_setup_score=DAY_MIN_SETUP_SCORE,
+        minimum_expansion_score=DAY_MIN_EXPANSION_SCORE,
+        minimum_direction_score=DAY_MIN_DIRECTION_SCORE,
+        minimum_quality_score=DAY_MIN_QUALITY_SCORE,
     )
-    strict = strict_execution and strict_scores
+    rr_valid = bool(expected_rr + 1e-9 >= DAY_MIN_RR and target_path_valid)
 
-    if strict and triggered:
-        state = "TRIGGERED"
-        decision = "TRADE"
-    elif strict and distance_atr <= 0.35:
-        state = "ARMED"
-        decision = "WAIT"
-    elif strict:
-        state = "WATCH"
-        decision = "WAIT"
-    elif score >= 55:
-        state = "WATCH"
-        decision = "NO_TRADE"
+    if strategy_version == DAY_STRATEGY_VERSION:
+        entry_state = classify_entry_state(
+            setup_valid=technical_setup,
+            execution_valid=strict_execution,
+            rr_valid=rr_valid,
+            target_path_valid=target_path_valid,
+            barrier_blocked=barrier_before_tp2 and not target_path_valid,
+            confirmed_trigger=triggered,
+            persistent_breakout_context=persistent_breakout_context,
+            extension_atr=distance_atr,
+            max_provisional_extension_atr=DAY_MAX_PROVISIONAL_EXTENSION_ATR,
+        )
+        setup_state = setup_state_from_validity(technical_setup)
+        strict = strict_execution and technical_setup and rr_valid
+        if entry_state == "ENTRY_CONFIRMED":
+            state = "TRIGGERED"
+            decision = "TRADE"
+        elif entry_state in {"ENTRY_PROVISIONAL", "WAIT_TRIGGER"}:
+            state = "ARMED"
+            decision = "WAIT"
+        elif entry_state in {"ENTRY_TOO_EXTENDED", "BLOCKED_BY_BARRIER", "RR_NOT_READY"}:
+            state = "WATCH"
+            decision = "WAIT"
+        elif entry_state == "EXECUTION_BLOCKED":
+            state = "WATCH" if technical_setup else "NO_TRADE"
+            decision = "NO_TRADE"
+        else:
+            state = "WATCH" if score >= 55 else "NO_TRADE"
+            decision = "NO_TRADE"
     else:
-        state = "NO_TRADE"
-        decision = "NO_TRADE"
+        # Historical v0.7.3-v0.7.5 decision semantics remain unchanged.
+        strict_scores = bool(technical_setup and expected_rr + 1e-9 >= DAY_MIN_RR)
+        strict = strict_execution and strict_scores
+        setup_state = "VALID" if strict else "INVALID"
+        entry_state = "ENTRY_CONFIRMED" if strict and triggered else "WAIT_TRIGGER"
+        if strict and triggered:
+            state = "TRIGGERED"
+            decision = "TRADE"
+        elif strict and distance_atr <= 0.35:
+            state = "ARMED"
+            decision = "WAIT"
+        elif strict:
+            state = "WATCH"
+            decision = "WAIT"
+        elif score >= 55:
+            state = "WATCH"
+            decision = "NO_TRADE"
+        else:
+            state = "NO_TRADE"
+            decision = "NO_TRADE"
 
     liquidity_reasons = list(analysis.instrument.liquidity_reasons)
     if side == "short" and not analysis.shortable:
@@ -1072,13 +1172,24 @@ def build_day_candidate(
     )
     category = "STRICT" if strict else "WATCH_ONLY"
     technical_grade = setup_grade(score)
-    displayed_grade = technical_grade if strict else (
-        "WATCH" if score >= 55 else "NO_TRADE"
+    displayed_grade = (
+        technical_grade
+        if strict or (strategy_version == DAY_STRATEGY_VERSION and technical_setup)
+        else ("WATCH" if score >= 55 else "NO_TRADE")
     )
-    candidate_watch_bucket = (
-        "STRICT"
-        if strict
-        else watch_bucket(
+    if strict:
+        candidate_watch_bucket = "STRICT"
+    elif strategy_version == DAY_STRATEGY_VERSION and technical_setup:
+        candidate_watch_bucket = {
+            "ENTRY_PROVISIONAL": "ENTRY_PROVISIONAL",
+            "WAIT_TRIGGER": "VALID_SETUP_WAIT",
+            "ENTRY_TOO_EXTENDED": "ENTRY_TOO_EXTENDED",
+            "BLOCKED_BY_BARRIER": "BARRIER_BLOCKED_VALID_SETUP",
+            "RR_NOT_READY": "RR_BLOCKED_VALID_SETUP",
+            "EXECUTION_BLOCKED": "LIQUIDITY_OR_BORROW_BLOCKED",
+        }.get(entry_state, "VALID_SETUP_WAIT")
+    else:
+        candidate_watch_bucket = watch_bucket(
             analysis.instrument.tradeable,
             analysis.shortable,
             side,
@@ -1086,8 +1197,9 @@ def build_day_candidate(
             expected_rr,
             score,
         )
-    )
-    if category == "WATCH_ONLY":
+    if category == "WATCH_ONLY" and not (
+        strategy_version == DAY_STRATEGY_VERSION and technical_setup
+    ):
         decision = "NO_TRADE"
 
     if trigger_route == "LIQUIDITY_SWEEP_RECLAIM":
@@ -1101,32 +1213,59 @@ def build_day_candidate(
             "with non-opposing closed 15m structure"
         )
     elif trigger_route == "CLOSED_5M_RANGE_BREAKOUT":
+        if strategy_version == DAY_STRATEGY_VERSION:
+            trigger_condition = (
+                f"Closed 5m origin breakout above the prior 12-bar high near "
+                f"{round_to_tick(trigger_price, analysis.instrument.tick_size)}; setup context persists "
+                "without a fixed 5m-bar TTL while every later closed bar holds the original boundary"
+                if side == "long"
+                else f"Closed 5m origin breakdown below the prior 12-bar low near "
+                f"{round_to_tick(trigger_price, analysis.instrument.tick_size)}; setup context persists "
+                "without a fixed 5m-bar TTL while every later closed bar holds the original boundary"
+            )
+        else:
+            trigger_condition = (
+                f"Closed 5m breakout above the anchored prior 12-bar high near "
+                f"{round_to_tick(trigger_price, analysis.instrument.tick_size)}; remains active "
+                f"through the immediate next closed 5m bar while the boundary holds"
+                if side == "long"
+                else f"Closed 5m breakdown below the anchored prior 12-bar low near "
+                f"{round_to_tick(trigger_price, analysis.instrument.tick_size)}; remains active "
+                f"through the immediate next closed 5m bar while the boundary holds"
+            )
+    elif strategy_version == DAY_STRATEGY_VERSION and persistent_breakout_context:
         trigger_condition = (
-            f"Closed 5m breakout above the anchored prior 12-bar high near "
-            f"{round_to_tick(trigger_price, analysis.instrument.tick_size)}; remains active "
-            f"through the immediate next closed 5m bar while the boundary holds"
-            if side == "long"
-            else f"Closed 5m breakdown below the anchored prior 12-bar low near "
-            f"{round_to_tick(trigger_price, analysis.instrument.tick_size)}; remains active "
-            f"through the immediate next closed 5m bar while the boundary holds"
+            f"Original 5m breakout boundary {round_to_tick(trigger_price, analysis.instrument.tick_size)} "
+            "remains structurally held; fresh entry geometry is recalculated now. "
+            "Intrabar/provisional acceptance is research-only and does not require waiting for a new full 5m close."
         )
     else:
-        trigger_condition = "No closed 5m live trigger confirmed"
+        trigger_condition = "No live entry trigger confirmed"
 
     derivatives = analysis.derivatives or {}
     missing = list(analysis.missing_data)
     if not derivatives:
         missing.append("Coinalyze OI/funding context unavailable for this symbol")
 
-    weakest = (
-        liquidity_reasons[0]
-        if liquidity_reasons
-        else (
-            "Trigger not confirmed"
-            if not triggered
-            else "The setup has not been prospectively backtested"
+    if strategy_version == DAY_STRATEGY_VERSION and technical_setup:
+        weakest = {
+            "BLOCKED_BY_BARRIER": "Valid setup, but current entry path is blocked by structural barrier",
+            "RR_NOT_READY": "Valid setup, but fresh current entry does not meet net-R requirements",
+            "ENTRY_TOO_EXTENDED": "Valid setup, but current price is too extended; wait for retest/pullback",
+            "ENTRY_PROVISIONAL": "Valid setup with provisional entry only; intrabar acceptance is not yet production-promoted",
+            "WAIT_TRIGGER": "Valid setup; waiting for a usable entry trigger",
+            "EXECUTION_BLOCKED": liquidity_reasons[0] if liquidity_reasons else "Execution side is not valid on Bybit EU",
+        }.get(entry_state, "The setup has not been prospectively validated for this entry state")
+    else:
+        weakest = (
+            liquidity_reasons[0]
+            if liquidity_reasons
+            else (
+                "Trigger not confirmed"
+                if not triggered
+                else "The setup has not been prospectively backtested"
+            )
         )
-    )
 
     why_now = [
         f"15m structure: {analysis.structure_15m}",
@@ -1136,13 +1275,23 @@ def build_day_candidate(
     ]
     if trigger_route == "LIQUIDITY_SWEEP_RECLAIM":
         why_now.append("Latest closed 5m bar completed the sweep/reclaim/structure confirmation sequence")
-    elif trigger_route == "CLOSED_5M_RANGE_BREAKOUT":
+    elif trigger_route == "CLOSED_5M_RANGE_BREAKOUT" or (
+        strategy_version == DAY_STRATEGY_VERSION and persistent_breakout_context
+    ):
         age_bars = int((breakout_event or {}).get("age_bars", 0))
-        why_now.append(
-            "Latest closed 5m bar crossed the prior 12-bar range boundary"
-            if age_bars == 0
-            else "Prior breakout remains executable on the immediate next closed 5m bar; original boundary is still held"
-        )
+        if strategy_version == DAY_STRATEGY_VERSION:
+            why_now.append(
+                "Latest closed 5m bar created the breakout origin"
+                if age_bars == 0
+                else f"Breakout setup remains structurally valid {age_bars} closed 5m bars later; no fixed TTL applies"
+            )
+            why_now.append("Entry/stop/targets/RR are recalculated from the current reference price, not the stale breakout origin")
+        else:
+            why_now.append(
+                "Latest closed 5m bar crossed the prior 12-bar range boundary"
+                if age_bars == 0
+                else "Prior breakout remains executable on the immediate next closed 5m bar; original boundary is still held"
+            )
     if conflict_4h:
         why_now.append(f"4H structure conflicts with the side but is context-only in v{strategy_version}")
     if vwap_reclaim:
@@ -1162,6 +1311,17 @@ def build_day_candidate(
         "watch_bucket": candidate_watch_bucket,
         "decision": decision,
         "setup_type": setup_type,
+        "setup_state": setup_state,
+        "entry_state": entry_state,
+        "execution_valid": strict_execution,
+        "rr_valid": rr_valid,
+        "reference_entry": round_to_tick(entry, analysis.instrument.tick_size),
+        "breakout_context": breakout_event if strategy_version == DAY_STRATEGY_VERSION else None,
+        "hard_stop": {
+            **hard_stop,
+            "price": round_to_tick(float(hard_stop["price"]), analysis.instrument.tick_size),
+        },
+        "structure_invalidation": structure_invalidation,
         "last_price": round_to_tick(current, analysis.instrument.tick_size),
         "tradeable": analysis.instrument.tradeable,
         "shortable": analysis.shortable,
@@ -1184,7 +1344,11 @@ def build_day_candidate(
             "timeframe": "5m",
             "condition": trigger_condition,
             "price": round_to_tick(trigger_price, analysis.instrument.tick_size),
-            "requires_close": True,
+            "requires_close": not (
+                strategy_version == DAY_STRATEGY_VERSION
+                and persistent_breakout_context
+                and not triggered
+            ),
             "volume_confirmation": (
                 f">={DAY_TRIGGER_VOLUME_RATIO:.1f}x prior 20-bar mean volume on confirmation"
                 if trigger_route == "LIQUIDITY_SWEEP_RECLAIM"
@@ -1193,12 +1357,20 @@ def build_day_candidate(
                 else "Not triggered"
             ),
             "triggered": triggered,
-            "route": trigger_route,
+            "route": (
+                trigger_route
+                if trigger_route != "NONE"
+                else "STRUCTURAL_BREAKOUT_CONTEXT"
+                if strategy_version == DAY_STRATEGY_VERSION and persistent_breakout_context
+                else "NONE"
+            ),
             "model": (
                 "LIQUIDITY_SWEEP_RECLAIM_5M_STRUCTURE_15M_CONFIRMATION"
                 if trigger_route == "LIQUIDITY_SWEEP_RECLAIM"
                 else "CLOSED_5M_12_BAR_RANGE_BREAKOUT"
                 if trigger_route == "CLOSED_5M_RANGE_BREAKOUT"
+                else "STRUCTURE_PERSISTENT_5M_12_BAR_RANGE_BREAKOUT"
+                if strategy_version == DAY_STRATEGY_VERSION and persistent_breakout_context
                 else "NONE"
             ),
             "sweep_confirmation": sweep_trigger,
@@ -1210,7 +1382,9 @@ def build_day_candidate(
             ),
             "age_bars": (None if breakout_event is None else int(breakout_event["age_bars"])),
             "validity_bars": (
-                None if breakout_event is None else int(breakout_event["validity_bars"])
+                None
+                if breakout_event is None or breakout_event.get("validity_bars") is None
+                else int(breakout_event["validity_bars"])
             ),
             "boundary_held": (
                 None if breakout_event is None else bool(breakout_event["boundary_held"])
@@ -1246,6 +1420,13 @@ def build_day_candidate(
             "atr_15m": round_to_tick(analysis.atr_15m, analysis.instrument.tick_size),
             "atr_ratio_15m": round(analysis.atr_ratio_15m, 3),
             "distance_to_trigger_atr_5m": round(distance_atr, 3),
+            "setup_valid": technical_setup,
+            "entry_state": entry_state,
+            "reference_entry": round_to_tick(entry, analysis.instrument.tick_size),
+            "breakout_origin_price": round_to_tick(trigger_price, analysis.instrument.tick_size),
+            "entry_geometry_mode": (
+                "FRESH_CURRENT_REFERENCE" if fresh_breakout_geometry else "ORIGIN_TRIGGER_REFERENCE"
+            ),
             "sweep_confirmation": sweep_trigger,
             "four_hour_conflict_context_only": conflict_4h,
             "nearest_structural_barrier": (
@@ -1273,10 +1454,10 @@ def build_day_candidate(
         "derivatives": derivatives,
         "why_now": why_now,
         "bullish_scenario": (
-            "Closed 5m breakout/reclaim holds and 15m structure continues higher."
+            "Bullish setup structure remains valid; use fresh entry geometry and do not chase an extended move."
         ),
         "bearish_scenario": (
-            "Closed 5m breakdown/rejection holds and 15m structure continues lower."
+            "Bearish setup structure remains valid; use fresh entry geometry and do not chase an extended move."
         ),
         "weakest_point": weakest,
         "risks": [
@@ -1366,7 +1547,7 @@ def build_day_regime(
             "Coinalyze derivatives": coinalyze_quality,
         },
         "notes": [
-            "Day-trade v0.7.4 uses 4H/1H as context; live trigger routes are a closed 5m 12-bar range breakout or the closed 5m sweep/reclaim/structure sequence; 15m confirmation applies to the sweep route.",
+            "Day-trade v0.7.6 separates setup validity from entry readiness: breakout setup context has no fixed 5m-bar TTL while its boundary remains structurally held; closed 5m remains an authoritative confirmation route, not a universal prerequisite for setup existence.",
             "4H conflict is context-only and does not veto strict eligibility or execution.",
             "Coinalyze data is aggregated and not Bybit EU-specific unless explicitly marked.",
         ],
@@ -1745,7 +1926,7 @@ async def run() -> None:
                 "holding_time": "30 minutes to 8 hours",
                 "context_timeframes": ["4H", "1H"],
                 "setup_timeframe": "15m",
-                "trigger_timeframe": "5m closed 12-bar range breakout OR sweep/reclaim/structure confirmation",
+                "trigger_timeframe": "v0.7.6 setup context persists structurally; executable confirmation remains closed-5m breakout/sweep while intrabar provisional acceptance is research-only",
                 "confirmation_timeframe": "15m closed non-opposing structure",
                 "four_hour_role": "CONTEXT_ONLY",
                 "strategy_version": DAY_STRATEGY_VERSION,
@@ -1755,11 +1936,13 @@ async def run() -> None:
                 "max_spread_bps": DAY_MAX_SPREAD_BPS,
                 "rr_denominator": "PRE_COST_STOP_DISTANCE",
                 "target_definition": "NET_R_AFTER_ROUND_TRIP_COST",
-                "barrier_model": "CONFIRMED_15M_PIVOT_EXCLUDING_TRIGGER_WINDOW",
+                "barrier_model": "CONFIRMED_15M_PIVOT_EXCLUDING_TRIGGER_WINDOW_RECOMPUTED_FROM_FRESH_ENTRY",
+                "hard_stop_activation": "INTRABAR_TOUCH_OR_CROSS_NO_5M_CLOSE_REQUIRED",
+                "setup_entry_state_separated": True,
             },
             "exclusions": exclusions[:100],
             "notes": [
-                "Prospective journal records are version-separated; v0.7.4 creates no historical backfill into earlier strategy cohorts.",
+                "Prospective journal records are version-separated; v0.7.6 creates no historical backfill into v0.7.3-v0.7.5 cohorts.",
                 "Fast coverage scans all eligible USDC pairs on 5m/15m; 1H/4H deep context is limited to promoted symbols.",
                 "WATCH_ONLY items are not entries.",
             ],

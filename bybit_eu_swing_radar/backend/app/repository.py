@@ -43,7 +43,7 @@ from app.models import (
     WatchlistResponse,
 )
 
-CURRENT_DAY_STRATEGY_VERSION = "0.7.5"
+CURRENT_DAY_STRATEGY_VERSION = "0.7.6"
 
 
 class RadarRepository:
@@ -359,9 +359,14 @@ async def _get_day_trade_scan(
 def _day_watch_rank(candidate: DayTradeCandidate) -> tuple:
     metrics = candidate.metrics or {}
     bucket_rank = {
-        "NEAR_STRICT": 4,
-        "LOW_CONVICTION": 3,
-        "POOR_RR": 2,
+        "ENTRY_PROVISIONAL": 8,
+        "VALID_SETUP_WAIT": 7,
+        "ENTRY_TOO_EXTENDED": 6,
+        "NEAR_STRICT": 5,
+        "BARRIER_BLOCKED_VALID_SETUP": 4,
+        "RR_BLOCKED_VALID_SETUP": 3,
+        "LOW_CONVICTION": 2,
+        "POOR_RR": 1,
         "TIMEFRAME_CONFLICT": 1,
         "LIQUIDITY_OR_BORROW_BLOCKED": 0,
     }
@@ -369,7 +374,7 @@ def _day_watch_rank(candidate: DayTradeCandidate) -> tuple:
     triggered = bool((candidate.trigger or {}).get("triggered"))
     execution_ok = candidate.tradeable and (
         candidate.side == "long" or candidate.shortable
-    ) and not candidate.timeframe_conflict
+    )
     return (
         1 if execution_ok else 0,
         1 if target_path_valid else 0,
@@ -386,11 +391,19 @@ def _day_watch_rank(candidate: DayTradeCandidate) -> tuple:
 def _rankable_day_watch(candidate: DayTradeCandidate) -> bool:
     """Top-candidate watchlist is intentionally sparse; never fill weak slots."""
     metrics = candidate.metrics or {}
+    setup_valid = bool(candidate.setup_state == "VALID" or metrics.get("setup_valid", False))
+    if setup_valid:
+        return (
+            candidate.category == "WATCH_ONLY"
+            and candidate.tradeable
+            and (candidate.side == "long" or candidate.shortable)
+            and candidate.side_direction_score > 0
+            and candidate.setup_score >= 55.0
+        )
     return (
         candidate.category == "WATCH_ONLY"
         and candidate.tradeable
         and (candidate.side == "long" or candidate.shortable)
-        and not candidate.timeframe_conflict
         and candidate.side_direction_score > 0
         and bool(metrics.get("target_path_valid", False))
         and candidate.expected_rr >= 1.0
@@ -465,7 +478,7 @@ async def _get_day_trade_top_candidates(
         notes=scan.notes + [
             "Do not fill missing strict or watch slots with weaker fallback items.",
             "Top watchlists are cross-side deduplicated: one symbol can appear on only one dominant side.",
-            "Top watchlists exclude timeframe-conflict, blocked, invalid-target-path and expected-RR<1.0 items.",
+            "v0.7.6 keeps technically VALID setups visible even when current entry RR/barrier is blocked; 4H timeframe conflict is context-only and cannot hide a day setup.",
             (
                 "Cross-side watch variants removed: " + ", ".join(dedup_removed)
                 if dedup_removed
