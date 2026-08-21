@@ -286,12 +286,11 @@ async def status_payload() -> dict[str, Any]:
             SELECT provider_code,primary_event_class,published_at,first_seen_at,last_seen_at,
                    headline,source_url,payload
             FROM research_policy_catalyst_events
-            WHERE spec_version=$1 AND first_seen_at >= $2 - INTERVAL '24 hours'
+            WHERE spec_version=$1 AND first_seen_at >= NOW() - INTERVAL '24 hours'
             ORDER BY first_seen_at DESC
             LIMIT 25
             """,
             SPEC_VERSION,
-            now,
         )
         event_count = await connection.fetchval(
             "SELECT COUNT(*)::int FROM research_policy_catalyst_events WHERE spec_version=$1",
