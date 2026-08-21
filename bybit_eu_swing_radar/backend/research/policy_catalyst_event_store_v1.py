@@ -84,10 +84,7 @@ def normalize_policy_event(
 
     published_at = _utc(raw.get("source_published_at") or raw.get("published_at"), "source_published_at")
     first_seen = _utc(observed_at, "observed_at")
-    if first_seen < published_at:
-        # Provider clocks can be imprecise, but a collector timestamp predating the
-        # published timestamp would make event-age semantics ambiguous. Fail closed.
-        raise ValueError("first_seen_at cannot precede source_published_at")
+    source_clock_ahead_seconds = max(0.0, (published_at - first_seen).total_seconds())
 
     requested_class = raw.get("event_class")
     allowed_classes = set(classified.get("event_classes") or [])
@@ -105,6 +102,7 @@ def normalize_policy_event(
         "canonical_url": url,
         "source_published_at": published_at.isoformat(),
         "first_seen_at": first_seen.isoformat(),
+        "source_clock_ahead_seconds": source_clock_ahead_seconds,
         "collector_clock": "LOCAL_UTC",
     }
     return {
