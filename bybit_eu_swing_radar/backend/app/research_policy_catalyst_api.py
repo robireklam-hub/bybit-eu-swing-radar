@@ -26,8 +26,7 @@ from research.policy_catalyst_transport_v1 import (
     MAX_DETAIL_RESPONSE_BYTES,
     MAX_SOURCE_RESPONSE_BYTES,
     SPEC_VERSION as TRANSPORT_SPEC_VERSION,
-    bounded_response_text,
-    validate_response_origin,
+    fetch_bounded_official_text,
 )
 
 MAX_HTML_DETAILS_PER_SOURCE = 12
@@ -113,10 +112,12 @@ async def _fetch_source(
     fetch_url = str(source["fetch_url"])
     parser_mode = str(source["parser_mode"])
     started = datetime.now(timezone.utc)
-    response = await client.get(fetch_url)
-    response.raise_for_status()
-    validate_response_origin(response, source=source, requested_url=fetch_url)
-    response_text = bounded_response_text(response, max_bytes=MAX_SOURCE_RESPONSE_BYTES)
+    response_text, http_status, final_url, response_bytes = await fetch_bounded_official_text(
+        client,
+        source=source,
+        requested_url=fetch_url,
+        max_bytes=MAX_SOURCE_RESPONSE_BYTES,
+    )
     events: list[dict[str, Any]] = []
     detail_errors = 0
 
@@ -136,10 +137,12 @@ async def _fetch_source(
         )
         for row in rows[:MAX_HTML_DETAILS_PER_SOURCE]:
             try:
-                detail = await client.get(row["url"])
-                detail.raise_for_status()
-                validate_response_origin(detail, source=source, requested_url=row["url"])
-                detail_text = bounded_response_text(detail, max_bytes=MAX_DETAIL_RESPONSE_BYTES)
+                detail_text, _, _, _ = await fetch_bounded_official_text(
+                    client,
+                    source=source,
+                    requested_url=row["url"],
+                    max_bytes=MAX_DETAIL_RESPONSE_BYTES,
+                )
                 published = extract_published_at_from_html(detail_text)
                 normalized = normalize_event(
                     provider_code=provider_code,
@@ -161,16 +164,19 @@ async def _fetch_source(
         "provider_code": provider_code,
         "authority_tier": source["authority_tier"],
         "fetch_url": fetch_url,
+        "final_url": final_url,
         "parser_mode": parser_mode,
         "status": "OK",
-        "http_status": response.status_code,
+        "http_status": http_status,
         "event_count": len(events),
         "detail_errors": detail_errors,
         "captured_at": captured_at.isoformat(),
         "latency_seconds": round(elapsed, 3),
         "transport_spec_version": TRANSPORT_SPEC_VERSION,
         "official_response_origin_verified": True,
+        "streaming_byte_cap_enforced": True,
         "response_byte_bound": MAX_SOURCE_RESPONSE_BYTES,
+        "response_bytes": response_bytes,
     }
 
 
@@ -203,6 +209,7 @@ async def build_current_snapshot() -> dict[str, Any]:
                         "event_count": 0,
                         "transport_spec_version": TRANSPORT_SPEC_VERSION,
                         "official_response_origin_verified": False,
+                        "streaming_byte_cap_enforced": True,
                     }
                 )
     snapshot = build_snapshot(
