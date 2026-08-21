@@ -3,8 +3,9 @@
 
 Research only. Creates one genuine label-blind forward capture through the existing
 collector/persistence path, then fails closed unless the durable trial lifecycle is
-at PIT_AUDIT_RECORDED or the prospectively evidenced DATA_QUALITY_GATE_RECORDED.
-It never opens outcomes, changes live thresholds, or authorizes execution.
+at PIT_AUDIT_RECORDED, DATA_QUALITY_GATE_RECORDED, or the prospectively evidenced
+LINEAGE_RECORDED state. It never opens outcomes, changes live thresholds, or
+authorizes execution.
 """
 from __future__ import annotations
 
@@ -21,14 +22,17 @@ if str(BACKEND_ROOT) not in sys.path:
 from research.swing_liquidity_shadow import collect_snapshot, persist_snapshot
 
 EXPECTED_STUDY = "swing-liquidity-validation-v1"
-ALLOWED_EVENT_TYPES = frozenset(("PIT_AUDIT_RECORDED", "DATA_QUALITY_GATE_RECORDED"))
+ALLOWED_EVENT_TYPES = frozenset(("PIT_AUDIT_RECORDED", "DATA_QUALITY_GATE_RECORDED", "LINEAGE_RECORDED"))
 ALLOWED_REASONS = frozenset(
     (
         "prospective_pit_audit",
         "insufficient_consecutive_post_pit_captures",
         "data_quality_gate_not_satisfied",
         "prospective_data_quality_gate",
-        "lifecycle_already_beyond_data_quality_adoption",
+        "waiting_for_fresh_post_data_quality_lineage_capture",
+        "lineage_gate_not_satisfied",
+        "prospective_lineage_gate",
+        "lifecycle_already_beyond_lineage_adoption",
     )
 )
 
@@ -55,20 +59,17 @@ def validate_lifecycle_persistence(result: dict[str, Any]) -> list[str]:
     if not isinstance(lifecycle, dict):
         errors.append("missing_lifecycle_adoption")
         return errors
-    if lifecycle.get("attempted") is not True:
-        errors.append("lifecycle_not_attempted")
-    if lifecycle.get("prospective_adoption") is not True:
-        errors.append("prospective_adoption_not_true")
-    if lifecycle.get("historical_backfill") is not False:
-        errors.append("historical_backfill_not_false")
-    if lifecycle.get("research_only") is not True:
-        errors.append("lifecycle_research_only_not_true")
-    if lifecycle.get("live_strategy_mutated") is not False:
-        errors.append("lifecycle_live_strategy_mutated_not_false")
-    if lifecycle.get("production_eligibility_mutated") is not False:
-        errors.append("production_eligibility_mutated_not_false")
-    if lifecycle.get("execution_authorized") is not False:
-        errors.append("execution_authorized_not_false")
+    for field, expected in (
+        ("attempted", True),
+        ("prospective_adoption", True),
+        ("historical_backfill", False),
+        ("research_only", True),
+        ("live_strategy_mutated", False),
+        ("production_eligibility_mutated", False),
+        ("execution_authorized", False),
+    ):
+        if lifecycle.get(field) is not expected:
+            errors.append(f"lifecycle_{field}_invalid")
 
     event_type = lifecycle.get("event_type")
     reason = lifecycle.get("reason")
@@ -96,9 +97,29 @@ def validate_lifecycle_persistence(result: dict[str, Any]) -> list[str]:
             errors.append("data_quality_evidence_not_ready")
         elif not _valid_sha256(quality.get("evidence_window_fingerprint")):
             errors.append("invalid_data_quality_evidence_window_fingerprint")
-    elif reason == "lifecycle_already_beyond_data_quality_adoption":
+    elif reason == "waiting_for_fresh_post_data_quality_lineage_capture":
         if event_type != "DATA_QUALITY_GATE_RECORDED" or lifecycle.get("inserted") is not False:
-            errors.append("recorded_data_quality_state_invalid")
+            errors.append("waiting_lineage_state_invalid")
+    elif reason == "lineage_gate_not_satisfied":
+        if event_type != "DATA_QUALITY_GATE_RECORDED" or lifecycle.get("inserted") is not False:
+            errors.append("failed_lineage_state_invalid")
+        lineage = lifecycle.get("lineage")
+        if not isinstance(lineage, dict) or lineage.get("ready") is not False:
+            errors.append("failed_lineage_evidence_invalid")
+    elif reason == "prospective_lineage_gate":
+        if event_type != "LINEAGE_RECORDED" or lifecycle.get("inserted") is not True:
+            errors.append("lineage_transition_invalid")
+        lineage = lifecycle.get("lineage")
+        if not isinstance(lineage, dict) or lineage.get("ready") is not True:
+            errors.append("lineage_evidence_not_ready")
+        else:
+            if not _valid_sha256(lineage.get("evidence_fingerprint")):
+                errors.append("invalid_lineage_evidence_fingerprint")
+            if not _valid_sha256(lineage.get("lineage_fingerprint")):
+                errors.append("invalid_lineage_fingerprint")
+    elif reason == "lifecycle_already_beyond_lineage_adoption":
+        if event_type != "LINEAGE_RECORDED" or lifecycle.get("inserted") is not False:
+            errors.append("recorded_lineage_state_invalid")
 
     return errors
 
@@ -128,7 +149,7 @@ def run_check(
         for error in errors:
             print(f"FAIL {error}")
         return 1
-    print("SWING LIQUIDITY PROSPECTIVE LIFECYCLE VERIFIED THROUGH DATA-QUALITY GATE.")
+    print("SWING LIQUIDITY PROSPECTIVE LIFECYCLE VERIFIED THROUGH LINEAGE GATE.")
     return 0
 
 
