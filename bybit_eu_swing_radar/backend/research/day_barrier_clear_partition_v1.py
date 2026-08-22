@@ -19,6 +19,7 @@ MIN_NONCLEAR_DEVELOPMENT = 15
 MIN_LONG_DEVELOPMENT = 10
 MIN_SHORT_DEVELOPMENT = 10
 TERMINAL_STATUSES = {"cleared", "invalidated_boundary", "invalidated_structure"}
+BOUNDARY_ORDER = ["resolved_at", "event_id"]
 FORBIDDEN_OUTCOME_KEYS = {
     "outcome", "label", "forward_return", "future_return", "mfe", "mae", "pnl",
     "profit", "win", "loss", "tp_hit", "stop_hit", "net_r", "realized_r",
@@ -76,11 +77,19 @@ def _fingerprint(rows: Sequence[Mapping[str, str]]) -> str:
     return sha256(encoded).hexdigest()
 
 
+def _boundary(row: Mapping[str, str] | None) -> dict[str, str] | None:
+    if row is None:
+        return None
+    return {"resolved_at": row["resolved_at"], "event_id": row["event_id"]}
+
+
 def freeze_partition(events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Freeze first-60 DEVELOPMENT and next-40 untouched VALIDATION identities.
 
     Ordering is deterministic by (resolved_at, event_id). The DEVELOPMENT cohort
     never expands after 60, preventing optional stopping based on later results.
+    The exact composite boundary is published so later validation selection cannot
+    silently degrade to timestamp-only ordering when terminal events share a time.
     """
     canonical = [_canonical_event(row) for row in events]
     ids = [row["event_id"] for row in canonical]
@@ -122,10 +131,12 @@ def freeze_partition(events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "development_target": DEVELOPMENT_TARGET,
         "validation_target": VALIDATION_TARGET,
         "terminal_event_count": len(canonical),
+        "partition_boundary_order": list(BOUNDARY_ORDER),
         "development_partition_ready": development_ready,
         "development_analysis_eligible": balance_ready,
         "development_event_ids": [row["event_id"] for row in development],
         "development_partition_fingerprint": _fingerprint(development) if development_ready else None,
+        "development_boundary": _boundary(development[-1] if development_ready else None),
         "development_balance": {
             "cleared": clear_count,
             "noncleared": nonclear_count,
@@ -139,6 +150,7 @@ def freeze_partition(events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "validation_partition_ready": len(validation) == VALIDATION_TARGET,
         "validation_event_ids": [row["event_id"] for row in validation],
         "validation_partition_fingerprint": _fingerprint(validation) if len(validation) == VALIDATION_TARGET else None,
+        "validation_boundary": _boundary(validation[-1] if len(validation) == VALIDATION_TARGET else None),
         "reasons": reasons,
         "outcome_visible": False,
         "threshold_search_allowed": False,
