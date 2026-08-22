@@ -606,10 +606,11 @@ paths:
   /v1/day-trade/flow/{symbol}:
     get:
       operationId: getDayTradeFlowContext
-      summary: Return context-only OI/funding flow data for one cached day-trade symbol.
+      summary: Return context-only OI/funding fallback data for one cached day-trade symbol.
       description: Bybit global linear derivatives plus already-cached Coinalyze secondary
-        context. This endpoint does not change v0.7.6 setup/entry gates or prove Bybit
-        EU execution conditions.
+        context. For a single-symbol day analysis, use this after getDayTradeSetup when
+        the setup derivatives object is empty, incomplete or degraded. This endpoint
+        does not change v0.7.6 setup/entry gates or prove Bybit EU execution conditions.
       parameters:
       - in: path
         name: symbol
