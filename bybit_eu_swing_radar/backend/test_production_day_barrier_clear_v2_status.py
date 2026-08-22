@@ -64,6 +64,39 @@ def test_v2_production_validator_rejects_partial_development_freeze():
     assert "partial DEVELOPMENT freeze detected" in evidence["errors"]
 
 
+def test_v2_production_validator_rejects_false_closed_development_readiness():
+    evidence = validate_v2_status(
+        _payload(
+            eligible_terminal_event_count=61,
+            eligible_long_count=31,
+            eligible_short_count=30,
+            development_ready=False,
+        ),
+        expected_sha="a" * 40,
+    )
+    assert evidence["ok"] is False
+    assert "DEVELOPMENT readiness does not match eligible side quotas" in evidence["errors"]
+
+
+def test_v2_production_validator_rejects_false_closed_validation_readiness():
+    evidence = validate_v2_status(
+        _payload(
+            eligible_terminal_event_count=100,
+            eligible_long_count=50,
+            eligible_short_count=50,
+            development_ready=True,
+            development_event_count=60,
+            development_long_count=30,
+            development_short_count=30,
+            development_fingerprint="dev-fingerprint",
+            validation_ready=False,
+        ),
+        expected_sha="a" * 40,
+    )
+    assert evidence["ok"] is False
+    assert "VALIDATION readiness does not match eligible side quotas" in evidence["errors"]
+
+
 def test_v2_production_validator_rejects_source_sha_drift_and_parent_reuse_drift():
     evidence = validate_v2_status(
         _payload(source_commit_sha="b" * 40, pre_activation_parent_reuse_allowed=True),

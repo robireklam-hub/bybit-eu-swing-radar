@@ -60,6 +60,9 @@ def validate_v2_status(payload: dict[str, Any], *, expected_sha: str | None = No
         errors.append("eligible side partition mismatch")
 
     development_ready = v2.get("development_ready") is True
+    expected_development_ready = long_count >= 30 and short_count >= 30
+    if development_ready != expected_development_ready:
+        errors.append("DEVELOPMENT readiness does not match eligible side quotas")
     development_count = int(v2.get("development_event_count", 0) or 0)
     if development_ready:
         if development_count != 60:
@@ -75,6 +78,9 @@ def validate_v2_status(payload: dict[str, Any], *, expected_sha: str | None = No
             errors.append("partial DEVELOPMENT freeze detected")
 
     validation_ready = v2.get("validation_ready") is True
+    expected_validation_ready = long_count >= 50 and short_count >= 50
+    if validation_ready != expected_validation_ready:
+        errors.append("VALIDATION readiness does not match eligible side quotas")
     validation_count = int(v2.get("validation_event_count", 0) or 0)
     if validation_ready:
         if not development_ready:
