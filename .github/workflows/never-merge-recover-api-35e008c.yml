@@ -1,0 +1,84 @@
+name: NEVER MERGE recover+verify production 35e008c
+
+on:
+  push:
+    branches: ["ops/recover-api-35e008c"]
+  pull_request:
+    paths: [".github/workflows/never-merge-recover-api-35e008c.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: never-merge-recover-verify-production-35e008c
+  cancel-in-progress: true
+
+jobs:
+  recover-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      EXPECTED_SHA: 35e008ca77b3a5b22c01088c81210022c77d5ea5
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      RAILWAY_ENVIRONMENT_ID: 2be04d3c-82b3-487d-930c-a4fbc7d483d8
+      API_SERVICE_ID: 6b92a19d-a178-4eab-9b8a-9fed1855319b
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 35e008ca77b3a5b22c01088c81210022c77d5ea5
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Recover exact API deployment if needed
+        run: |
+          python -u - <<'PY'
+          import json, os, time
+          from urllib.request import Request, urlopen
+          from urllib.error import HTTPError, URLError
+          base=os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/'); key=os.environ['PRODUCTION_RADAR_API_KEY']; expected=os.environ['EXPECTED_SHA']
+          endpoint='https://backboard.railway.com/graphql/v2'; token=os.environ['RAILWAY_API_TOKEN']; service=os.environ['API_SERVICE_ID']; env=os.environ['RAILWAY_ENVIRONMENT_ID']
+          def sha():
+              req=Request(base+'/version',headers={'Accept':'application/json','X-Radar-Key':key})
+              with urlopen(req,timeout=15) as r: return str((json.load(r) or {}).get('commit_sha') or '')
+          try: actual=sha()
+          except Exception as exc: actual=''; print('PRECHECK unavailable',type(exc).__name__,flush=True)
+          else: print('PRECHECK_API_SHA',actual,flush=True)
+          if actual != expected:
+              def gql(q,v):
+                  req=Request(endpoint,data=json.dumps({'query':q,'variables':v}).encode(),headers={'Authorization':'Bearer '+token,'Content-Type':'application/json','Accept':'application/json','User-Agent':'exact-main-api-recovery/4'})
+                  with urlopen(req,timeout=30) as r: p=json.load(r)
+                  if p.get('errors'): raise RuntimeError(json.dumps(p['errors']))
+                  return p.get('data') or {}
+              q='''mutation deploy($serviceId:String!,$environmentId:String!,$commitSha:String!){serviceInstanceDeployV2(serviceId:$serviceId,environmentId:$environmentId,commitSha:$commitSha)}'''
+              did=str(gql(q,{'serviceId':service,'environmentId':env,'commitSha':expected}).get('serviceInstanceDeployV2') or '')
+              if not did: raise SystemExit('Railway returned no deployment id')
+              print('API_RECOVERY_DEPLOYMENT_ID='+did,flush=True)
+              status='UNKNOWN'; query='query deployment($id:String!){deployment(id:$id){id status}}'
+              for i in range(100):
+                  status=str((gql(query,{'id':did}).get('deployment') or {}).get('status') or 'UNKNOWN'); print('API_RECOVERY_STATUS',i+1,status,flush=True)
+                  if status in {'SUCCESS','FAILED','CRASHED','REMOVED','SKIPPED'}: break
+                  time.sleep(10)
+              if status!='SUCCESS': raise SystemExit('API recovery failed: '+status)
+          for i in range(60):
+              try: actual=sha()
+              except Exception: actual=''
+              print('API_SHA',i+1,actual,flush=True)
+              if actual==expected: break
+              time.sleep(10)
+          else: raise SystemExit('exact API SHA not served')
+          PY
+      - name: Verify swing candidate Coinalyze semantics
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_coinalyze_smoke.py
+      - name: Verify swing liquidity event construction
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_event_smoke.py
+      - name: Verify swing liquidity maturity status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_maturity_status.py
+      - name: Verify barrier-clear frozen partition status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_day_barrier_clear_status.py
