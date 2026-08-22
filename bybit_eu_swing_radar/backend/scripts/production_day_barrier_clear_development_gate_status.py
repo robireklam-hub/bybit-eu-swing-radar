@@ -18,7 +18,8 @@ DEVELOPMENT_TARGET = 60
 
 
 def validate_development_gate_observer(payload: dict[str, Any]) -> dict[str, Any]:
-    errors: list[str] = []
+    verification_errors: list[str] = []
+    opening_blockers: list[str] = []
     partition = payload.get("partition") or {}
     cumulative = payload.get("cumulative") or {}
     terminal_count = sum(
@@ -41,10 +42,10 @@ def validate_development_gate_observer(payload: dict[str, Any]) -> dict[str, Any
     }
     for key, value in expected.items():
         if partition.get(key) != value:
-            errors.append(f"partition.{key} mismatch")
+            verification_errors.append(f"partition.{key} mismatch")
 
     if partition.get("terminal_event_count") != terminal_count:
-        errors.append("partition terminal count mismatch")
+        verification_errors.append("partition terminal count mismatch")
 
     development_ids = list(partition.get("development_event_ids") or [])
     fingerprint = partition.get("development_partition_fingerprint")
@@ -52,13 +53,13 @@ def validate_development_gate_observer(payload: dict[str, Any]) -> dict[str, Any
     balance = partition.get("development_balance") or {}
 
     if partition.get("development_partition_ready") is not True:
-        errors.append("fixed development partition not ready")
+        verification_errors.append("fixed development partition not ready")
     if len(development_ids) != DEVELOPMENT_TARGET:
-        errors.append("development event identity count mismatch")
+        verification_errors.append("development event identity count mismatch")
     if not fingerprint:
-        errors.append("development fingerprint missing")
+        verification_errors.append("development fingerprint missing")
     if not boundary.get("resolved_at") or not boundary.get("event_id"):
-        errors.append("development composite boundary missing")
+        verification_errors.append("development composite boundary missing")
 
     minimums = {
         "cleared": "minimum_cleared",
@@ -66,22 +67,28 @@ def validate_development_gate_observer(payload: dict[str, Any]) -> dict[str, Any
         "long": "minimum_long",
         "short": "minimum_short",
     }
+    balance_passes = True
     for actual_key, minimum_key in minimums.items():
         actual = int(balance.get(actual_key, 0) or 0)
         minimum = int(balance.get(minimum_key, 0) or 0)
         if minimum <= 0:
-            errors.append(f"development balance minimum missing: {minimum_key}")
+            verification_errors.append(f"development balance minimum missing: {minimum_key}")
+            balance_passes = False
         elif actual < minimum:
-            errors.append(f"development balance failed: {actual_key}")
+            opening_blockers.append(f"development balance failed: {actual_key}")
+            balance_passes = False
 
-    balance_ready = partition.get("development_analysis_eligible") is True
-    if not balance_ready:
-        errors.append("development analysis eligibility not authorized")
+    reported_eligible = partition.get("development_analysis_eligible")
+    if reported_eligible is not balance_passes:
+        verification_errors.append("development analysis eligibility mismatch")
 
-    gate_authorized = not errors
+    verification_ok = not verification_errors
+    opening_authorized = verification_ok and balance_passes
     return {
-        "ok": gate_authorized,
-        "errors": errors,
+        "ok": verification_ok,
+        "verification_ok": verification_ok,
+        "errors": verification_errors,
+        "opening_blockers": opening_blockers,
         "study": STUDY_ID,
         "gate_spec_version": GATE_SPEC_VERSION,
         "partition_spec_version": PARTITION_SPEC_VERSION,
@@ -90,10 +97,10 @@ def validate_development_gate_observer(payload: dict[str, Any]) -> dict[str, Any
         "outcome_fields_read": False,
         "terminal_event_count": terminal_count,
         "development_event_count": len(development_ids),
-        "development_partition_fingerprint": fingerprint if gate_authorized else None,
-        "development_boundary": dict(boundary) if gate_authorized else None,
+        "development_partition_fingerprint": fingerprint,
+        "development_boundary": dict(boundary) if boundary else None,
         "development_balance": dict(balance),
-        "development_outcome_opening_authorized": gate_authorized,
+        "development_outcome_opening_authorized": opening_authorized,
         "validation_outcome_opening_authorized": False,
         "threshold_search_allowed": False,
         "promotion_allowed": False,
@@ -121,9 +128,12 @@ def main() -> int:
         + json.dumps(evidence, sort_keys=True, default=str),
         flush=True,
     )
-    if not evidence["ok"]:
+    if not evidence["verification_ok"]:
         return 1
-    print("DAY BARRIER CLEAR DEVELOPMENT GATE VERIFIED.", flush=True)
+    if evidence["development_outcome_opening_authorized"]:
+        print("DAY BARRIER CLEAR DEVELOPMENT GATE VERIFIED: OPENING AUTHORIZED.", flush=True)
+    else:
+        print("DAY BARRIER CLEAR DEVELOPMENT GATE VERIFIED: OPENING REMAINS CLOSED.", flush=True)
     return 0
 
 

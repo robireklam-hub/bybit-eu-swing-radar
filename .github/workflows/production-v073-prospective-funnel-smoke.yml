@@ -44,7 +44,7 @@ jobs:
               sha: context.payload.workflow_run.head_sha,
               state: 'pending',
               context: 'production/v073-prospective-funnel',
-              description: 'Prospective capture and DEVELOPMENT gate verification running',
+              description: 'Prospective capture and DEVELOPMENT gate evaluation running',
               target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
             })
 
@@ -110,9 +110,9 @@ jobs:
               state: ok ? 'success' : 'failure',
               context: 'production/v073-prospective-funnel',
               description: ok
-                ? 'Exact-main prospective capture and DEVELOPMENT gate verified'
+                ? 'Exact-main prospective capture and DEVELOPMENT gate evaluation verified'
                 : (captureOk
-                  ? 'Barrier-clear DEVELOPMENT gate verification failed'
+                  ? 'Barrier-clear DEVELOPMENT gate verifier failed'
                   : 'Standalone prospective funnel verification failed'),
               target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
             })
