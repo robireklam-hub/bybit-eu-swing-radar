@@ -1,3 +1,8 @@
+import os
+from pathlib import Path
+import subprocess
+import sys
+
 from scripts.production_day_barrier_clear_v2_status import validate_v2_status
 
 
@@ -67,3 +72,25 @@ def test_v2_production_validator_rejects_source_sha_drift_and_parent_reuse_drift
     assert evidence["ok"] is False
     assert "v2.source_commit_sha mismatch" in evidence["errors"]
     assert "v2.pre_activation_parent_reuse_allowed mismatch" in evidence["errors"]
+
+
+def test_v2_production_script_imports_standalone_from_foreign_working_directory(tmp_path):
+    script = Path(__file__).resolve().parent / "scripts" / "production_day_barrier_clear_v2_status.py"
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import runpy, sys; runpy.run_path(sys.argv[1], run_name='barrier_v2_import_probe')",
+            str(script),
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "ModuleNotFoundError" not in result.stderr
