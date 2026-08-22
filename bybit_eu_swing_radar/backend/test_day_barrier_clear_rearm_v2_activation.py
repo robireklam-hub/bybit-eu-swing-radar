@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -24,13 +24,15 @@ def test_v2_activation_is_strictly_post_preregistration_and_preserves_firewalls(
 
 
 def test_v2_partition_rejects_event_at_activation_boundary():
-    with pytest.raises(ValueError, match="strictly after"):
+    boundary = datetime.fromisoformat(ACTIVATION_BOUNDARY)
+    with pytest.raises(ValueError, match="resolve strictly after"):
         build_side_stratified_partition(
             [
                 {
                     "event_id": "boundary",
                     "side": "long",
                     "terminal": True,
+                    "captured_at": (boundary + timedelta(microseconds=1)).isoformat(),
                     "resolved_at": ACTIVATION_BOUNDARY,
                 }
             ],
@@ -40,6 +42,7 @@ def test_v2_partition_rejects_event_at_activation_boundary():
 
 def test_v2_partition_accepts_first_terminal_event_strictly_after_boundary_without_opening_outcomes():
     boundary = datetime.fromisoformat(ACTIVATION_BOUNDARY)
+    parent_time = boundary + timedelta(microseconds=1)
     event_time = boundary.replace(second=1)
     result = build_side_stratified_partition(
         [
@@ -47,6 +50,7 @@ def test_v2_partition_accepts_first_terminal_event_strictly_after_boundary_witho
                 "event_id": "first-post-activation",
                 "side": "short",
                 "terminal": True,
+                "captured_at": parent_time.isoformat(),
                 "resolved_at": event_time.isoformat(),
             }
         ],
