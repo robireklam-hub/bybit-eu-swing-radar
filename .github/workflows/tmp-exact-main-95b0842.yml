@@ -1,0 +1,61 @@
+name: NEVER MERGE exact-main 95b0842 verifier
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/tmp-exact-main-95b0842.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 95b084286e2bcc2a3f9277d3ff734050e369c237
+    steps:
+      - name: Check out exact main
+        uses: actions/checkout@v7
+        with:
+          ref: 95b084286e2bcc2a3f9277d3ff734050e369c237
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Wait for exact production API build
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.request
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          expected = os.environ['EXPECTED_SHA']
+          for attempt in range(80):
+              try:
+                  with urllib.request.urlopen(base + '/version', timeout=10) as response:
+                      payload = json.load(response)
+                  served = payload.get('commit_sha')
+                  print(f'API_SHA_ATTEMPT_{attempt + 1}={served}')
+                  if served == expected:
+                      raise SystemExit(0)
+              except Exception as exc:
+                  print(f'API_SHA_ATTEMPT_{attempt + 1}_ERROR={type(exc).__name__}:{exc}')
+              time.sleep(15)
+          raise SystemExit('exact production API SHA did not become ready')
+          PY
+
+      - name: Verify swing candidate Coinalyze semantics
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_coinalyze_smoke.py
+
+      - name: Verify swing liquidity event construction
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_event_smoke.py
+
+      - name: Verify swing liquidity maturity status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_maturity_status.py
