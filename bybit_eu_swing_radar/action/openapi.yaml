@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: Bybit EU Trading Radar API
-  version: 0.7.6
-  description: Bybit EU Trading Radar with day-trade strategy v0.7.6, separated setup/entry state, compact audit,
+  version: 0.7.7
+  description: Bybit EU Trading Radar with day-trade strategy v0.7.7, persistent confirmed-breakout recommendation state, compact audit,
     and context-only derivatives OI/funding Flow feature v0.7.2.2 plus explicit market-context warnings.
 servers:
 - url: https://bybit-eu-swing-radar-production.up.railway.app

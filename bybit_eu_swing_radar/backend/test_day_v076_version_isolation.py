@@ -11,10 +11,11 @@ import journal_core
 from app import repository
 
 
-def test_live_day_version_moves_to_v076_only():
-    assert day_worker.DAY_STRATEGY_VERSION == "0.7.6"
-    assert repository.CURRENT_DAY_STRATEGY_VERSION == "0.7.6"
-    assert journal_core.STRATEGY_VERSION == "0.7.6"
+def test_live_day_version_moves_to_v077_while_v076_is_frozen():
+    assert day_worker.V076_DAY_STRATEGY_VERSION == "0.7.6"
+    assert day_worker.DAY_STRATEGY_VERSION == "0.7.7"
+    assert repository.CURRENT_DAY_STRATEGY_VERSION == "0.7.7"
+    assert journal_core.STRATEGY_VERSION == "0.7.7"
 
 
 def test_historical_replay_remains_frozen_at_v075():

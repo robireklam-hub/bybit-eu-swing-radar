@@ -38,26 +38,26 @@ def _flow_payload() -> dict:
     )
 
 
-def test_flow_feature_keeps_0722_but_parent_strategy_is_076():
+def test_flow_feature_keeps_0722_but_parent_strategy_is_077():
     payload = _flow_payload()
-    assert payload["strategy_version"] == "0.7.6"
+    assert payload["strategy_version"] == "0.7.7"
     assert payload["feature_version"] == "0.7.2.2"
-    assert any("v0.7.6 STRICT gates" in note for note in payload["notes"])
+    assert any("v0.7.7 STRICT gates" in note for note in payload["notes"])
 
 
-def test_fastapi_release_source_declares_076():
+def test_fastapi_release_source_declares_077():
     text = (BACKEND / "app" / "main.py").read_text(encoding="utf-8")
-    assert 'version="0.7.6"' in text
-    assert "day-trade strategy v0.7.6" in text
+    assert 'version="0.7.7"' in text
+    assert "day-trade strategy v0.7.7" in text
     assert "Flow feature v0.7.2.2" in text
 
 
-def test_openapi_contract_describes_v076_day_state_and_0722_flow():
+def test_openapi_contract_describes_v077_day_state_and_0722_flow():
     text = (ROOT / "action" / "openapi.yaml").read_text(encoding="utf-8")
-    assert "version: 0.7.6" in text
-    assert "day-trade strategy v0.7.6" in text
+    assert "version: 0.7.7" in text
+    assert "day-trade strategy v0.7.7" in text
     assert "Flow feature v0.7.2.2" in text
-    assert "separated setup/entry state" in text
+    assert "persistent confirmed-breakout recommendation state" in text
     assert "does not change v0.7.6 setup/entry gates" in text
 
 

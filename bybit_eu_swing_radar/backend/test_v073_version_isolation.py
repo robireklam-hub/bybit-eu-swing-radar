@@ -4,9 +4,9 @@ from pathlib import Path
 BACKEND = Path(__file__).resolve().parent
 
 
-def test_repository_reads_current_v076_journal_only():
+def test_repository_reads_current_v077_journal_only():
     text = (BACKEND / "app" / "repository.py").read_text(encoding="utf-8")
-    assert 'CURRENT_DAY_STRATEGY_VERSION = "0.7.6"' in text
+    assert 'CURRENT_DAY_STRATEGY_VERSION = "0.7.7"' in text
     assert 'CURRENT_DAY_STRATEGY_VERSION = "0.7.2"' not in text
     assert 'strategy_version = $3' in text
     assert 'strategy_version = $4' in text
