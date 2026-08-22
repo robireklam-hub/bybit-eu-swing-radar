@@ -90,7 +90,7 @@ def test_gate_rejects_outcome_bearing_input_before_opening():
 
 
 def test_gate_never_opens_validation_even_when_100_terminal_events_exist():
-    rows = _events(100, clears=50, longs=50)
+    rows = _events(100, clears=30, longs=30)
     result = evaluate_development_gate(rows)
 
     assert result["development_outcome_opening_authorized"] is True
