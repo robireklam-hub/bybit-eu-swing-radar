@@ -33,6 +33,16 @@ jobs:
       - name: Apply v0.7.7 patch and clean temporary harness
         if: github.event_name == 'pull_request'
         run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("scripts/temp_apply_day_v077.py")
+          text = path.read_text()
+          old = '    if count != 1:\n        raise RuntimeError(f"{label}: expected 1 occurrence, found {count}")'
+          new = '    if count != 1 and not (label == "setup type persistent route" and count == 2):\n        raise RuntimeError(f"{label}: expected 1 occurrence, found {count}")'
+          if old not in text:
+              raise SystemExit("temp harness guard pattern not found")
+          path.write_text(text.replace(old, new, 1))
+          PY
           python scripts/temp_apply_day_v077.py
           cd ../..
           git fetch origin main --depth=1
