@@ -5,7 +5,7 @@ live scores, ranking, eligibility, thresholds, journal state, or execution.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from typing import Any, Mapping, Sequence
@@ -48,6 +48,11 @@ def _parse_time(value: Any) -> datetime:
     return parsed
 
 
+def _canonical_time(value: Any) -> str:
+    """Return one stable UTC representation for cohort identity/fingerprints."""
+    return _parse_time(value).astimezone(timezone.utc).isoformat()
+
+
 def _canonical_event(row: Mapping[str, Any]) -> dict[str, str]:
     if _contains_outcome(row):
         raise ValueError("outcome-bearing field is forbidden before partition freeze")
@@ -62,13 +67,12 @@ def _canonical_event(row: Mapping[str, Any]) -> dict[str, str]:
         raise ValueError("side must be long or short")
     if terminal_status not in TERMINAL_STATUSES:
         raise ValueError("only terminal label-blind observer events may enter the partition")
-    _parse_time(resolved_at)
     return {
         "event_id": event_id,
         "symbol": symbol,
         "side": side,
         "terminal_status": terminal_status,
-        "resolved_at": resolved_at,
+        "resolved_at": _canonical_time(resolved_at),
     }
 
 
@@ -90,6 +94,8 @@ def freeze_partition(events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     never expands after 60, preventing optional stopping based on later results.
     The exact composite boundary is published so later validation selection cannot
     silently degrade to timestamp-only ordering when terminal events share a time.
+    Equivalent timezone representations are normalized to UTC before fingerprinting,
+    so semantically identical event times cannot create cohort identity drift.
     """
     canonical = [_canonical_event(row) for row in events]
     ids = [row["event_id"] for row in canonical]
