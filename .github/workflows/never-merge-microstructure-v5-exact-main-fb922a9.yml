@@ -1,0 +1,68 @@
+name: NEVER MERGE microstructure v5 exact-main verifier fb922a9
+
+on:
+  push:
+    branches: [ops/exact-main-microstructure-v5-fb922a9]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: fb922a9ff6325596784bfe80d1bc8fefaff8989e
+      EXPECTED_API_SHA: fb922a9ff6325596784bfe80d1bc8fefaff8989e
+
+    steps:
+      - name: Check out exact production main
+        uses: actions/checkout@v7
+        with:
+          ref: fb922a9ff6325596784bfe80d1bc8fefaff8989e
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Verify exact production API SHA
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.request
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          expected = os.environ['EXPECTED_SHA']
+          for attempt in range(120):
+              try:
+                  req = urllib.request.Request(base + '/version')
+                  key = os.environ.get('PRODUCTION_RADAR_API_KEY', '')
+                  if key:
+                      req.add_header('X-API-Key', key)
+                  with urllib.request.urlopen(req, timeout=15) as r:
+                      payload = json.load(r)
+                  actual = payload.get('source_commit_sha') or payload.get('commit_sha') or payload.get('git_sha')
+                  print(f'attempt={attempt+1} actual={actual} expected={expected} strategy={payload.get("strategy_version")} feature={payload.get("feature_version")}')
+                  if actual == expected:
+                      raise SystemExit(0)
+              except Exception as exc:
+                  print(f'attempt={attempt+1} error={type(exc).__name__}: {exc}')
+              time.sleep(5)
+          raise SystemExit('exact production API SHA did not converge')
+          PY
+      - name: Verify recorder and preregistered readiness
+        working-directory: bybit_eu_swing_radar/backend
+        env:
+          MICROSTRUCTURE_REQUIRE_EXACT_RECORDER_SHA: "false"
+        run: python scripts/production_microstructure_smoke.py
+      - name: Verify frozen v0.7.6 microstructure successor status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_alignment_status_v4.py
+      - name: Verify active v0.7.7 microstructure successor status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_alignment_status_v5.py
+      - name: Verify successor effect gates remain fail-closed
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_microstructure_successor_effect_gate_guard.py
