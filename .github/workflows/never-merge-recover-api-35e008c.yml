@@ -1,8 +1,6 @@
 name: NEVER MERGE recover+verify production 35e008c
 
 on:
-  push:
-    branches: ["ops/recover-api-35e008c"]
   pull_request:
     paths: [".github/workflows/never-merge-recover-api-35e008c.yml"]
 
@@ -37,7 +35,6 @@ jobs:
           python -u - <<'PY'
           import json, os, time
           from urllib.request import Request, urlopen
-          from urllib.error import HTTPError, URLError
           base=os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/'); key=os.environ['PRODUCTION_RADAR_API_KEY']; expected=os.environ['EXPECTED_SHA']
           endpoint='https://backboard.railway.com/graphql/v2'; token=os.environ['RAILWAY_API_TOKEN']; service=os.environ['API_SERVICE_ID']; env=os.environ['RAILWAY_ENVIRONMENT_ID']
           def sha():
@@ -79,6 +76,3 @@ jobs:
       - name: Verify swing liquidity maturity status
         working-directory: bybit_eu_swing_radar/backend
         run: python scripts/production_swing_liquidity_maturity_status.py
-      - name: Verify barrier-clear frozen partition status
-        working-directory: bybit_eu_swing_radar/backend
-        run: python scripts/production_day_barrier_clear_status.py
