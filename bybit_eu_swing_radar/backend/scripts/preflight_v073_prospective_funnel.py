@@ -57,15 +57,24 @@ def evaluate_preflight(
     if version.get("commit_sha") != expected_sha:
         errors.append("production API SHA mismatch")
     errors.extend(validate_externalized_marker(live_status))
+    live_strategy_version = live_status.get("strategy_version")
+    if not isinstance(live_strategy_version, str) or not live_strategy_version:
+        errors.append("live strategy_version missing")
+        live_strategy_version = ""
     prospective = validate_standalone_status(prospective_status, expected_sha)
-    parent = validate_barrier_parent_status(barrier_parent_status, expected_sha)
-    observer = validate_barrier_observer_status(barrier_observer_status, expected_sha)
+    parent = validate_barrier_parent_status(
+        barrier_parent_status, expected_sha, live_strategy_version
+    )
+    observer = validate_barrier_observer_status(
+        barrier_observer_status, expected_sha, live_strategy_version
+    )
     for evidence in (prospective, parent, observer):
         errors.extend(str(item) for item in evidence.get("errors") or [])
     return {
         "ok": not errors,
         "errors": errors,
         "api_commit_sha": version.get("commit_sha"),
+        "live_strategy_version": live_strategy_version or None,
         "prospective": prospective,
         "barrier_parent": parent,
         "barrier_observer": observer,

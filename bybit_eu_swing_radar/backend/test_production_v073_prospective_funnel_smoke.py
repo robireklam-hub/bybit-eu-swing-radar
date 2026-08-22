@@ -11,6 +11,7 @@ SHA = "a" * 40
 NOW = datetime(2026, 8, 18, 14, 0, tzinfo=timezone.utc)
 LOCKED = "LOCKED_UNTIL_PREREGISTERED_DEVELOPMENT_GATE"
 CONTEXT = "day-barrier-clear-context-v1"
+LIVE_VERSION = "0.7.7"
 
 
 def _payload() -> dict:
@@ -63,7 +64,7 @@ def _parent_payload() -> dict:
         "total_frozen_parents": 0,
         "outcome_visibility": LOCKED,
         "execution_mode": "SHARED_STANDALONE_RESEARCH_SIDECAR",
-        "current_live_strategy_version": "0.7.6",
+        "current_live_strategy_version": LIVE_VERSION,
         "live_worker_inline_recorder": False,
         "live_worker_mutation": False,
         "forced_tracking_symbols": [],
@@ -97,7 +98,7 @@ def _observer_payload() -> dict:
         },
         "outcome_visibility": LOCKED,
         "execution_mode": "SHARED_STANDALONE_RESEARCH_SIDECAR",
-        "current_live_strategy_version": "0.7.6",
+        "current_live_strategy_version": LIVE_VERSION,
         "live_worker_inline_recorder": False,
         "live_worker_mutation": False,
         "forced_tracking_symbols": [],
@@ -112,8 +113,8 @@ def test_zero_sample_standalone_first_run_is_valid():
 
 
 def test_zero_parent_and_zero_resolution_are_valid_prospective_states():
-    parent = validate_barrier_parent_status(_parent_payload(), SHA, now=NOW)
-    observer = validate_barrier_observer_status(_observer_payload(), SHA, now=NOW)
+    parent = validate_barrier_parent_status(_parent_payload(), SHA, LIVE_VERSION, now=NOW)
+    observer = validate_barrier_observer_status(_observer_payload(), SHA, LIVE_VERSION, now=NOW)
     assert parent["ok"] is True
     assert parent["total_frozen_parents"] == 0
     assert observer["ok"] is True
@@ -121,11 +122,40 @@ def test_zero_parent_and_zero_resolution_are_valid_prospective_states():
     assert observer["cumulative"]["cleared"] == 0
 
 
+def test_barrier_contract_tracks_live_version_without_changing_frozen_parent_version():
+    parent = _parent_payload()
+    observer = _observer_payload()
+    assert parent["parent_strategy_version"] == "0.7.5"
+    assert observer["parent_strategy_version"] == "0.7.5"
+    assert validate_barrier_parent_status(parent, SHA, LIVE_VERSION, now=NOW)["ok"] is True
+    assert validate_barrier_observer_status(observer, SHA, LIVE_VERSION, now=NOW)["ok"] is True
+
+
+def test_barrier_contract_fails_closed_on_live_strategy_version_drift():
+    parent = _parent_payload()
+    observer = _observer_payload()
+    parent["current_live_strategy_version"] = "0.7.6"
+    observer["current_live_strategy_version"] = "0.7.6"
+    parent_result = validate_barrier_parent_status(parent, SHA, LIVE_VERSION, now=NOW)
+    observer_result = validate_barrier_observer_status(observer, SHA, LIVE_VERSION, now=NOW)
+    assert "parent.current_live_strategy_version mismatch" in parent_result["errors"]
+    assert "observer.current_live_strategy_version mismatch" in observer_result["errors"]
+
+
+def test_barrier_contract_fails_closed_when_expected_live_version_missing():
+    assert "expected live strategy_version missing" in validate_barrier_parent_status(
+        _parent_payload(), SHA, "", now=NOW
+    )["errors"]
+    assert "expected live strategy_version missing" in validate_barrier_observer_status(
+        _observer_payload(), SHA, "", now=NOW
+    )["errors"]
+
+
 def test_barrier_contract_fails_closed_on_live_mutation_or_execution_authorization():
     parent_payload = _parent_payload()
     parent_payload["execution_authorized"] = True
     parent_payload["live_worker_mutation"] = True
-    parent = validate_barrier_parent_status(parent_payload, SHA, now=NOW)
+    parent = validate_barrier_parent_status(parent_payload, SHA, LIVE_VERSION, now=NOW)
     assert parent["ok"] is False
     assert "parent.execution_authorized mismatch" in parent["errors"]
     assert "parent.live_worker_mutation mismatch" in parent["errors"]
@@ -133,7 +163,7 @@ def test_barrier_contract_fails_closed_on_live_mutation_or_execution_authorizati
     observer_payload = _observer_payload()
     observer_payload["execution_authorized"] = True
     observer_payload["score_mutation"] = True
-    observer = validate_barrier_observer_status(observer_payload, SHA, now=NOW)
+    observer = validate_barrier_observer_status(observer_payload, SHA, LIVE_VERSION, now=NOW)
     assert observer["ok"] is False
     assert "observer.execution_authorized mismatch" in observer["errors"]
     assert "observer.score_mutation mismatch" in observer["errors"]
@@ -142,7 +172,7 @@ def test_barrier_contract_fails_closed_on_live_mutation_or_execution_authorizati
 def test_barrier_observer_requires_exact_context_version():
     observer = _observer_payload()
     observer.pop("context_version")
-    result = validate_barrier_observer_status(observer, SHA, now=NOW)
+    result = validate_barrier_observer_status(observer, SHA, LIVE_VERSION, now=NOW)
     assert result["ok"] is False
     assert "observer.context_version mismatch" in result["errors"]
 
@@ -152,8 +182,12 @@ def test_barrier_status_requires_exact_sidecar_sha():
     parent["source_commit_sha"] = "b" * 40
     observer = _observer_payload()
     observer["source_commit_sha"] = "b" * 40
-    assert "parent source SHA mismatch" in validate_barrier_parent_status(parent, SHA, now=NOW)["errors"]
-    assert "observer source SHA mismatch" in validate_barrier_observer_status(observer, SHA, now=NOW)["errors"]
+    assert "parent source SHA mismatch" in validate_barrier_parent_status(
+        parent, SHA, LIVE_VERSION, now=NOW
+    )["errors"]
+    assert "observer source SHA mismatch" in validate_barrier_observer_status(
+        observer, SHA, LIVE_VERSION, now=NOW
+    )["errors"]
 
 
 def test_stale_standalone_capture_fails_closed():

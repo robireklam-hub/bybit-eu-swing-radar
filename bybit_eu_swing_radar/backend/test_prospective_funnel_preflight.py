@@ -10,6 +10,7 @@ from scripts import preflight_v073_prospective_funnel as preflight
 
 LOCKED = "LOCKED_UNTIL_PREREGISTERED_DEVELOPMENT_GATE"
 CONTEXT = "day-barrier-clear-context-v1"
+LIVE_VERSION = "0.7.7"
 
 
 def _prospective_payload(sha: str) -> dict[str, object]:
@@ -61,7 +62,7 @@ def _parent_payload(sha: str) -> dict[str, object]:
         "total_frozen_parents": 0,
         "outcome_visibility": LOCKED,
         "execution_mode": "SHARED_STANDALONE_RESEARCH_SIDECAR",
-        "current_live_strategy_version": "0.7.6",
+        "current_live_strategy_version": LIVE_VERSION,
         "live_worker_inline_recorder": False,
         "live_worker_mutation": False,
     }
@@ -94,14 +95,14 @@ def _observer_payload(sha: str) -> dict[str, object]:
         },
         "outcome_visibility": LOCKED,
         "execution_mode": "SHARED_STANDALONE_RESEARCH_SIDECAR",
-        "current_live_strategy_version": "0.7.6",
+        "current_live_strategy_version": LIVE_VERSION,
         "live_worker_inline_recorder": False,
         "live_worker_mutation": False,
     }
 
 
-def _live_status() -> dict[str, object]:
-    return {
+def _live_status(*, strategy_version: str | None = LIVE_VERSION) -> dict[str, object]:
+    payload: dict[str, object] = {
         "prospective_funnel": {
             "status": "EXTERNALIZED",
             "enabled": False,
@@ -109,6 +110,9 @@ def _live_status() -> dict[str, object]:
             "execution_mode": "STANDALONE_RAILWAY_CRON",
         }
     }
+    if strategy_version is not None:
+        payload["strategy_version"] = strategy_version
+    return payload
 
 
 def _evaluate(sha: str, *, version_sha: str | None = None, live=None, funnel_sha=None, parent_sha=None, observer_sha=None):
@@ -127,6 +131,42 @@ def test_exact_main_fresh_zero_sample_capture_passes_preflight():
     result = _evaluate(sha)
     assert result["ok"] is True
     assert result["errors"] == []
+    assert result["live_strategy_version"] == LIVE_VERSION
+
+
+def test_preflight_tracks_current_live_version_without_rewriting_frozen_parent_version():
+    sha = "a" * 40
+    result = _evaluate(sha, live=_live_status(strategy_version=LIVE_VERSION))
+    assert result["ok"] is True
+    assert _parent_payload(sha)["parent_strategy_version"] == "0.7.5"
+    assert _observer_payload(sha)["parent_strategy_version"] == "0.7.5"
+
+
+def test_missing_live_strategy_version_fails_preflight_closed():
+    sha = "a" * 40
+    result = _evaluate(sha, live=_live_status(strategy_version=None))
+    assert result["ok"] is False
+    assert "live strategy_version missing" in result["errors"]
+    assert "expected live strategy_version missing" in result["errors"]
+
+
+def test_parent_or_observer_live_version_drift_fails_preflight():
+    sha = "a" * 40
+    parent = _parent_payload(sha)
+    observer = _observer_payload(sha)
+    parent["current_live_strategy_version"] = "0.7.6"
+    observer["current_live_strategy_version"] = "0.7.6"
+    result = preflight.evaluate_preflight(
+        version={"commit_sha": sha},
+        live_status=_live_status(strategy_version=LIVE_VERSION),
+        prospective_status=_prospective_payload(sha),
+        barrier_parent_status=parent,
+        barrier_observer_status=observer,
+        expected_sha=sha,
+    )
+    assert result["ok"] is False
+    assert "parent.current_live_strategy_version mismatch" in result["errors"]
+    assert "observer.current_live_strategy_version mismatch" in result["errors"]
 
 
 def test_any_stale_source_sha_fails_preflight_even_when_api_is_exact():
