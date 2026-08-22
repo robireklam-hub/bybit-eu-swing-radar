@@ -1,0 +1,55 @@
+name: NEVER MERGE verify production 91d089b
+
+on:
+  pull_request:
+    paths: [".github/workflows/never-merge-verify-91d089b.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: never-merge-verify-production-91d089b
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      EXPECTED_SHA: 91d089be1c5f8717ac2bd9a1f299ba1b15adbc22
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 91d089be1c5f8717ac2bd9a1f299ba1b15adbc22
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Verify exact production API SHA
+        run: |
+          python -u - <<'PY'
+          import json, os, time
+          from urllib.request import Request, urlopen
+          base=os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key=os.environ['PRODUCTION_RADAR_API_KEY']
+          expected=os.environ['EXPECTED_SHA']
+          for i in range(60):
+              try:
+                  req=Request(base+'/version',headers={'Accept':'application/json','X-Radar-Key':key})
+                  with urlopen(req,timeout=15) as r: actual=str((json.load(r) or {}).get('commit_sha') or '')
+              except Exception: actual=''
+              print('API_SHA',i+1,actual,flush=True)
+              if actual==expected: break
+              time.sleep(10)
+          else: raise SystemExit('exact API SHA not served')
+          PY
+      - name: Verify swing candidate Coinalyze semantics
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_coinalyze_smoke.py
+      - name: Verify swing liquidity event construction
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_event_smoke.py
+      - name: Verify swing liquidity maturity status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_maturity_status.py
