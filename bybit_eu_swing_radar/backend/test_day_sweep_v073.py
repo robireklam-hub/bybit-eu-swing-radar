@@ -226,12 +226,13 @@ def test_short_borrowability_remains_hard_gate(monkeypatch):
     assert candidate["execution_status"] == "DAY_TRADE_BLOCKED"
 
 
-def test_v073_v074_v075_history_are_frozen_while_current_strategy_is_v076():
+def test_v073_v074_v075_v076_history_are_frozen_while_current_strategy_is_v077():
     assert day_worker.LEGACY_DAY_STRATEGY_VERSION == "0.7.3"
     assert day_worker.IMPULSE_DAY_STRATEGY_VERSION == "0.7.4"
     assert day_worker.V075_DAY_STRATEGY_VERSION == "0.7.5"
-    assert day_worker.DAY_STRATEGY_VERSION == "0.7.6"
-    assert journal.STRATEGY_VERSION == "0.7.6"
+    assert day_worker.V076_DAY_STRATEGY_VERSION == "0.7.6"
+    assert day_worker.DAY_STRATEGY_VERSION == "0.7.7"
+    assert journal.STRATEGY_VERSION == "0.7.7"
     assert backtest.STRATEGY_VERSION == "0.7.5"
     assert day_worker.resolve_day_trigger_policy(
         "0.7.3", range_breakout_triggered=True, sweep_triggered=False

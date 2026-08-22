@@ -13,8 +13,8 @@ from backtest import BACKTEST_JOB_NAME, STRATEGY_VERSION, run_backtest_batch
 
 app = FastAPI(
     title="Bybit EU Trading Radar API",
-    version="0.7.6",
-    description="Read-only cached USDC swing/day scanner; day-trade strategy v0.7.6 with separated setup/entry state and context-only derivatives Flow feature v0.7.2.2.",
+    version="0.7.7",
+    description="Read-only cached USDC swing/day scanner; day-trade strategy v0.7.7 with persistent confirmed-breakout recommendation state and context-only derivatives Flow feature v0.7.2.2.",
 )
 
 repo = RadarRepository()

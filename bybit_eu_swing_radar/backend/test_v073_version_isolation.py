@@ -4,9 +4,9 @@ from pathlib import Path
 BACKEND = Path(__file__).resolve().parent
 
 
-def test_repository_reads_current_v076_journal_only():
+def test_repository_reads_current_v077_journal_only():
     text = (BACKEND / "app" / "repository.py").read_text(encoding="utf-8")
-    assert 'CURRENT_DAY_STRATEGY_VERSION = "0.7.6"' in text
+    assert 'CURRENT_DAY_STRATEGY_VERSION = "0.7.7"' in text
     assert 'CURRENT_DAY_STRATEGY_VERSION = "0.7.2"' not in text
     assert 'strategy_version = $3' in text
     assert 'strategy_version = $4' in text
@@ -34,4 +34,4 @@ def test_backtest_writer_and_default_job_are_v075():
 def test_version_isolation_keeps_flow_feature_0722():
     flow = (BACKEND / "flow_context.py").read_text(encoding="utf-8")
     assert 'Day-trade derivatives flow context v0.7.2.2.' in flow
-    assert 'does NOT change the v0.7.6 STRICT gates' in flow
+    assert 'does NOT change the v0.7.7 STRICT gates' in flow

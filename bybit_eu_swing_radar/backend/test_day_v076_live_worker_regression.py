@@ -99,6 +99,7 @@ def test_valid_long_setup_survives_barrier_block_in_live_candidate(monkeypatch):
         _analysis(follow_close=100.3),
         "long",
         datetime(2026, 8, 21, tzinfo=timezone.utc),
+        strategy_version="0.7.6",
     )
 
     assert candidate is not None
@@ -128,6 +129,7 @@ def test_cleared_old_barrier_uses_fresh_entry_and_becomes_provisional(monkeypatc
         _analysis(follow_close=100.7),
         "long",
         datetime(2026, 8, 21, tzinfo=timezone.utc),
+        strategy_version="0.7.6",
     )
 
     assert candidate is not None
