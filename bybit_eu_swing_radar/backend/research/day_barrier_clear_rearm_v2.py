@@ -58,9 +58,14 @@ def _canonical_event(event: dict[str, Any], *, activation_boundary: datetime) ->
         raise ValueError("side must be long or short")
     if event.get("terminal") is not True:
         raise ValueError("only terminal events may enter the v2 partition")
+    captured_at = _utc(event.get("captured_at"), "captured_at")
     resolved_at = _utc(event.get("resolved_at"), "resolved_at")
+    if captured_at <= activation_boundary:
+        raise ValueError("v2 parents must be captured strictly after the frozen activation boundary")
     if resolved_at <= activation_boundary:
         raise ValueError("v2 events must resolve strictly after the frozen activation boundary")
+    if resolved_at < captured_at:
+        raise ValueError("resolved_at must not precede captured_at")
     return {
         "event_id": str(event_id),
         "side": side,
@@ -81,7 +86,9 @@ def build_side_stratified_partition(
     """Build frozen v2 DEVELOPMENT/VALIDATION identities without outcomes.
 
     The activation boundary is intentionally supplied by a later activation step;
-    preregistration alone never starts the cohort.
+    preregistration alone never starts the cohort. Every event must also carry the
+    originating parent capture timestamp so the no-v1-reuse rule is enforced by
+    this central cohort contract rather than only by individual callers.
     """
     boundary = _utc(activation_boundary, "activation_boundary")
     canonical = [_canonical_event(event, activation_boundary=boundary) for event in events]

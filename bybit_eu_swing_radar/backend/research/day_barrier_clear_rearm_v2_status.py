@@ -44,6 +44,7 @@ def build_v2_status_from_rows(
                 "event_id": str(row.get("event_key") or ""),
                 "side": str(row.get("side") or "").lower(),
                 "terminal": True,
+                "captured_at": captured,
                 "resolved_at": resolved,
             }
         )
