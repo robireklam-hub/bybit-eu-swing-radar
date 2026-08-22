@@ -1,0 +1,34 @@
+name: NEVER MERGE barrier-clear v2 exact-main 3011d9b verification
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/tmp-barrier-v2-3011d9b.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  barrier-v2-production-status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 3011d9bd041931b0b133173aa3e0597cbdbec8e6
+
+    steps:
+      - name: Check out exact expected main
+        uses: actions/checkout@v7
+        with:
+          ref: 3011d9bd041931b0b133173aa3e0597cbdbec8e6
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Verify barrier-clear v2 prospective status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_day_barrier_clear_v2_status.py
