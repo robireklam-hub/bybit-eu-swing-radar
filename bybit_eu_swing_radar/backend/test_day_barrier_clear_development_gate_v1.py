@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from bybit_eu_swing_radar.backend.research.day_barrier_clear_development_gate_v1 import (
+from research.day_barrier_clear_development_gate_v1 import (
     GATE_SPEC_VERSION,
     evaluate_development_gate,
 )
