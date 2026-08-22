@@ -1,4 +1,4 @@
-"""Bybit EU Trading Radar — day-trade worker v0.7.6.
+"""Bybit EU Trading Radar — day-trade worker v0.7.7.
 
 Separate engine from the swing worker:
 - universe: active Bybit EU USDC spot pairs
@@ -88,7 +88,8 @@ SOURCE_COMMIT_SHA = os.getenv("RAILWAY_GIT_COMMIT_SHA") or None
 LEGACY_DAY_STRATEGY_VERSION = "0.7.3"
 IMPULSE_DAY_STRATEGY_VERSION = "0.7.4"
 V075_DAY_STRATEGY_VERSION = "0.7.5"
-DAY_STRATEGY_VERSION = "0.7.6"
+V076_DAY_STRATEGY_VERSION = "0.7.6"
+DAY_STRATEGY_VERSION = "0.7.7"
 # Historical v0.7.5 compatibility only. v0.7.6 setup context has no fixed
 # 5m-bar TTL; entry confirmation is classified separately.
 DAY_BREAKOUT_ACTIVE_BARS = 2
@@ -835,7 +836,7 @@ def resolve_day_trigger_policy(
             sweep_triggered,
             "LIQUIDITY_SWEEP_RECLAIM" if sweep_triggered else "NONE",
         )
-    if strategy_version in {IMPULSE_DAY_STRATEGY_VERSION, V075_DAY_STRATEGY_VERSION, DAY_STRATEGY_VERSION}:
+    if strategy_version in {IMPULSE_DAY_STRATEGY_VERSION, V075_DAY_STRATEGY_VERSION, V076_DAY_STRATEGY_VERSION, DAY_STRATEGY_VERSION}:
         if sweep_triggered:
             return True, "LIQUIDITY_SWEEP_RECLAIM"
         if range_breakout_triggered:
@@ -880,7 +881,7 @@ def build_day_candidate(
     )
     breakout_event = None
     persistent_breakout_context = False
-    if strategy_version == DAY_STRATEGY_VERSION:
+    if strategy_version in {V076_DAY_STRATEGY_VERSION, DAY_STRATEGY_VERSION}:
         breakout_event = active_structural_breakout_context(analysis.bars_5m, side)
         persistent_breakout_context = breakout_event is not None
         range_breakout_triggered = bool(
@@ -943,6 +944,18 @@ def build_day_candidate(
         range_breakout_triggered=range_breakout_triggered,
         sweep_triggered=sweep_triggered,
     )
+    # v0.7.7: once a fully closed 5m bar confirms the breakout origin, the
+    # recommendation remains confirmed while every later fully closed 5m bar
+    # holds that same original boundary. Passage of one more 5m candle is not
+    # an invalidation. Fresh setup/execution/RR/barrier gates below are still
+    # recomputed on every run and can independently withdraw the recommendation.
+    if (
+        strategy_version == DAY_STRATEGY_VERSION
+        and not triggered
+        and persistent_breakout_context
+    ):
+        triggered = True
+        trigger_route = "STRUCTURALLY_HELD_5M_RANGE_BREAKOUT"
 
     previous_above_vwap = previous_close > analysis.rolling_vwap_24h
     current_above_vwap = current > analysis.rolling_vwap_24h
@@ -955,8 +968,8 @@ def build_day_candidate(
 
     if trigger_route == "LIQUIDITY_SWEEP_RECLAIM":
         setup_type = "LIQUIDITY_SWEEP_RECLAIM"
-    elif trigger_route == "CLOSED_5M_RANGE_BREAKOUT" or (
-        strategy_version == DAY_STRATEGY_VERSION and persistent_breakout_context
+    elif trigger_route in {"CLOSED_5M_RANGE_BREAKOUT", "STRUCTURALLY_HELD_5M_RANGE_BREAKOUT"} or (
+        strategy_version == V076_DAY_STRATEGY_VERSION and persistent_breakout_context
     ):
         setup_type = "IMPULSE_BREAKOUT"
     elif vwap_reclaim and aligned_1h:
@@ -970,7 +983,7 @@ def build_day_candidate(
 
     recent = analysis.bars_5m[-9:]
     fresh_breakout_geometry = bool(
-        strategy_version == DAY_STRATEGY_VERSION
+        strategy_version in {V076_DAY_STRATEGY_VERSION, DAY_STRATEGY_VERSION}
         and persistent_breakout_context
         and sweep_trigger is None
     )
@@ -1110,7 +1123,7 @@ def build_day_candidate(
     )
     rr_valid = bool(expected_rr + 1e-9 >= DAY_MIN_RR and target_path_valid)
 
-    if strategy_version == DAY_STRATEGY_VERSION:
+    if strategy_version in {V076_DAY_STRATEGY_VERSION, DAY_STRATEGY_VERSION}:
         entry_state = classify_entry_state(
             setup_valid=technical_setup,
             execution_valid=strict_execution,
@@ -1174,12 +1187,12 @@ def build_day_candidate(
     technical_grade = setup_grade(score)
     displayed_grade = (
         technical_grade
-        if strict or (strategy_version == DAY_STRATEGY_VERSION and technical_setup)
+        if strict or (strategy_version in {V076_DAY_STRATEGY_VERSION, DAY_STRATEGY_VERSION} and technical_setup)
         else ("WATCH" if score >= 55 else "NO_TRADE")
     )
     if strict:
         candidate_watch_bucket = "STRICT"
-    elif strategy_version == DAY_STRATEGY_VERSION and technical_setup:
+    elif strategy_version in {V076_DAY_STRATEGY_VERSION, DAY_STRATEGY_VERSION} and technical_setup:
         candidate_watch_bucket = {
             "ENTRY_PROVISIONAL": "ENTRY_PROVISIONAL",
             "WAIT_TRIGGER": "VALID_SETUP_WAIT",
@@ -1198,7 +1211,7 @@ def build_day_candidate(
             score,
         )
     if category == "WATCH_ONLY" and not (
-        strategy_version == DAY_STRATEGY_VERSION and technical_setup
+        strategy_version in {V076_DAY_STRATEGY_VERSION, DAY_STRATEGY_VERSION} and technical_setup
     ):
         decision = "NO_TRADE"
 
@@ -1233,7 +1246,7 @@ def build_day_candidate(
                 f"{round_to_tick(trigger_price, analysis.instrument.tick_size)}; remains active "
                 f"through the immediate next closed 5m bar while the boundary holds"
             )
-    elif strategy_version == DAY_STRATEGY_VERSION and persistent_breakout_context:
+    elif strategy_version in {V076_DAY_STRATEGY_VERSION, DAY_STRATEGY_VERSION} and persistent_breakout_context:
         trigger_condition = (
             f"Original 5m breakout boundary {round_to_tick(trigger_price, analysis.instrument.tick_size)} "
             "remains structurally held; fresh entry geometry is recalculated now. "
@@ -1247,7 +1260,7 @@ def build_day_candidate(
     if not derivatives:
         missing.append("Coinalyze OI/funding context unavailable for this symbol")
 
-    if strategy_version == DAY_STRATEGY_VERSION and technical_setup:
+    if strategy_version in {V076_DAY_STRATEGY_VERSION, DAY_STRATEGY_VERSION} and technical_setup:
         weakest = {
             "BLOCKED_BY_BARRIER": "Valid setup, but current entry path is blocked by structural barrier",
             "RR_NOT_READY": "Valid setup, but fresh current entry does not meet net-R requirements",
@@ -1275,8 +1288,8 @@ def build_day_candidate(
     ]
     if trigger_route == "LIQUIDITY_SWEEP_RECLAIM":
         why_now.append("Latest closed 5m bar completed the sweep/reclaim/structure confirmation sequence")
-    elif trigger_route == "CLOSED_5M_RANGE_BREAKOUT" or (
-        strategy_version == DAY_STRATEGY_VERSION and persistent_breakout_context
+    elif trigger_route in {"CLOSED_5M_RANGE_BREAKOUT", "STRUCTURALLY_HELD_5M_RANGE_BREAKOUT"} or (
+        strategy_version == V076_DAY_STRATEGY_VERSION and persistent_breakout_context
     ):
         age_bars = int((breakout_event or {}).get("age_bars", 0))
         if strategy_version == DAY_STRATEGY_VERSION:
@@ -1316,7 +1329,7 @@ def build_day_candidate(
         "execution_valid": strict_execution,
         "rr_valid": rr_valid,
         "reference_entry": round_to_tick(entry, analysis.instrument.tick_size),
-        "breakout_context": breakout_event if strategy_version == DAY_STRATEGY_VERSION else None,
+        "breakout_context": breakout_event if strategy_version in {V076_DAY_STRATEGY_VERSION, DAY_STRATEGY_VERSION} else None,
         "hard_stop": {
             **hard_stop,
             "price": round_to_tick(float(hard_stop["price"]), analysis.instrument.tick_size),
@@ -1353,7 +1366,7 @@ def build_day_candidate(
                 f">={DAY_TRIGGER_VOLUME_RATIO:.1f}x prior 20-bar mean volume on confirmation"
                 if trigger_route == "LIQUIDITY_SWEEP_RECLAIM"
                 else "No standalone volume hard gate; existing STRICT expansion/quality gates still apply"
-                if trigger_route == "CLOSED_5M_RANGE_BREAKOUT"
+                if trigger_route in {"CLOSED_5M_RANGE_BREAKOUT", "STRUCTURALLY_HELD_5M_RANGE_BREAKOUT"}
                 else "Not triggered"
             ),
             "triggered": triggered,
@@ -1369,6 +1382,8 @@ def build_day_candidate(
                 if trigger_route == "LIQUIDITY_SWEEP_RECLAIM"
                 else "CLOSED_5M_12_BAR_RANGE_BREAKOUT"
                 if trigger_route == "CLOSED_5M_RANGE_BREAKOUT"
+                else "STRUCTURE_PERSISTENT_CONFIRMED_5M_12_BAR_RANGE_BREAKOUT"
+                if trigger_route == "STRUCTURALLY_HELD_5M_RANGE_BREAKOUT"
                 else "STRUCTURE_PERSISTENT_5M_12_BAR_RANGE_BREAKOUT"
                 if strategy_version == DAY_STRATEGY_VERSION and persistent_breakout_context
                 else "NONE"
@@ -1547,7 +1562,7 @@ def build_day_regime(
             "Coinalyze derivatives": coinalyze_quality,
         },
         "notes": [
-            "Day-trade v0.7.6 separates setup validity from entry readiness: breakout setup context has no fixed 5m-bar TTL while its boundary remains structurally held; closed 5m remains an authoritative confirmation route, not a universal prerequisite for setup existence.",
+            "Day-trade v0.7.7 preserves confirmed breakout recommendations across later closed 5m bars while the original boundary and all fresh execution gates remain valid: breakout setup context has no fixed 5m-bar TTL while its boundary remains structurally held; closed 5m remains an authoritative confirmation route, not a universal prerequisite for setup existence.",
             "4H conflict is context-only and does not veto strict eligibility or execution.",
             "Coinalyze data is aggregated and not Bybit EU-specific unless explicitly marked.",
         ],
@@ -1926,7 +1941,7 @@ async def run() -> None:
                 "holding_time": "30 minutes to 8 hours",
                 "context_timeframes": ["4H", "1H"],
                 "setup_timeframe": "15m",
-                "trigger_timeframe": "v0.7.6 setup context persists structurally; executable confirmation remains closed-5m breakout/sweep while intrabar provisional acceptance is research-only",
+                "trigger_timeframe": "v0.7.7 confirmed breakout persists across later closed 5m bars while the original boundary and fresh setup/execution/RR/barrier gates remain valid",
                 "confirmation_timeframe": "15m closed non-opposing structure",
                 "four_hour_role": "CONTEXT_ONLY",
                 "strategy_version": DAY_STRATEGY_VERSION,
@@ -1942,7 +1957,7 @@ async def run() -> None:
             },
             "exclusions": exclusions[:100],
             "notes": [
-                "Prospective journal records are version-separated; v0.7.6 creates no historical backfill into v0.7.3-v0.7.5 cohorts.",
+                "Prospective journal records are version-separated; v0.7.7 creates no historical backfill into v0.7.3-v0.7.6 cohorts.",
                 "Fast coverage scans all eligible USDC pairs on 5m/15m; 1H/4H deep context is limited to promoted symbols.",
                 "WATCH_ONLY items are not entries.",
             ],
