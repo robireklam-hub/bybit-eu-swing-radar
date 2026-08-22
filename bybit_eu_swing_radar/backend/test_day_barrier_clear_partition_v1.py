@@ -28,17 +28,25 @@ def test_59_events_do_not_freeze_partial_development_cohort():
     assert result["development_partition_ready"] is False
     assert result["development_event_ids"] == []
     assert result["development_partition_fingerprint"] is None
+    assert result["development_boundary"] is None
     assert result["outcome_visible"] is False
     assert result["promotion_allowed"] is False
 
 
 def test_first_60_terminal_events_freeze_development_without_opening_outcomes():
-    result = freeze_partition(_events(60, clears=30, longs=30))
+    rows = _events(60, clears=30, longs=30)
+    result = freeze_partition(rows)
     assert result["development_partition_ready"] is True
     assert result["development_analysis_eligible"] is True
     assert len(result["development_event_ids"]) == 60
     assert result["development_partition_fingerprint"]
+    assert result["partition_boundary_order"] == ["resolved_at", "event_id"]
+    assert result["development_boundary"] == {
+        "resolved_at": rows[-1]["resolved_at"],
+        "event_id": rows[-1]["event_id"],
+    }
     assert result["validation_partition_ready"] is False
+    assert result["validation_boundary"] is None
     assert result["outcome_visible"] is False
     assert result["threshold_search_allowed"] is False
     assert result["execution_authorized"] is False
@@ -51,8 +59,10 @@ def test_next_40_are_untouched_validation_and_development_never_expands():
     full = freeze_partition(base + later)
     assert full["development_event_ids"] == first["development_event_ids"]
     assert full["development_partition_fingerprint"] == first["development_partition_fingerprint"]
+    assert full["development_boundary"] == first["development_boundary"]
     assert full["validation_partition_ready"] is True
     assert len(full["validation_event_ids"]) == 40
+    assert full["validation_boundary"] is not None
     assert set(full["development_event_ids"]).isdisjoint(full["validation_event_ids"])
 
 
@@ -62,6 +72,29 @@ def test_input_order_does_not_change_frozen_partition():
     reverse = freeze_partition(list(reversed(rows)))
     assert forward["development_partition_fingerprint"] == reverse["development_partition_fingerprint"]
     assert forward["validation_partition_fingerprint"] == reverse["validation_partition_fingerprint"]
+    assert forward["development_boundary"] == reverse["development_boundary"]
+    assert forward["validation_boundary"] == reverse["validation_boundary"]
+
+
+def test_composite_boundary_uses_event_id_when_resolved_at_ties():
+    rows = _events(61, clears=31, longs=31)
+    tied_time = rows[59]["resolved_at"]
+    rows[58]["resolved_at"] = tied_time
+    rows[59]["resolved_at"] = tied_time
+    rows[60]["resolved_at"] = tied_time
+    rows[58]["event_id"] = "event-tie-a"
+    rows[59]["event_id"] = "event-tie-b"
+    rows[60]["event_id"] = "event-tie-c"
+
+    result = freeze_partition(rows)
+
+    assert result["development_partition_ready"] is True
+    assert result["development_boundary"] == {
+        "resolved_at": tied_time,
+        "event_id": "event-tie-b",
+    }
+    assert result["development_event_ids"][-1] == "event-tie-b"
+    assert "event-tie-c" not in result["development_event_ids"]
 
 
 def test_fixed_60_does_not_extend_when_group_balance_fails():
