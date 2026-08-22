@@ -76,6 +76,27 @@ def test_input_order_does_not_change_frozen_partition():
     assert forward["validation_boundary"] == reverse["validation_boundary"]
 
 
+def test_equivalent_timezone_representations_do_not_change_partition_identity():
+    base = _events(100, clears=50, longs=50)
+    equivalent = [dict(row) for row in base]
+    for index, row in enumerate(equivalent):
+        instant = datetime.fromisoformat(row["resolved_at"])
+        if index % 3 == 0:
+            row["resolved_at"] = instant.isoformat().replace("+00:00", "Z")
+        elif index % 3 == 1:
+            row["resolved_at"] = instant.astimezone(timezone(timedelta(hours=2))).isoformat()
+
+    original = freeze_partition(base)
+    normalized = freeze_partition(equivalent)
+
+    assert normalized["development_event_ids"] == original["development_event_ids"]
+    assert normalized["validation_event_ids"] == original["validation_event_ids"]
+    assert normalized["development_partition_fingerprint"] == original["development_partition_fingerprint"]
+    assert normalized["validation_partition_fingerprint"] == original["validation_partition_fingerprint"]
+    assert normalized["development_boundary"] == original["development_boundary"]
+    assert normalized["validation_boundary"] == original["validation_boundary"]
+
+
 def test_composite_boundary_uses_event_id_when_resolved_at_ties():
     rows = _events(61, clears=31, longs=31)
     tied_time = rows[59]["resolved_at"]
