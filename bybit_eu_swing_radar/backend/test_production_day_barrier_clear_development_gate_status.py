@@ -50,8 +50,9 @@ def _payload():
 
 def test_balanced_fixed_first_60_authorizes_development_outcome_opening_only():
     result = validate_development_gate_observer(_payload())
-
     assert result["ok"] is True
+    assert result["verification_ok"] is True
+    assert result["opening_blockers"] == []
     assert result["outcome_fields_read"] is False
     assert result["development_event_count"] == 60
     assert result["development_outcome_opening_authorized"] is True
@@ -62,20 +63,36 @@ def test_balanced_fixed_first_60_authorizes_development_outcome_opening_only():
     assert result["execution_authorized"] is False
 
 
-def test_failed_preregistered_balance_fails_closed():
+def test_failed_preregistered_balance_is_verified_but_opening_remains_closed():
     payload = _payload()
     payload["partition"]["development_analysis_eligible"] = False
-    payload["partition"]["development_balance"]["cleared"] = 14
+    payload["partition"]["development_balance"]["short"] = 4
+
+    result = validate_development_gate_observer(payload)
+
+    assert result["ok"] is True
+    assert result["verification_ok"] is True
+    assert result["errors"] == []
+    assert result["development_outcome_opening_authorized"] is False
+    assert result["opening_blockers"] == ["development balance failed: short"]
+    assert result["development_partition_fingerprint"] == "f" * 64
+    assert result["development_boundary"]["event_id"] == "event-059"
+
+
+def test_analysis_eligibility_drift_fails_verification():
+    payload = _payload()
+    payload["partition"]["development_balance"]["short"] = 4
+    # Reported eligible=True is inconsistent with the preregistered balance.
 
     result = validate_development_gate_observer(payload)
 
     assert result["ok"] is False
     assert result["development_outcome_opening_authorized"] is False
-    assert "development balance failed: cleared" in result["errors"]
-    assert "development analysis eligibility not authorized" in result["errors"]
+    assert "development analysis eligibility mismatch" in result["errors"]
+    assert "development balance failed: short" in result["opening_blockers"]
 
 
-def test_missing_fixed_identity_or_boundary_fails_closed():
+def test_missing_fixed_identity_or_boundary_fails_verification():
     payload = _payload()
     payload["partition"]["development_event_ids"] = payload["partition"]["development_event_ids"][:-1]
     payload["partition"]["development_partition_fingerprint"] = None
@@ -90,7 +107,7 @@ def test_missing_fixed_identity_or_boundary_fails_closed():
     assert "development composite boundary missing" in result["errors"]
 
 
-def test_firewall_drift_fails_closed():
+def test_firewall_drift_fails_verification():
     payload = _payload()
     payload["partition"]["outcome_visible"] = True
     payload["partition"]["promotion_allowed"] = True
@@ -105,7 +122,7 @@ def test_firewall_drift_fails_closed():
     assert "partition.execution_authorized mismatch" in result["errors"]
 
 
-def test_terminal_count_drift_fails_closed():
+def test_terminal_count_drift_fails_verification():
     payload = _payload()
     payload["partition"]["terminal_event_count"] = 87
 
