@@ -31,8 +31,21 @@ async def test_live_persistence_has_no_inline_prospective_recorder(monkeypatch):
     assert funnel["enabled"] is False
     assert funnel["reason"]=="STANDALONE_RECORDER_OWNS_CAPTURE"
     assert funnel["execution_mode"]=="STANDALONE_RAILWAY_CRON"
+    assert scan["strategy_mode"] == "DAY_TRADE"
+    assert status["strategy_mode"] == "DAY_TRADE"
+    assert scan["strategy_version"] == day_worker.DAY_STRATEGY_VERSION
+    assert status["strategy_version"] == day_worker.DAY_STRATEGY_VERSION
+    assert funnel["live_strategy_version"] == status["strategy_version"]
     assert scan["prospective_funnel"]==funnel
     assert {key for key,_ in cache_writes} >= {"day_trade_scan","day_trade_status"}
+
+def test_live_persistence_rejects_conflicting_day_lineage():
+    payload = {"strategy_version": "0.7.6"}
+    with pytest.raises(ValueError, match="strategy_version mismatch"):
+        day_worker.enforce_day_payload_lineage(
+            payload,
+            payload_name="day_trade_status",
+        )
 
 def test_live_worker_exports_no_inline_recorder_controls():
     assert not hasattr(day_worker,"persist_v073_prospective_funnel")

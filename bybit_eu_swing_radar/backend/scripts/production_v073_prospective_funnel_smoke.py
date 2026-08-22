@@ -6,7 +6,7 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.request import Request, urlopen
 
 POLL_SECONDS = 5
@@ -30,6 +30,67 @@ def _parse_dt(value: Any) -> datetime | None:
 def _capture_age(payload: dict[str, Any], now: datetime) -> float | None:
     captured_at = _parse_dt(payload.get("captured_at"))
     return None if captured_at is None else max(0.0, (now - captured_at).total_seconds())
+
+
+def validate_live_day_status(payload: dict[str, Any]) -> dict[str, Any]:
+    """Validate the authoritative live day lineage used by research sidecars."""
+    errors: list[str] = []
+    marker = payload.get("prospective_funnel") or {}
+    expected_marker = {
+        "status": "EXTERNALIZED",
+        "enabled": False,
+        "reason": "STANDALONE_RECORDER_OWNS_CAPTURE",
+        "execution_mode": "STANDALONE_RAILWAY_CRON",
+    }
+    for key, expected in expected_marker.items():
+        if marker.get(key) != expected:
+            errors.append(f"prospective_funnel.{key} mismatch")
+
+    strategy_version = payload.get("strategy_version")
+    if not isinstance(strategy_version, str) or not strategy_version:
+        errors.append("live strategy_version missing")
+        strategy_version = ""
+    marker_strategy_version = marker.get("live_strategy_version")
+    if not isinstance(marker_strategy_version, str) or not marker_strategy_version:
+        errors.append("prospective_funnel.live_strategy_version missing")
+    elif strategy_version and marker_strategy_version != strategy_version:
+        errors.append("live strategy lineage mismatch")
+    return {
+        "ok": not errors,
+        "errors": errors,
+        "strategy_version": strategy_version or None,
+        "marker_strategy_version": marker_strategy_version,
+    }
+
+
+def wait_for_live_day_status(
+    fetch: Callable[[], dict[str, Any]],
+    *,
+    max_attempts: int,
+    sleep_seconds: float,
+) -> dict[str, Any]:
+    """Wait for the day worker cache to converge after an exact-main deploy."""
+    last: dict[str, Any] = {
+        "ok": False,
+        "errors": ["live day status not attempted"],
+        "strategy_version": None,
+        "marker_strategy_version": None,
+    }
+    for attempt in range(max(1, max_attempts)):
+        try:
+            last = validate_live_day_status(fetch())
+        except Exception as exc:
+            last = {
+                "ok": False,
+                "errors": ["live day status fetch error: " + type(exc).__name__],
+                "strategy_version": None,
+                "marker_strategy_version": None,
+            }
+        if last["ok"]:
+            return last
+        if attempt < max_attempts - 1:
+            time.sleep(sleep_seconds)
+    return last
 
 
 def validate_standalone_status(payload: dict[str, Any], expected_sha: str, now: datetime | None = None) -> dict[str, Any]:
@@ -220,20 +281,19 @@ def main() -> int:
             return 1
         time.sleep(POLL_SECONDS)
 
-    live = get("/v1/day-trade/status")
-    marker = live.get("prospective_funnel") or {}
-    if not (
-        marker.get("status") == "EXTERNALIZED"
-        and marker.get("enabled") is False
-        and marker.get("reason") == "STANDALONE_RECORDER_OWNS_CAPTURE"
-        and marker.get("execution_mode") == "STANDALONE_RAILWAY_CRON"
-    ):
-        print("FAIL live day-worker prospective marker is not externalized", flush=True)
+    live_evidence = wait_for_live_day_status(
+        lambda: get("/v1/day-trade/status"),
+        max_attempts=MAX_API_POLLS,
+        sleep_seconds=POLL_SECONDS,
+    )
+    if not live_evidence["ok"]:
+        print(
+            "FAIL live day-worker lineage contract "
+            + json.dumps(live_evidence, sort_keys=True),
+            flush=True,
+        )
         return 1
-    live_strategy_version = live.get("strategy_version")
-    if not isinstance(live_strategy_version, str) or not live_strategy_version:
-        print("FAIL live day-worker strategy_version missing", flush=True)
-        return 1
+    live_strategy_version = str(live_evidence["strategy_version"])
 
     last: dict[str, Any] | None = None
     for attempt in range(MAX_CAPTURE_POLLS):

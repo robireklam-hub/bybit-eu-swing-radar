@@ -108,6 +108,7 @@ def _live_status(*, strategy_version: str | None = LIVE_VERSION) -> dict[str, ob
             "enabled": False,
             "reason": "STANDALONE_RECORDER_OWNS_CAPTURE",
             "execution_mode": "STANDALONE_RAILWAY_CRON",
+            "live_strategy_version": LIVE_VERSION,
         }
     }
     if strategy_version is not None:
@@ -148,6 +149,15 @@ def test_missing_live_strategy_version_fails_preflight_closed():
     assert result["ok"] is False
     assert "live strategy_version missing" in result["errors"]
     assert "expected live strategy_version missing" in result["errors"]
+
+
+def test_live_marker_version_drift_fails_preflight_closed():
+    sha = "a" * 40
+    live = _live_status()
+    live["prospective_funnel"]["live_strategy_version"] = "0.7.6"
+    result = _evaluate(sha, live=live)
+    assert result["ok"] is False
+    assert "live strategy lineage mismatch" in result["errors"]
 
 
 def test_parent_or_observer_live_version_drift_fails_preflight():
