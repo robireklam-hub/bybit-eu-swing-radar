@@ -1,0 +1,42 @@
+name: NEVER MERGE exact-main fb922a9 verification
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/tmp-exact-main-fb922a9.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  exact-production-semantic-verification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: fb922a9ff6325596784bfe80d1bc8fefaff8989e
+
+    steps:
+      - name: Check out exact expected main
+        uses: actions/checkout@v7
+        with:
+          ref: fb922a9ff6325596784bfe80d1bc8fefaff8989e
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Verify swing candidate Coinalyze semantics
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_coinalyze_smoke.py
+
+      - name: Verify label-blind swing liquidity event construction
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_event_smoke.py
+
+      - name: Verify label-blind swing liquidity maturity status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_maturity_status.py
