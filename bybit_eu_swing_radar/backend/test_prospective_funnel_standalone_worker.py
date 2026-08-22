@@ -138,6 +138,25 @@ def test_persist_standalone_capture_writes_only_dedicated_research_status(monkey
             "execution_authorized": False,
         }
 
+    async def fake_v2(conn, **kwargs):
+        assert conn is connection
+        assert "captured_at" in kwargs
+        return {
+            "trial_id": "day-barrier-clear-rearm-v2",
+            "activated": True,
+            "eligible_terminal_event_count": 0,
+            "eligible_long_count": 0,
+            "eligible_short_count": 0,
+            "development_ready": False,
+            "development_event_count": 0,
+            "validation_ready": False,
+            "validation_event_count": 0,
+            "outcome_visible": False,
+            "threshold_search_allowed": False,
+            "promotion_allowed": False,
+            "execution_authorized": False,
+        }
+
     async def fake_upsert(conn, key, payload):
         assert conn is connection
         calls["cache"].append((key, payload))
@@ -151,6 +170,7 @@ def test_persist_standalone_capture_writes_only_dedicated_research_status(monkey
     monkeypatch.setattr(worker, "persist_parent_batch", fake_parent)
     monkeypatch.setattr(worker, "persist_pending_resolutions", fake_observer)
     monkeypatch.setattr(worker, "load_partition_status", fake_partition)
+    monkeypatch.setattr(worker, "load_v2_status", fake_v2)
     monkeypatch.setattr(worker.live, "upsert_cache", fake_upsert)
 
     result = asyncio.run(
@@ -170,6 +190,8 @@ def test_persist_standalone_capture_writes_only_dedicated_research_status(monkey
     assert result["barrier_clear_rearm"]["observer"]["execution_authorized"] is False
     assert result["barrier_clear_rearm"]["observer"]["partition"]["terminal_event_count"] == 0
     assert result["barrier_clear_rearm"]["observer"]["partition"]["outcome_visible"] is False
+    assert result["barrier_clear_rearm"]["observer"]["v2"]["trial_id"] == "day-barrier-clear-rearm-v2"
+    assert result["barrier_clear_rearm"]["observer"]["v2"]["outcome_visible"] is False
     assert calls["closed"] is True
     keys = [key for key, _ in calls["cache"]]
     assert keys == [
