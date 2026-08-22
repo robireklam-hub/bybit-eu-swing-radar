@@ -81,7 +81,10 @@ def validate_standalone_status(payload: dict[str, Any], expected_sha: str, now: 
 
 
 def validate_barrier_parent_status(
-    payload: dict[str, Any], expected_sha: str, now: datetime | None = None
+    payload: dict[str, Any],
+    expected_sha: str,
+    current_live_strategy_version: str,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
     age = _capture_age(payload, now)
@@ -94,7 +97,6 @@ def validate_barrier_parent_status(
         "live_strategy_mutation": False,
         "parent_strategy_version": "0.7.5",
         "execution_mode": "SHARED_STANDALONE_RESEARCH_SIDECAR",
-        "current_live_strategy_version": "0.7.6",
         "live_worker_inline_recorder": False,
         "live_worker_mutation": False,
         "outcome_visibility": OUTCOME_VISIBILITY,
@@ -102,6 +104,10 @@ def validate_barrier_parent_status(
     for key, value in expected.items():
         if payload.get(key) != value:
             errors.append(f"parent.{key} mismatch")
+    if not current_live_strategy_version:
+        errors.append("expected live strategy_version missing")
+    elif payload.get("current_live_strategy_version") != current_live_strategy_version:
+        errors.append("parent.current_live_strategy_version mismatch")
     if payload.get("source_commit_sha") != expected_sha:
         errors.append("parent source SHA mismatch")
     if not payload.get("prospective_start_at"):
@@ -127,7 +133,10 @@ def validate_barrier_parent_status(
 
 
 def validate_barrier_observer_status(
-    payload: dict[str, Any], expected_sha: str, now: datetime | None = None
+    payload: dict[str, Any],
+    expected_sha: str,
+    current_live_strategy_version: str,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
     age = _capture_age(payload, now)
@@ -146,7 +155,6 @@ def validate_barrier_observer_status(
         "execution_mutation": False,
         "parent_strategy_version": "0.7.5",
         "execution_mode": "SHARED_STANDALONE_RESEARCH_SIDECAR",
-        "current_live_strategy_version": "0.7.6",
         "live_worker_inline_recorder": False,
         "live_worker_mutation": False,
         "outcome_visibility": OUTCOME_VISIBILITY,
@@ -154,6 +162,10 @@ def validate_barrier_observer_status(
     for key, value in expected.items():
         if payload.get(key) != value:
             errors.append(f"observer.{key} mismatch")
+    if not current_live_strategy_version:
+        errors.append("expected live strategy_version missing")
+    elif payload.get("current_live_strategy_version") != current_live_strategy_version:
+        errors.append("observer.current_live_strategy_version mismatch")
     if payload.get("source_commit_sha") != expected_sha:
         errors.append("observer source SHA mismatch")
     if age is None or age > MAX_CAPTURE_AGE_SECONDS:
@@ -218,6 +230,10 @@ def main() -> int:
     ):
         print("FAIL live day-worker prospective marker is not externalized", flush=True)
         return 1
+    live_strategy_version = live.get("strategy_version")
+    if not isinstance(live_strategy_version, str) or not live_strategy_version:
+        print("FAIL live day-worker strategy_version missing", flush=True)
+        return 1
 
     last: dict[str, Any] | None = None
     for attempt in range(MAX_CAPTURE_POLLS):
@@ -227,8 +243,12 @@ def main() -> int:
             observer_payload = get("/v1/day-trade/research/barrier-clear-rearm/observer-status")
             evidence = {
                 "funnel": validate_standalone_status(funnel_payload, expected_sha),
-                "barrier_parent": validate_barrier_parent_status(parent_payload, expected_sha),
-                "barrier_observer": validate_barrier_observer_status(observer_payload, expected_sha),
+                "barrier_parent": validate_barrier_parent_status(
+                    parent_payload, expected_sha, live_strategy_version
+                ),
+                "barrier_observer": validate_barrier_observer_status(
+                    observer_payload, expected_sha, live_strategy_version
+                ),
             }
             evidence["ok"] = all(item["ok"] for item in evidence.values())
             last = evidence
