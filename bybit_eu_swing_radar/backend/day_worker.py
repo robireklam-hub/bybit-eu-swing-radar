@@ -122,6 +122,7 @@ DEFAULT_DAY_SYMBOLS = {
     "BNBUSDC", "ADAUSDC", "LINKUSDC", "SUIUSDC", "AVAXUSDC",
     "HYPEUSDC", "ENAUSDC", "BCHUSDC", "LTCUSDC", "XLMUSDC",
 }
+DAY_CORE_DERIVATIVES_SYMBOLS = ("BTCUSDC", "ETHUSDC", "SOLUSDC")
 DAY_MANDATORY_SYMBOLS = {
     item.strip().upper()
     for item in os.getenv(
@@ -417,6 +418,7 @@ def calculate_fast_result(
 
 
 def select_deep_universe(results: list[FastResult]) -> list[FastResult]:
+    by_symbol = {item.instrument.symbol: item for item in results}
     ranked = sorted(
         results,
         key=lambda item: (
@@ -428,6 +430,17 @@ def select_deep_universe(results: list[FastResult]) -> list[FastResult]:
     )
     selected: list[FastResult] = []
     seen: set[str] = set()
+
+    # BTC/ETH/SOL are the permanent day-trade context anchors. Keep them in
+    # deep analysis whenever their eligible fast-market snapshot exists, even
+    # if an environment override expands or replaces DAY_MANDATORY_SYMBOLS.
+    for symbol in DAY_CORE_DERIVATIVES_SYMBOLS:
+        item = by_symbol.get(symbol)
+        if item is None:
+            continue
+        selected.append(item)
+        seen.add(symbol)
+
     for item in ranked:
         if item.instrument.symbol in seen:
             continue
@@ -435,16 +448,35 @@ def select_deep_universe(results: list[FastResult]) -> list[FastResult]:
         seen.add(item.instrument.symbol)
         if len(selected) >= DAY_DEEP_LIMIT:
             break
-
-    btc = next(
-        (item for item in results if item.instrument.symbol == "BTCUSDC"), None
-    )
-    if btc and btc.instrument.symbol not in seen:
-        if len(selected) >= DAY_DEEP_LIMIT:
-            selected[-1] = btc
-        else:
-            selected.append(btc)
     return selected
+
+
+def select_day_coinalyze_targets(
+    analyses: list[DayAnalysis],
+) -> tuple[list[DayAnalysis], list[str]]:
+    """Reserve the bounded Coinalyze budget for available core day symbols.
+
+    The shared selector still fills the remaining slots by setup score. This
+    only controls context coverage; it does not change execution eligibility,
+    candidate gates, entry geometry, or the nine-symbol rate budget.
+    """
+    available_symbols = {item.instrument.symbol for item in analyses}
+    priority_symbols = [
+        symbol
+        for symbol in DAY_CORE_DERIVATIVES_SYMBOLS
+        if symbol in available_symbols
+    ]
+    targets = select_coinalyze_targets(analyses, priority_symbols)
+    targeted_symbols = {item.instrument.symbol for item in targets}
+    missing_targets = [
+        symbol for symbol in priority_symbols if symbol not in targeted_symbols
+    ]
+    if missing_targets:
+        raise RuntimeError(
+            "Core day Coinalyze priority symbols were not targeted: "
+            + ", ".join(missing_targets)
+        )
+    return targets, priority_symbols
 
 
 def analyze_day_market(
@@ -1837,11 +1869,16 @@ async def run() -> None:
                     "reason": str(exc),
                 })
 
-        # Freeze the intentional rate-budget target set so downstream health
-        # uses the same denominator as the enrichment call. This does not
-        # change which symbols are selected or any score/execution semantics.
-        coinalyze_targets = select_coinalyze_targets(analyses)
+        # Reserve the bounded rate budget for the available BTC/ETH/SOL core,
+        # then fill the remaining slots by setup score. This is context/scoring
+        # enrichment only and does not add an execution gate.
+        coinalyze_targets, coinalyze_priority_symbols = (
+            select_day_coinalyze_targets(analyses)
+        )
         coinalyze_target_count = len(coinalyze_targets)
+        coinalyze_target_symbols = [
+            item.instrument.symbol for item in coinalyze_targets
+        ]
         coinalyze_ok, coinalyze_error = await enrich_coinalyze(
             analyses, coinalyze, target_analyses=coinalyze_targets
         )
@@ -1894,6 +1931,29 @@ async def run() -> None:
         coinalyze_complete_count = sum(
             1 for item in analyses if coinalyze_payload_complete(item.derivatives)
         )
+        coinalyze_priority_missing_analysis_symbols = [
+            symbol
+            for symbol in DAY_CORE_DERIVATIVES_SYMBOLS
+            if symbol not in coinalyze_priority_symbols
+        ]
+        coinalyze_priority_targeted_symbols = [
+            symbol
+            for symbol in coinalyze_priority_symbols
+            if symbol in coinalyze_target_symbols
+        ]
+        derivatives_by_symbol = {
+            item.instrument.symbol: item.derivatives for item in analyses
+        }
+        coinalyze_priority_enriched_symbols = [
+            symbol
+            for symbol in coinalyze_priority_symbols
+            if derivatives_by_symbol.get(symbol)
+        ]
+        coinalyze_priority_complete_symbols = [
+            symbol
+            for symbol in coinalyze_priority_symbols
+            if coinalyze_payload_complete(derivatives_by_symbol.get(symbol) or {})
+        ]
         regime = build_day_regime(
             analyses,
             now,
@@ -1923,6 +1983,32 @@ async def run() -> None:
             "coinalyze_target_symbols": coinalyze_target_count,
             "coinalyze_analysis_symbols": len(analyses),
             "coinalyze_budget_bounded": len(analyses) > coinalyze_target_count,
+            "coinalyze_priority_symbols": coinalyze_priority_symbols,
+            "coinalyze_priority_missing_analysis_symbols": (
+                coinalyze_priority_missing_analysis_symbols
+            ),
+            "coinalyze_targeted_symbol_list": coinalyze_target_symbols,
+            "coinalyze_priority_targeted_symbols": (
+                coinalyze_priority_targeted_symbols
+            ),
+            "coinalyze_priority_enriched_symbols": (
+                coinalyze_priority_enriched_symbols
+            ),
+            "coinalyze_priority_complete_symbols": (
+                coinalyze_priority_complete_symbols
+            ),
+            "coinalyze_priority_target_coverage_complete": (
+                set(coinalyze_priority_targeted_symbols)
+                == set(coinalyze_priority_symbols)
+            ),
+            "coinalyze_priority_enrichment_complete": (
+                set(coinalyze_priority_enriched_symbols)
+                == set(coinalyze_priority_symbols)
+            ),
+            "coinalyze_priority_payload_complete": (
+                set(coinalyze_priority_complete_symbols)
+                == set(coinalyze_priority_symbols)
+            ),
             "borrowability_checked_symbols": len(analyses) if borrow_ok else 0,
         }
 
