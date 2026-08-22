@@ -1,0 +1,70 @@
+name: NEVER MERGE exact-main 0aacc9c verification
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/tmp-exact-main-0aacc9c.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  exact-production-semantic-verification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: 0aacc9c9bc5c1b5a8883398b387982e5d8fa861a
+
+    steps:
+      - name: Check out exact expected main
+        uses: actions/checkout@v7
+        with:
+          ref: 0aacc9c9bc5c1b5a8883398b387982e5d8fa861a
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Wait for exact production API SHA
+        working-directory: bybit_eu_swing_radar/backend
+        run: |
+          python - <<'PY'
+          import json, os, time
+          from urllib.request import Request, urlopen
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          key = os.environ['PRODUCTION_RADAR_API_KEY']
+          expected = os.environ['EXPECTED_SHA']
+          for attempt in range(120):
+              req = Request(base + '/version', headers={'X-Radar-Key': key, 'Accept': 'application/json'})
+              try:
+                  with urlopen(req, timeout=15) as response:
+                      payload = json.loads(response.read().decode())
+                  actual = str(payload.get('commit_sha') or payload.get('source_commit_sha') or payload.get('git_sha') or '')
+              except Exception as exc:
+                  actual = f'ERROR:{type(exc).__name__}'
+              print(f'production SHA attempt {attempt + 1}/120: {actual}', flush=True)
+              if actual == expected:
+                  raise SystemExit(0)
+              time.sleep(5)
+          raise SystemExit('exact production API SHA did not converge')
+          PY
+
+      - name: Verify swing candidate Coinalyze semantics
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_coinalyze_smoke.py
+
+      - name: Verify label-blind swing liquidity event construction
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_event_smoke.py
+
+      - name: Verify label-blind swing liquidity maturity status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_maturity_status.py
+
+      - name: Verify barrier-clear v2 prospective status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_day_barrier_clear_v2_status.py
