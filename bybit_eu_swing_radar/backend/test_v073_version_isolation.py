@@ -34,4 +34,4 @@ def test_backtest_writer_and_default_job_are_v075():
 def test_version_isolation_keeps_flow_feature_0722():
     flow = (BACKEND / "flow_context.py").read_text(encoding="utf-8")
     assert 'Day-trade derivatives flow context v0.7.2.2.' in flow
-    assert 'does NOT change the v0.7.6 STRICT gates' in flow
+    assert 'does NOT change the v0.7.7 STRICT gates' in flow
