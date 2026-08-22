@@ -3,7 +3,9 @@ from datetime import datetime, timedelta, timezone
 from scripts.production_v073_prospective_funnel_smoke import (
     validate_barrier_observer_status,
     validate_barrier_parent_status,
+    validate_live_day_status,
     validate_standalone_status,
+    wait_for_live_day_status,
 )
 
 
@@ -12,6 +14,20 @@ NOW = datetime(2026, 8, 18, 14, 0, tzinfo=timezone.utc)
 LOCKED = "LOCKED_UNTIL_PREREGISTERED_DEVELOPMENT_GATE"
 CONTEXT = "day-barrier-clear-context-v1"
 LIVE_VERSION = "0.7.7"
+
+
+def _live_status() -> dict:
+    return {
+        "strategy_mode": "DAY_TRADE",
+        "strategy_version": LIVE_VERSION,
+        "prospective_funnel": {
+            "status": "EXTERNALIZED",
+            "enabled": False,
+            "reason": "STANDALONE_RECORDER_OWNS_CAPTURE",
+            "execution_mode": "STANDALONE_RAILWAY_CRON",
+            "live_strategy_version": LIVE_VERSION,
+        },
+    }
 
 
 def _payload() -> dict:
@@ -110,6 +126,38 @@ def test_zero_sample_standalone_first_run_is_valid():
     assert result["ok"] is True
     assert result["errors"] == []
     assert result["cumulative"]["distinct_sweep_events"] == 0
+
+
+def test_live_day_status_exposes_consistent_authoritative_lineage():
+    result = validate_live_day_status(_live_status())
+    assert result["ok"] is True
+    assert result["strategy_version"] == LIVE_VERSION
+    assert result["marker_strategy_version"] == LIVE_VERSION
+
+
+def test_live_day_status_fails_closed_on_missing_or_mismatched_lineage():
+    missing = _live_status()
+    missing.pop("strategy_version")
+    assert "live strategy_version missing" in validate_live_day_status(missing)["errors"]
+
+    drifted = _live_status()
+    drifted["prospective_funnel"]["live_strategy_version"] = "0.7.6"
+    assert "live strategy lineage mismatch" in validate_live_day_status(drifted)["errors"]
+
+
+def test_live_day_status_waits_for_post_deploy_cache_convergence():
+    stale = _live_status()
+    stale.pop("strategy_version")
+    payloads = iter((stale, _live_status()))
+
+    result = wait_for_live_day_status(
+        lambda: next(payloads),
+        max_attempts=2,
+        sleep_seconds=0,
+    )
+
+    assert result["ok"] is True
+    assert result["strategy_version"] == LIVE_VERSION
 
 
 def test_zero_parent_and_zero_resolution_are_valid_prospective_states():

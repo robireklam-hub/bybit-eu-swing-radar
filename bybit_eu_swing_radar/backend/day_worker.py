@@ -1669,12 +1669,37 @@ async def upsert_cache(
     )
 
 
+def enforce_day_payload_lineage(
+    payload: dict[str, Any],
+    *,
+    payload_name: str,
+) -> None:
+    """Attach authoritative day lineage and reject conflicting cache payloads."""
+    strategy_mode = payload.get("strategy_mode")
+    if strategy_mode not in (None, "DAY_TRADE"):
+        raise ValueError(
+            f"{payload_name} strategy_mode mismatch: {strategy_mode!r}"
+        )
+    strategy_version = payload.get("strategy_version")
+    if strategy_version not in (None, DAY_STRATEGY_VERSION):
+        raise ValueError(
+            f"{payload_name} strategy_version mismatch: {strategy_version!r}"
+        )
+    payload["strategy_mode"] = "DAY_TRADE"
+    payload["strategy_version"] = DAY_STRATEGY_VERSION
+
+
 async def persist_day_results(
     scan: dict[str, Any],
     setups: list[dict[str, Any]],
     status: dict[str, Any],
     bars_by_symbol: dict[str, list[Bar]],
 ) -> dict[str, Any]:
+    # The public status endpoint reads this cache verbatim. Enforce lineage at
+    # the final persistence boundary so no caller or later refactor can emit a
+    # versionless or contradictory live day status.
+    enforce_day_payload_lineage(scan, payload_name="day_trade_scan")
+    enforce_day_payload_lineage(status, payload_name="day_trade_status")
     connection = await asyncpg.connect(DATABASE_URL, timeout=30)
     try:
         async with connection.transaction():
@@ -2014,6 +2039,7 @@ async def run() -> None:
 
         scan = {
             "strategy_mode": "DAY_TRADE",
+            "strategy_version": DAY_STRATEGY_VERSION,
             "data_as_of": now.isoformat(),
             "data_as_of_budapest": now.astimezone(BUDAPEST).isoformat(),
             "data_quality": data_quality,
@@ -2053,6 +2079,8 @@ async def run() -> None:
             datetime.now(timezone.utc) - started
         ).total_seconds()
         status = {
+            "strategy_mode": "DAY_TRADE",
+            "strategy_version": DAY_STRATEGY_VERSION,
             "checked_at": now.isoformat(),
             "worker": {
                 "status": "ok",

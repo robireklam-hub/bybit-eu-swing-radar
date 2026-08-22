@@ -20,6 +20,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from scripts.production_v073_prospective_funnel_smoke import (
+    validate_live_day_status,
     validate_barrier_observer_status,
     validate_barrier_parent_status,
     validate_standalone_status,
@@ -27,21 +28,6 @@ from scripts.production_v073_prospective_funnel_smoke import (
 
 PREFLIGHT_POLL_SECONDS = 10
 PREFLIGHT_MAX_WAIT_SECONDS = 300
-
-
-def validate_externalized_marker(payload: dict[str, Any]) -> list[str]:
-    marker = payload.get("prospective_funnel") or {}
-    errors: list[str] = []
-    expected = {
-        "status": "EXTERNALIZED",
-        "enabled": False,
-        "reason": "STANDALONE_RECORDER_OWNS_CAPTURE",
-        "execution_mode": "STANDALONE_RAILWAY_CRON",
-    }
-    for key, value in expected.items():
-        if marker.get(key) != value:
-            errors.append(f"prospective_funnel.{key} mismatch")
-    return errors
 
 
 def evaluate_preflight(
@@ -56,11 +42,9 @@ def evaluate_preflight(
     errors: list[str] = []
     if version.get("commit_sha") != expected_sha:
         errors.append("production API SHA mismatch")
-    errors.extend(validate_externalized_marker(live_status))
-    live_strategy_version = live_status.get("strategy_version")
-    if not isinstance(live_strategy_version, str) or not live_strategy_version:
-        errors.append("live strategy_version missing")
-        live_strategy_version = ""
+    live = validate_live_day_status(live_status)
+    errors.extend(str(item) for item in live["errors"])
+    live_strategy_version = str(live.get("strategy_version") or "")
     prospective = validate_standalone_status(prospective_status, expected_sha)
     parent = validate_barrier_parent_status(
         barrier_parent_status, expected_sha, live_strategy_version
