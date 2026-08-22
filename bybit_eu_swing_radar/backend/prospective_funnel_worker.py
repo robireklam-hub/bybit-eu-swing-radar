@@ -27,6 +27,7 @@ from research.day_barrier_clear_parent_recorder_v1 import (
     persist_parent_batch,
 )
 from research.day_barrier_clear_partition_status_v1 import load_partition_status
+from research.day_barrier_clear_rearm_v2_status import load_v2_status
 from research.prospective_funnel_v073 import persist_v073_prospective_funnel
 
 STATUS_CACHE_KEY = "day_trade_prospective_funnel_status"
@@ -244,6 +245,11 @@ async def persist_standalone_capture(
                 source_commit_sha=live.SOURCE_COMMIT_SHA,
             )
             partition_status = await load_partition_status(connection)
+            v2_status = await load_v2_status(
+                connection,
+                source_commit_sha=live.SOURCE_COMMIT_SHA,
+                captured_at=captured_at,
+            )
             forced_symbols = sorted({str(item).upper() for item in required_barrier_symbols})
             parent_cache_status = {
                 **parent_status,
@@ -257,6 +263,7 @@ async def persist_standalone_capture(
             observer_cache_status = {
                 **observer_status,
                 "partition": partition_status,
+                "v2": v2_status,
                 "execution_mode": "SHARED_STANDALONE_RESEARCH_SIDECAR",
                 "current_live_strategy_version": live.DAY_STRATEGY_VERSION,
                 "forced_tracking_symbols": forced_symbols,
@@ -313,6 +320,7 @@ async def run() -> None:
     barrier = status.get("barrier_clear_rearm") or {}
     observer = barrier.get("observer") or {}
     partition = observer.get("partition") or {}
+    v2 = observer.get("v2") or {}
     print(
         "Prospective research complete: "
         f"observed={status['current_run']['observed_snapshots']}, "
@@ -322,6 +330,9 @@ async def run() -> None:
         f"barrier_new={barrier.get('inserted_this_run', 0)}, "
         f"barrier_resolved={sum((observer.get('resolved_this_run') or {}).values())}, "
         f"barrier_terminal={partition.get('terminal_event_count', 0)}, "
+        f"barrier_v2_eligible={v2.get('eligible_terminal_event_count', 0)}, "
+        f"barrier_v2_long={v2.get('eligible_long_count', 0)}, "
+        f"barrier_v2_short={v2.get('eligible_short_count', 0)}, "
         f"duration={duration:.1f}s",
         flush=True,
     )
