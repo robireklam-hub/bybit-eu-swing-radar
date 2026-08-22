@@ -1,0 +1,68 @@
+name: NEVER MERGE exact-main e3a0ad2 verifier
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: never-merge-exact-main-e3a0ad2
+  cancel-in-progress: true
+
+jobs:
+  production-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PRODUCTION_RADAR_API_BASE_URL: ${{ vars.PRODUCTION_RADAR_API_BASE_URL }}
+      PRODUCTION_RADAR_API_KEY: ${{ secrets.PRODUCTION_RADAR_API_KEY }}
+      EXPECTED_SHA: e3a0ad266b4c39e6dfcc92082f0ddeba06259fed
+    steps:
+      - name: Check out exact main commit
+        uses: actions/checkout@v7
+        with:
+          ref: e3a0ad266b4c39e6dfcc92082f0ddeba06259fed
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Verify exact production API SHA
+        working-directory: bybit_eu_swing_radar/backend
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.request
+          base = os.environ['PRODUCTION_RADAR_API_BASE_URL'].rstrip('/')
+          expected = os.environ['EXPECTED_SHA']
+          headers = {}
+          key = os.environ.get('PRODUCTION_RADAR_API_KEY')
+          if key:
+              headers['X-API-Key'] = key
+          last = None
+          for _ in range(80):
+              req = urllib.request.Request(base + '/version', headers=headers)
+              with urllib.request.urlopen(req, timeout=20) as r:
+                  last = json.loads(r.read().decode())
+              if last.get('commit_sha') == expected or last.get('source_commit_sha') == expected:
+                  print(json.dumps(last, sort_keys=True))
+                  break
+              time.sleep(15)
+          else:
+              raise SystemExit(f'exact production API SHA mismatch: expected={expected} observed={last}')
+          PY
+
+      - name: Verify swing candidate Coinalyze semantics
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_coinalyze_smoke.py
+
+      - name: Verify label-blind swing liquidity event construction
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_event_smoke.py
+
+      - name: Verify label-blind swing liquidity maturity status
+        working-directory: bybit_eu_swing_radar/backend
+        run: python scripts/production_swing_liquidity_maturity_status.py
