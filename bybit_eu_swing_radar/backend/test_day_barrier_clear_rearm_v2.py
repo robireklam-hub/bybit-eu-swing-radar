@@ -10,11 +10,14 @@ from research.day_barrier_clear_rearm_v2 import (
 )
 
 
-def _event(event_id: str, side: str, resolved_at: datetime, **extra):
+def _event(event_id: str, side: str, resolved_at: datetime, *, captured_at: datetime | None = None, **extra):
+    if captured_at is None:
+        captured_at = resolved_at - timedelta(seconds=30)
     row = {
         "event_id": event_id,
         "side": side,
         "terminal": True,
+        "captured_at": captured_at.isoformat(),
         "resolved_at": resolved_at.isoformat(),
     }
     row.update(extra)
@@ -80,9 +83,41 @@ def test_exact_30_30_development_and_20_20_validation_are_frozen_deterministical
 
 def test_events_at_or_before_activation_boundary_are_rejected_to_prevent_backfill():
     boundary = datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc)
-    with pytest.raises(ValueError, match="strictly after"):
+    with pytest.raises(ValueError, match="resolve strictly after"):
         build_side_stratified_partition(
-            [_event("old", "long", boundary)],
+            [_event("old", "long", boundary, captured_at=boundary + timedelta(seconds=1))],
+            activation_boundary=boundary,
+        )
+
+
+def test_pre_activation_parent_is_rejected_even_if_resolution_is_post_activation():
+    boundary = datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc)
+    with pytest.raises(ValueError, match="parents must be captured strictly after"):
+        build_side_stratified_partition(
+            [
+                _event(
+                    "old-parent",
+                    "short",
+                    boundary + timedelta(minutes=10),
+                    captured_at=boundary - timedelta(minutes=1),
+                )
+            ],
+            activation_boundary=boundary,
+        )
+
+
+def test_resolution_cannot_precede_parent_capture():
+    boundary = datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc)
+    with pytest.raises(ValueError, match="resolved_at must not precede captured_at"):
+        build_side_stratified_partition(
+            [
+                _event(
+                    "time-reversed",
+                    "long",
+                    boundary + timedelta(minutes=5),
+                    captured_at=boundary + timedelta(minutes=6),
+                )
+            ],
             activation_boundary=boundary,
         )
 
